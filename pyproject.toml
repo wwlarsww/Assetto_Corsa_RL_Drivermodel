@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "assetto-corsa-rl-driver"
+version = "0.1.0"
+description = "Research scaffold for a reinforcement-learning race driver in the original Assetto Corsa."
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Lars Kilian" },
+]
+keywords = [
+  "assetto-corsa",
+  "autonomous-racing",
+  "gymnasium",
+  "reinforcement-learning",
+  "research-software",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "gymnasium>=1.0,<2",
+  "numpy>=2.0,<2.4",
+  "torch>=2.6,<3",
+]
+
+[project.optional-dependencies]
+data = [
+  "huggingface-hub>=1.25,<2",
+]
+live = [
+  "vgamepad>=0.1,<0.2; platform_system == 'Windows'",
+]
+dev = [
+  "mypy>=1.15,<2",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+]
+
+[project.scripts]
+ac-rl-driver = "assetto_corsa_rl.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/assetto_corsa_rl"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers -ra"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["assetto_corsa_rl"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "B",
+  "C4",
+  "DTZ",
+  "E",
+  "F",
+  "I",
+  "N",
+  "PERF",
+  "PIE",
+  "PL",
+  "PT",
+  "RUF",
+  "SIM",
+  "T20",
+  "UP",
+  "W",
+]
+ignore = [
+  "PLR2004",
+  "PLR0913",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PLR2004"]
+"assetto_corsa_app/**/*.py" = ["N802", "PLW0603", "SIM105", "SIM115"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true

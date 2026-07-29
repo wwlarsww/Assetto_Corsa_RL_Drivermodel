@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused architecture or research improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Which concrete workflow or research question is blocked?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful change and affected interfaces.
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline compatibility
+      description: Explain whether this changes observations, rewards or training behaviour.
+    validations:
+      required: true

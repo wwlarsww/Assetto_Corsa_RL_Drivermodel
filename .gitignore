@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Virtual environments and local tooling
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Runtime artefacts
+runs/
+checkpoints/
+*.log
+
+# Downloaded datasets stay local. Only provenance documentation/manifests are tracked.
+data/*
+!data/README.md
+!data/manifests/
+data/manifests/*
+!data/manifests/*.json
+
+# Local research material (not part of the public repository)
+Masterarbeit*.pdf
+
+# OS files
+.DS_Store
+Thumbs.db
