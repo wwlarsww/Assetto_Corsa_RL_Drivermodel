@@ -8,4 +8,4 @@ pytest==9.1.1
 pytest-cov==7.1.0
 ruff==0.16.0
 torch==2.13.0
-vgamepad==0.1.0
+vgamepad @ git+https://github.com/yannbouteiller/vgamepad.git@3f910aa8bbde49a576683db74ad5e4a0879f8a80

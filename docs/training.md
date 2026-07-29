@@ -57,13 +57,26 @@ controller. Install its optional package only when you are ready to approve
 the signed ViGEmBus Windows driver installer:
 
 ```powershell
+$env:VGAMEPAD_SKIP_VIGEMBUS_INSTALL = "true"
 .\.venv\Scripts\python.exe -m pip install `
   -c requirements\tested.txt `
   -e ".[live]"
 ```
 
+The Python package is pinned to the tested official source revision because
+the older PyPI source distribution starts its MSI during package-metadata
+generation. Install the bundled x64 driver once from an interactive
+PowerShell:
+
+```powershell
+$msi = Resolve-Path `
+  ".venv\Lib\site-packages\vgamepad\win\vigem\install\x64\ViGEmBusSetup_x64.msi"
+Start-Process msiexec.exe -Verb RunAs -Wait `
+  -ArgumentList "/i", "`"$($msi.Path)`""
+```
+
 The optional dependency and driver behaviour follow the
-[vgamepad package documentation](https://pypi.org/project/vgamepad/).
+[official vgamepad documentation](https://github.com/yannbouteiller/vgamepad).
 
 Then configure Assetto Corsa for the generated X360 controller and verify
 steering, throttle and brake signs at low speed. Keyboard input is not accepted

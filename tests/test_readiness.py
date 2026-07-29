@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import json
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from assetto_corsa_rl.config import AssettoCorsaRuntimeConfig, PPOConfig, ProjectConfig
 from assetto_corsa_rl.training.readiness import assess_training_readiness
@@ -70,3 +74,27 @@ def test_live_readiness_reports_predictor_and_control_blockers(
     assert "predictor_quality" in errors
     assert "analog_input_method" in errors
     assert "live_environment_backend" in errors
+
+
+def test_live_readiness_distinguishes_package_from_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProjectConfig()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    missing_package = assess_training_readiness(config, backend="assetto-corsa")
+    package_check = next(
+        check for check in missing_package.checks if check.name == "vgamepad_python_package"
+    )
+    assert package_check.severity == "error"
+    assert all(check.name != "vigembus_driver" for check in missing_package.checks)
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+
+    def missing_driver(_name: str) -> None:
+        raise RuntimeError("VIGEM_ERROR_BUS_NOT_FOUND")
+
+    monkeypatch.setattr(importlib, "import_module", missing_driver)
+    missing_bus = assess_training_readiness(config, backend="assetto-corsa")
+    driver_check = next(check for check in missing_bus.checks if check.name == "vigembus_driver")
+    assert driver_check.severity == "error"
+    assert "BUS_NOT_FOUND" in driver_check.message

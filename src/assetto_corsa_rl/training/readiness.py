@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import configparser
+import importlib
 import importlib.util
 import json
 from dataclasses import dataclass
@@ -207,4 +208,23 @@ def _control_checks(config: ProjectConfig) -> list[ReadinessCheck]:
             ),
         )
     )
+    if package_available:
+        try:
+            importlib.import_module("vgamepad")
+        except Exception as error:
+            checks.append(
+                ReadinessCheck(
+                    "vigembus_driver",
+                    "error",
+                    f"vgamepad cannot connect to ViGEmBus: {error}",
+                )
+            )
+        else:
+            checks.append(
+                ReadinessCheck(
+                    "vigembus_driver",
+                    "ok",
+                    "vgamepad connected to the system ViGEmBus driver",
+                )
+            )
     return checks

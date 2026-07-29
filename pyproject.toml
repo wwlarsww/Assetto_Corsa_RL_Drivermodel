@@ -42,7 +42,7 @@ data = [
   "huggingface-hub>=1.25,<2",
 ]
 live = [
-  "vgamepad>=0.1,<0.2; platform_system == 'Windows'",
+  "vgamepad @ git+https://github.com/yannbouteiller/vgamepad.git@3f910aa8bbde49a576683db74ad5e4a0879f8a80 ; platform_system == 'Windows'",
 ]
 dev = [
   "mypy>=1.15,<2",
@@ -56,6 +56,9 @@ ac-rl-driver = "assetto_corsa_rl.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/assetto_corsa_rl"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -ra"
