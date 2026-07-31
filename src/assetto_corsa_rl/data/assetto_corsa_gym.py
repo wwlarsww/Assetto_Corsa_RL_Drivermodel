@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.parse
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -92,7 +93,11 @@ def _download_source_track_files(destination: Path) -> list[Path]:
             "https://raw.githubusercontent.com/dasGringuen/assetto_corsa_gym/"
             f"{SOURCE_REVISION}/{source_prefix}/{name}"
         )
-        with urllib.request.urlopen(url, timeout=60) as response:
+        parsed_url = urllib.parse.urlsplit(url)
+        if parsed_url.scheme != "https" or parsed_url.hostname != "raw.githubusercontent.com":
+            raise RuntimeError(f"refusing unexpected source URL: {url}")
+        # The scheme and host are restricted above; the path uses a pinned commit.
+        with urllib.request.urlopen(url, timeout=60) as response:  # noqa: S310
             _write_atomic(local_path, response.read())
         local_paths.append(local_path)
     return local_paths

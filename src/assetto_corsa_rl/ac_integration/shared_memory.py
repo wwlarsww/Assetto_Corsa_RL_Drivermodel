@@ -32,6 +32,30 @@ class AssettoCorsaTelemetryUnavailableError(RuntimeError):
     """Raised when Assetto Corsa has not published readable telemetry pages."""
 
 
+def _kernel32_library() -> Any:
+    """Load the Win32 API without assuming its ctypes symbols exist on Linux."""
+
+    win_dll: Any = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        raise AssettoCorsaTelemetryUnavailableError(
+            "Assetto Corsa shared memory is available only on Windows"
+        )
+    return win_dll("kernel32", use_last_error=True)
+
+
+def _last_windows_error() -> int:
+    """Return the calling thread's Win32 error or zero on a non-Windows host."""
+
+    get_last_error: Any = getattr(ctypes, "get_last_error", None)
+    return int(get_last_error()) if get_last_error is not None else 0
+
+
+def _running_on_windows() -> bool:
+    """Keep the runtime platform check testable on every CI host."""
+
+    return sys.platform == "win32"
+
+
 class _ReadableMapping(Protocol):
     def read(self) -> bytes:
         """Copy the complete current page."""
@@ -215,7 +239,7 @@ class _WindowsNamedMapping:
     """
 
     def __init__(self, name: str, size: int) -> None:
-        kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _kernel32_library()
         kernel32.OpenFileMappingW.argtypes = [
             ctypes.c_uint32,
             ctypes.c_int,
@@ -244,7 +268,7 @@ class _WindowsNamedMapping:
                 opened_name = candidate
                 break
         if handle is None:
-            error = ctypes.get_last_error()
+            error = _last_windows_error()
             raise AssettoCorsaTelemetryUnavailableError(
                 f"shared-memory page {name!r} is unavailable (Windows error {error}); "
                 "start an on-track Assetto Corsa session"
@@ -252,7 +276,7 @@ class _WindowsNamedMapping:
 
         view = kernel32.MapViewOfFile(handle, _FILE_MAP_READ, 0, 0, size)
         if not view:
-            error = ctypes.get_last_error()
+            error = _last_windows_error()
             kernel32.CloseHandle(handle)
             raise AssettoCorsaTelemetryUnavailableError(
                 f"shared-memory page {opened_name!r} cannot be mapped (Windows error {error})"
@@ -303,7 +327,7 @@ class AssettoCorsaSharedMemoryReader:
     def connect(cls) -> Self:
         """Open existing Windows mappings without creating fake zero pages."""
 
-        if sys.platform != "win32":
+        if not _running_on_windows():
             raise AssettoCorsaTelemetryUnavailableError(
                 "Assetto Corsa shared memory is available only on Windows"
             )

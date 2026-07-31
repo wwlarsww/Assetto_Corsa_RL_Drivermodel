@@ -136,7 +136,12 @@ def test_windows_mapping_opens_existing_page_and_never_creates_one(
     shared_ctypes: Any = vars(shared_memory)["ctypes"]
     buffer = ctypes.create_string_buffer(b"test")
     kernel = _FakeKernel(ctypes.addressof(buffer))
-    monkeypatch.setattr(shared_ctypes, "WinDLL", lambda *_args, **_kwargs: kernel)
+    monkeypatch.setattr(
+        shared_ctypes,
+        "WinDLL",
+        lambda *_args, **_kwargs: kernel,
+        raising=False,
+    )
     mapping = _WindowsNamedMapping("page", 4)
     assert mapping.read() == b"test"
     mapping.close()
@@ -151,8 +156,9 @@ def test_windows_mapping_opens_existing_page_and_never_creates_one(
         shared_ctypes,
         "WinDLL",
         lambda *_args, **_kwargs: unavailable,
+        raising=False,
     )
-    monkeypatch.setattr(shared_ctypes, "get_last_error", lambda: 2)
+    monkeypatch.setattr(shared_ctypes, "get_last_error", lambda: 2, raising=False)
     with pytest.raises(AssettoCorsaTelemetryUnavailableError, match="unavailable"):
         _WindowsNamedMapping("missing", 4)
 

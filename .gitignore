@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 build/
 dist/
+site/
 
 # Virtual environments and local tooling
 .venv/

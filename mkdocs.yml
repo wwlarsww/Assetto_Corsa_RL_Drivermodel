@@ -1,0 +1,28 @@
+site_name: Assetto Corsa RL Driver
+site_description: Reproducible research software for an autonomous Assetto Corsa driver
+site_url: https://wwlarsww.github.io/Assetto_Corsa_RL_Drivermodel/
+repo_url: https://github.com/wwlarsww/Assetto_Corsa_RL_Drivermodel
+repo_name: wwlarsww/Assetto_Corsa_RL_Drivermodel
+
+theme:
+  name: mkdocs
+  language: en
+
+nav:
+  - Home: index.md
+  - Methodology: methodology.md
+  - Feature reference: feature-reference.md
+  - Architecture: architecture.md
+  - Data pipeline: data-pipeline.md
+  - Training: training.md
+  - Assetto Corsa integration: assetto-corsa-integration.md
+  - Reproducibility: reproducibility.md
+  - Continuous integration: continuous-integration.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+
+strict: true

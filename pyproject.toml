@@ -44,6 +44,9 @@ data = [
 live = [
   "vgamepad @ git+https://github.com/yannbouteiller/vgamepad.git@3f910aa8bbde49a576683db74ad5e4a0879f8a80 ; platform_system == 'Windows'",
 ]
+docs = [
+  "mkdocs>=1.6,<2",
+]
 dev = [
   "mypy>=1.15,<2",
   "pytest>=8.3,<10",
@@ -92,6 +95,7 @@ select = [
   "PL",
   "PT",
   "RUF",
+  "S",
   "SIM",
   "T20",
   "UP",
@@ -103,7 +107,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["PLR2004"]
+"tests/**/*.py" = ["PLR2004", "S101"]
 "assetto_corsa_app/**/*.py" = ["N802", "PLW0603", "SIM105", "SIM115"]
 
 [tool.mypy]

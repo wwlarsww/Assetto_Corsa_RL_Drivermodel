@@ -9,6 +9,11 @@ The repository is intentionally an engineering foundation, not a claim of a
 finished racing agent. It includes a deterministic mock backend so that every
 central component can be developed and tested without launching Assetto Corsa.
 
+GitHub Actions is deliberately limited to code quality, deterministic tests,
+coverage, and documentation publishing. Behavioural-cloning and PPO research
+training always runs locally; see
+[docs/continuous-integration.md](docs/continuous-integration.md).
+
 ## Method at a glance
 
 - four observation groups: vehicle state, track-boundary preview, fixed-line
