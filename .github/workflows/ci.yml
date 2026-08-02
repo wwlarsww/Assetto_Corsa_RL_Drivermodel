@@ -1,0 +1,75 @@
+name: Code quality and tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.14"
+          - os: windows-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install -c requirements/tested.txt -e ".[dev]"
+
+      - name: Run unit, integration, and mock-simulation tests
+        run: python -m pytest --cov --cov-report=term-missing
+
+  quality:
+    name: Lint, format, types, and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install quality dependencies
+        run: python -m pip install -c requirements/tested.txt -e ".[data,dev]"
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Check formatting
+        run: python -m ruff format --check .
+
+      - name: Type-check
+        run: python -m mypy
+
+      - name: Check Pylance/Pyright strict diagnostics
+        run: python -m pyright --pythonpath "$(python -c 'import sys; print(sys.executable)')"
+
+      - name: Run security-oriented static analysis
+        run: python -m ruff check --select S src assetto_corsa_app

@@ -1,0 +1,15 @@
+# Direct dependency versions used for the latest verified baseline.
+# Install with: python -m pip install -c requirements/tested.txt -e ".[dev]"
+gymnasium==1.3.0
+huggingface-hub==1.25.1
+matplotlib==3.11.1
+mkdocs==1.6.1
+mypy==1.20.2
+numpy==2.3.5
+pytest==9.1.1
+pytest-cov==7.1.0
+pyright==1.1.411
+ruff==0.16.0
+torch==2.13.0
+vgamepad @ git+https://github.com/yannbouteiller/vgamepad.git@3f910aa8bbde49a576683db74ad5e4a0879f8a80
+aim==3.3.0

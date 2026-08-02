@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software in research, please cite the repository and the related thesis."
+title: "assetto-corsa-rl-driver"
+type: software
+authors:
+  - family-names: "Kilian"
+    given-names: "Lars"
+version: 0.1.0
+date-released: 2026-07-29
+license: MIT
+preferred-citation:
+  type: thesis
+  title: "Application of Reinforcement-Learning-Based Race Driver Models to Race Car Setup Investigations"
+  authors:
+    - family-names: "Kilian"
+      given-names: "Lars"
+  year: 2026

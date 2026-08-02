@@ -1,0 +1,263 @@
+{
+  "dataset": {
+    "license": "CC-BY-4.0",
+    "repository": "dasgringuen/assettoCorsaGym",
+    "revision": "ad1df12c49cce10f159ba31967744750bb9edd8b"
+  },
+  "file_count": 38,
+  "files": [
+    {
+      "origin": "huggingface_dataset",
+      "path": "AssettoCorsaConfigs/tracks/monza_1.0m.pkl",
+      "sha256": "058a07b205c7932385ef8315b8395f676a45cd399defb43ea379002726741ac4",
+      "size": 2769661
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240229_HC/laps/laps_info.csv",
+      "sha256": "9e19f4de8e9232c9989e94c541ba3e501fbf74d35ad2a686c5aa89c9ee1bec0b",
+      "size": 189
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240229_HC/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ld",
+      "sha256": "fc6702405e3f1a2f3046fd1178fb7ecb5e70e5a88d263a66ede454e9451146f9",
+      "size": 13911806
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240229_HC/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ldx",
+      "sha256": "f8a43aa046b54763aea10191e02eacf200f9aa55deacdb89f75f79379b6fec0b",
+      "size": 762
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240313_OP/laps/laps_info.csv",
+      "sha256": "deef3305349e93d5d8596b477fe21aa839317858f16ba9526c25e129e22be631",
+      "size": 501
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240313_OP/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_1.ld",
+      "sha256": "5b56180aa3807ea132f97d66a3b4c0e4ce2227d303905231bdfb8464ab232851",
+      "size": 22099856
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240313_OP/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_1.ldx",
+      "sha256": "bc889058e359188f813b2fa3e1866d7de1bf7070c71012816bc5eb03ac015b3c",
+      "size": 1450
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240325_WL/laps/monza_&_bmw_z4_gt3_&_WL_&_stint_1.ld",
+      "sha256": "7465f857be3bbb2ae1fe2476fffaba06225d676055bc808275e9f9fa8244f180",
+      "size": 9988302
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240325_WL/laps/monza_&_bmw_z4_gt3_&_WL_&_stint_1.ldx",
+      "sha256": "fd4341bfcef6fafa41d4992a4f2c06054a17b01eed20c3591c7d5bbacd9a6c31",
+      "size": 1714
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240329_ST/laps/laps_info.csv",
+      "sha256": "fa9a830f2f2accc170bbce722da18e21f944568a056995179ededc009c8b5cef",
+      "size": 235
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240329_ST/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_2.ld",
+      "sha256": "fd511fca75c004f31736453fd10e768b2cb58f48a1f82bf53cec763cfc7fafe1",
+      "size": 9218338
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240329_ST/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_2.ldx",
+      "sha256": "07a79ad7ebb3a7f35edd7e4a3886f1564269ea8601554d38e790dbc8a0e43510",
+      "size": 859
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240410_A_21_231/laps/laps_info.csv",
+      "sha256": "b1b5f3b01d037c8827f7f0ed368686a7c38a20b3fd22d5f8197df2217cc7148d",
+      "size": 599
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240410_A_21_231/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_2.ld",
+      "sha256": "a3d2df43a323dd90b5ca66f68e9067c1267dc9492a6f0032628add4992eda061",
+      "size": 13800266
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240410_A_21_231/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_2.ldx",
+      "sha256": "4ec34519e0f597f5334f961f497ddb4c20edf18a29e15e3a81f0e0fc3140d136",
+      "size": 1142
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240410_A_21_231/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_3.ld",
+      "sha256": "712b27f2733c6f2e6ce076f9bf4cef6df4582ca87ed73cc7b1a038395dcb5314",
+      "size": 23342006
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240410_A_21_231/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_3.ldx",
+      "sha256": "1e121de4b13b99b8b009a99951a5c2c12271f20e9d81738b7d294288eeb747a9",
+      "size": 1655
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240411_A_12_312/laps/laps_info.csv",
+      "sha256": "8c21aba64d52cafb2b7ba3445adb3b85c0934dc7dae04f192c59d1b4a0e23b8b",
+      "size": 599
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240411_A_12_312/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_4.ld",
+      "sha256": "da84f525316995c16c37fda780fc37e7f43412b2b2e9c052222e1c397b04e0d1",
+      "size": 13864486
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240411_A_12_312/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_4.ldx",
+      "sha256": "f883d526a6bc5788f7491341919a23fea98c37604d7f6f3f740ce66e196205da",
+      "size": 1142
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240411_A_12_312/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_5.ld",
+      "sha256": "21dd1e23b6f382cd7442b100fcc16ba69d6c7be050982b1cf8eaf4e466f609db",
+      "size": 23296376
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240411_A_12_312/laps/monza_&_bmw_z4_gt3_&_KC Sim Racer_&_stint_5.ldx",
+      "sha256": "0babde47884ff675d37ced3c1fe2af88982dddbf0638d6f93782c764675b17b6",
+      "size": 1655
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240417_HC/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ld",
+      "sha256": "309fc60812a9a2eb249aaaa51409436b9bee15d89f669a06c0c33ed85a6147ea",
+      "size": 10368552
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240417_HC/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ldx",
+      "sha256": "8fb04d025f36991bb1d3a54235852984b24c9a5089f0402a34bdc2b11ceba864",
+      "size": 957
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240423_IN/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ld",
+      "sha256": "67428a49640927655d259cee626036904caca781f22b7dcef62ba87089076326",
+      "size": 11934844
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240423_IN/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ldx",
+      "sha256": "70e307d9ba4d395bd6e8c853fd9c69e7b95ad8498d897749c5818e72140b96a9",
+      "size": 956
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240424_KW/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ld",
+      "sha256": "3249ea9b5cf847a03fd3d847d2929a146986f1c094b65e3ac276ad635b74a894",
+      "size": 9107812
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240424_KW/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ldx",
+      "sha256": "91424bf1fd633828481d6d59ec42fba196c3c4a58974d8703683a4e6d3e23b08",
+      "size": 859
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240425_RRK/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ld",
+      "sha256": "06f975413bd30f1cbe9eaaa152debd90695f5744609c44aa7791cab9978325b4",
+      "size": 11409254
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240425_RRK/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ldx",
+      "sha256": "9a55b5c6d6a5d83223ca10b942bfe80d761fc5c56966efd48412ba8eb40f093d",
+      "size": 956
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240426_AB/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ld",
+      "sha256": "fac701d4f1ca095dd65b82cb1d516f514166ccc98c2850383c78f2c943f59bcb",
+      "size": 12822094
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240426_AB/laps/monza_&_bmw_z4_gt3_&_adrianremonda_&_stint_1.ldx",
+      "sha256": "97722dfcba2233ad6f5cd878782be652b3f9a073bd28e99a20efdb8acebe396a",
+      "size": 1134
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240426_NiM/laps/monza_&_bmw_z4_gt3_&_NiM_&_stint_2.ld",
+      "sha256": "5962a3d8523504ecfd704cd486121438b2ebdfa861539882bb401e4b7fd0c790",
+      "size": 21559056
+    },
+    {
+      "origin": "huggingface_dataset",
+      "path": "data_sets/monza/bmw_z4_gt3/20240426_NiM/laps/monza_&_bmw_z4_gt3_&_NiM_&_stint_2.ldx",
+      "sha256": "bbe1d26f1844b2b79754e223df4331e1feefc2cbfbe56c85f07843ca74da9ec7",
+      "size": 185
+    },
+    {
+      "origin": "github_source",
+      "path": "source/AssettoCorsaConfigs/cars/bmw_z4_gt3/brake_map.csv",
+      "sha256": "9be9ae2a5712bde2bd6e65c0216e2b2c01f3e5ac9693199091f8bbac4637c3b3",
+      "size": 670
+    },
+    {
+      "origin": "github_source",
+      "path": "source/AssettoCorsaConfigs/cars/bmw_z4_gt3/steer_map.csv",
+      "sha256": "81e4398ee590c895e0ca65e2dc7910995e1ff54129187f7bd32b23e84323e593",
+      "size": 69
+    },
+    {
+      "origin": "github_source",
+      "path": "source/AssettoCorsaConfigs/tracks/monza-racing_line.csv",
+      "sha256": "227f21ed4058ac70caae943a764da4bbdc3b0ac885aec43b0c05abf18e36b9b4",
+      "size": 138865
+    },
+    {
+      "origin": "github_source",
+      "path": "source/AssettoCorsaConfigs/tracks/monza.csv",
+      "sha256": "adfbf94c3625c872507b406d02b6e375274901427db77555f7899121a2d1c414",
+      "size": 421525
+    }
+  ],
+  "schema_version": 1,
+  "selection": {
+    "car_id": "bmw_z4_gt3",
+    "excluded": [
+      "SAC",
+      "replay_buffers",
+      "checkpoints",
+      "pickle_telemetry"
+    ],
+    "human_recordings_only": true,
+    "included_suffixes": [
+      ".csv",
+      ".ld",
+      ".ldx"
+    ],
+    "sessions": 12,
+    "track_id": "monza",
+    "variant": "bmw_z4_gt3_monza_v1"
+  },
+  "source_code": {
+    "license": "MIT",
+    "repository": "https://github.com/dasGringuen/assetto_corsa_gym",
+    "revision": "ef0fa502bdd257fc2affad9361c02b3dbdfe1632"
+  },
+  "total_bytes": 210071387
+}
