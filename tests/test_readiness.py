@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 
 from assetto_corsa_rl.config import (
-    AssettoCorsaRuntimeConfig,
     BASELINE_METHOD_VARIANT,
+    STABILIZED_PPO_METHOD_VARIANT,
+    AssettoCorsaRuntimeConfig,
     PPOConfig,
     ProjectConfig,
-    STABILIZED_PPO_METHOD_VARIANT,
 )
 from assetto_corsa_rl.training.readiness import (
     _checkpoint_variant_check,

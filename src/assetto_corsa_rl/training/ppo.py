@@ -1,24 +1,23 @@
-"""Synchronous PPO baseline for the fixed-reference setup.
+"""Synchronous PPO implementation for the configured stabilized PPO variant.
 
-The training flow is intentionally simple so that new readers can follow the
-complete pipeline from rollout collection to policy updates without having to
-understand the earlier reference-specific machinery.
+Each iteration collects one on-policy rollout, computes rewards and GAE targets,
+optimises the clipped PPO objective, and persists the new policy version. The
+simulator remains behind the Gymnasium environment; this module only owns
+learning state and reproducible training artefacts.
 """
 
 from __future__ import annotations
 
-import logging
-from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import numpy.typing as npt
 import torch
+from torch import Tensor
+from torch.distributions import Independent, Normal
 
 from assetto_corsa_rl.config import (
-    ACTION_METHOD_VARIANT,
     BASELINE_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
     ProjectConfig,
@@ -27,13 +26,15 @@ from assetto_corsa_rl.envs.environment import AssettoCorsaEnv
 from assetto_corsa_rl.experiment import ExperimentRecorder
 from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
 from assetto_corsa_rl.models.bezier import decode_bezier_trajectory
-from assetto_corsa_rl.models.driver_network import DriverNetwork, SquashedNormal
-from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
+from assetto_corsa_rl.models.driver_network import DriverNetwork
 from assetto_corsa_rl.rewards.components import PredictedProgressReward
-from assetto_corsa_rl.training.checkpoints import TrainingState, load_checkpoint, save_checkpoint
+from assetto_corsa_rl.training.checkpoints import (
+    TrainingState,
+    load_checkpoint,
+    save_checkpoint,
+)
 from assetto_corsa_rl.training.gae import AdvantageBatch, compute_gae
 from assetto_corsa_rl.training.losses import bezier_trajectory_prediction_loss
-from assetto_corsa_rl.training.monitor import launch_training_monitor
 from assetto_corsa_rl.training.rollout import (
     OnPolicyCollector,
     RolloutBatch,
@@ -41,12 +42,16 @@ from assetto_corsa_rl.training.rollout import (
     TrajectoryFragment,
 )
 from assetto_corsa_rl.training.targets import (
+    FutureTrajectoryTargets,
     build_observed_trajectory_targets,
     build_reference_projection_paths,
 )
-from assetto_corsa_rl.types import FloatArray, TerminationReason
-
-LOGGER = logging.getLogger("assetto_corsa_rl")
+from assetto_corsa_rl.training.tracking import (
+    ExperimentTracker,
+    MetricValue,
+    flatten_parameters,
+)
+from assetto_corsa_rl.types import REFERENCE_TIME_OFFSETS_S, FloatArray
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,57 +63,42 @@ class PPOIterationMetrics:
     environment_steps: int
     rollout_steps: int
     episodes_completed: int
-    crash_terminations: int
-    off_track_terminations: int
-    stalled_terminations: int
-    excessive_body_sideslip_terminations: int
-    lap_completions: int
-    time_limit_truncations: int
-    crash_terminations_delta: int
-    off_track_terminations_delta: int
-    stalled_terminations_delta: int
-    excessive_body_sideslip_terminations_delta: int
-    lap_completions_delta: int
-    time_limit_truncations_delta: int
     environment_reward_mean: float
-    progress_reward_mean: float
+    predicted_progress_mean_m: float
     shaped_reward_mean: float
-    predicted_progress_reward_mean: float
-    predicted_reward_share: float
-    predicted_to_progress_ratio: float
-    pedal_mean: float
-    pedal_std: float
-    pedal_p10: float
-    pedal_p50: float
-    pedal_p90: float
-    throttle_mean: float
-    brake_mean: float
-    throttle_fraction: float
-    brake_fraction: float
-    coast_fraction: float
-    pedal_switches: int
-    pedal_switch_rate: float
-    speed_mean_mps: float
-    speed_min_mps: float
-    speed_max_mps: float
-    tyres_out_mean: float
-    tyres_out_max: int
-    tyres_out_any_fraction: float
     predictor_valid_samples: int
-    predictor_loss: float
     policy_loss: float
     value_loss: float
     entropy: float
+    predictor_loss: float
     approximate_kl: float
     clip_fraction: float
-    kl_target: float
-    kl_lower_bound: float
-    kl_upper_bound: float
-    kl_status: str
-    kl_adjustment: str
-    learning_rate: float
-    update_epochs_completed: int
-    action_sigma_mean: float
+
+
+def _tracking_metrics(
+    metrics: PPOIterationMetrics,
+) -> dict[str, MetricValue]:
+    """Convert one PPO update into consistently named tracking metrics."""
+
+    return {
+        "train/progress/ppo_update": metrics.iteration,
+        "train/progress/policy_version": metrics.policy_version,
+        "train/progress/environment_steps": metrics.environment_steps,
+        "train/progress/rollout_steps": metrics.rollout_steps,
+        "train/progress/episodes_completed": metrics.episodes_completed,
+        "train/reward/environment_mean": metrics.environment_reward_mean,
+        "train/reward/shaped_mean": metrics.shaped_reward_mean,
+        "train/predictor/predicted_progress_mean_m": (
+            metrics.predicted_progress_mean_m
+        ),
+        "train/predictor/valid_samples": metrics.predictor_valid_samples,
+        "train/predictor/loss": metrics.predictor_loss,
+        "train/ppo/policy_loss": metrics.policy_loss,
+        "train/ppo/value_loss": metrics.value_loss,
+        "train/ppo/entropy": metrics.entropy,
+        "train/ppo/approximate_kl": metrics.approximate_kl,
+        "train/ppo/clip_fraction": metrics.clip_fraction,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,101 +111,39 @@ class PPOTrainingResult:
     environment_steps: int
     policy_version: int
     episodes_completed: int
-    termination_counts: dict[str, int]
 
 
 @dataclass(slots=True)
 class _CollectionCursor:
+    """Environment state carried across fixed-size rollout fragments."""
+
     observation: FloatArray
     info: dict[str, Any]
     trajectory_id: int
     episodes_completed: int = 0
-    termination_counts: Counter[str] = field(default_factory=Counter)
 
 
 @dataclass(frozen=True, slots=True)
 class _ProcessedRollout:
+    """Immutable inputs consumed by one PPO optimisation phase."""
+
     batch: RolloutBatch
     rewards: FloatArray
     advantages: AdvantageBatch
-    predicted_rewards: FloatArray
-    predictor_targets: FloatArray | None = None
-    predictor_valid_mask: Any | None = None
+    predictor_targets: FutureTrajectoryTargets
+    predicted_progress_m: FloatArray
 
 
 @dataclass(frozen=True, slots=True)
 class _OptimisationMetrics:
+    """Mean diagnostics over all minibatches in one PPO update."""
+
     policy_loss: float
     value_loss: float
     entropy: float
+    predictor_loss: float
     approximate_kl: float
     clip_fraction: float
-    predictor_loss: float = 0.0
-    update_epochs_completed: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class _RolloutDiagnostics:
-    progress_rewards: FloatArray
-    speed_mps: FloatArray
-    tyres_out: npt.NDArray[np.int64]
-
-
-@dataclass(frozen=True, slots=True)
-class KLBandUpdate:
-    """Result of adapting the optimiser learning rate to the KL target band."""
-
-    status: str
-    adjustment: str
-    learning_rate: float
-
-
-class KLBandController:
-    """Bound PPO learning rate using a deterministic approximate-KL band."""
-
-    def __init__(self, config: ProjectConfig) -> None:
-        self.target = config.ppo.kl_target
-        self.tolerance = config.ppo.kl_tolerance
-        self.minimum_learning_rate = config.ppo.minimum_learning_rate
-        self.maximum_learning_rate = config.ppo.learning_rate
-        self.decrease_factor = config.ppo.kl_learning_rate_decrease_factor
-        self.increase_factor = config.ppo.kl_learning_rate_increase_factor
-
-    @property
-    def lower_bound(self) -> float:
-        """Return the lower acceptable approximate-KL boundary."""
-
-        return self.target - self.tolerance
-
-    @property
-    def upper_bound(self) -> float:
-        """Return the upper acceptable approximate-KL boundary."""
-
-        return self.target + self.tolerance
-
-    def update(
-        self,
-        approximate_kl: float,
-        optimizer: torch.optim.Optimizer,
-    ) -> KLBandUpdate:
-        """Adjust all optimiser parameter groups for the next PPO iteration."""
-
-        current = float(optimizer.param_groups[0]["lr"])
-        if approximate_kl > self.upper_bound:
-            status = "above_band"
-            adjustment = "decrease"
-            updated = max(self.minimum_learning_rate, current * self.decrease_factor)
-        elif approximate_kl < self.lower_bound:
-            status = "below_band"
-            adjustment = "increase"
-            updated = min(self.maximum_learning_rate, current * self.increase_factor)
-        else:
-            status = "in_band"
-            adjustment = "hold"
-            updated = current
-        for parameter_group in optimizer.param_groups:
-            parameter_group["lr"] = updated
-        return KLBandUpdate(status, adjustment, updated)
 
 
 def build_driver_network(config: ProjectConfig) -> DriverNetwork:
@@ -232,213 +160,103 @@ def build_driver_network(config: ProjectConfig) -> DriverNetwork:
     )
 
 
-def train_ppo(  # noqa: PLR0915
+def train_ppo(
     config: ProjectConfig,
     environment: AssettoCorsaEnv,
     *,
     command: list[str],
     backend_name: str,
     device: str | torch.device = "cpu",
-    monitor_ui: bool = False,
-    monitor_backend: str = "aim",
+    tracker: ExperimentTracker | None = None,
+    tracking_run_name: str | None = None,
 ) -> PPOTrainingResult:
-    """Train the fixed-reference PPO baseline end to end.
+    """Train the stabilized PPO variant with synchronous, versioned updates.
 
-    Training alternates between rollout collection and PPO optimisation until
-    the configured environment step budget is exhausted. Each iteration:
-
-    1. collect an on-policy fragment from the environment,
-    2. compute GAE advantages for the fragment,
-    3. apply clipped PPO updates over shuffled minibatches,
-    4. persist a checkpoint and record metrics.
+    A policy version is never changed while its rollout is being collected.
+    Only after post-processing and optimisation is the version incremented and
+    written to the checkpoint.
     """
 
-    if config.ppo.method_variant != STABILIZED_PPO_METHOD_VARIANT:
-        raise ValueError(f"train_ppo only supports {STABILIZED_PPO_METHOD_VARIANT}")
-    if config.reference.mode != "fixed":
-        raise ValueError("the current PPO baseline requires one fixed reference")
-
-    torch.manual_seed(config.experiment.seed)  # pyright: ignore[reportUnknownMemberType]
-    np.random.seed(config.experiment.seed)
-    torch.use_deterministic_algorithms(True)
+    _validate_training_configuration(config)
     target_device = torch.device(device)
-    model = build_driver_network(config).to(target_device)
-    initial_checkpoint = config.ppo.initial_checkpoint_path.strip()
-    if initial_checkpoint:
-        source = Path(initial_checkpoint)
-        if not source.is_file():
-            raise FileNotFoundError(f"initial PPO checkpoint does not exist: {source}")
-        _, checkpoint_configuration = load_checkpoint(
-            source,
-            model=model,
-            map_location=target_device,
-        )
-        _validate_initial_checkpoint(checkpoint_configuration)
-        _apply_post_bc_exploration(model, config, checkpoint_configuration)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.learning_rate)
+    model, optimizer, initial_checkpoint = _initialise_training_model(
+        config,
+        target_device,
+    )
     recorder = ExperimentRecorder.create(
-        output_directory=Path(config.experiment.output_directory) / f"ppo-{backend_name}",
+        output_directory=Path(config.experiment.output_directory)
+        / f"ppo-{backend_name}",
         config=config,
         command=command,
     )
     checkpoint_path = recorder.run_directory / "checkpoint.pt"
-    iteration = 0
-    environment_steps = 0
-    policy_version = 0
+    tracking_parameters, resolved_tracking_run_name = _prepare_tracking_run(
+        config=config,
+        recorder=recorder,
+        command=command,
+        backend_name=backend_name,
+        target_device=target_device,
+        initial_checkpoint=initial_checkpoint,
+        tracking_run_name=tracking_run_name,
+    )
     random = np.random.default_rng(config.experiment.seed)
-    kl_controller = KLBandController(config)
     observation, info = environment.reset(seed=config.experiment.seed)
     cursor = _CollectionCursor(
         observation=observation,
         info=info,
         trajectory_id=0,
     )
-    expected_iterations = (
-        config.ppo.total_environment_steps + config.ppo.rollout_steps - 1
-    ) // config.ppo.rollout_steps
-    LOGGER.info(
-        "Starting PPO training: backend=%s, run=%s, target_steps=%s, "
-        "rollout_steps=%s, expected_iterations=%s",
-        backend_name,
-        recorder.run_directory,
-        config.ppo.total_environment_steps,
-        config.ppo.rollout_steps,
-        expected_iterations,
-    )
-    if monitor_ui and monitor_backend != "none":
-        launch_training_monitor(
-            recorder.run_directory,
-            monitor_backend=monitor_backend,
-            start_ui=True,
-        )
+    iteration = 0
+    environment_steps = 0
+    policy_version = 0
+    run_status = "FAILED"
 
     try:
+        _start_tracking_run(
+            tracker,
+            run_name=resolved_tracking_run_name,
+            parameters=tracking_parameters,
+            config=config,
+            backend_name=backend_name,
+        )
+
         while environment_steps < config.ppo.total_environment_steps:
             iteration += 1
-            rollout_step_count = min(
-                config.ppo.rollout_steps,
-                config.ppo.total_environment_steps - environment_steps,
-            )
-            previous_terminations = cursor.termination_counts.copy()
-            batch, cursor, rollout_diagnostics = _collect_rollout(
-                environment,
-                model,
-                cursor,
-                policy_version=policy_version,
-                step_count=rollout_step_count,
-                device=target_device,
-            )
-            processed = _postprocess_rollout(
-                config,
-                batch,
-                model=model,
-                reference=environment.active_reference,
-                device=target_device,
-            )
-            optimisation = _optimise_ppo(
-                config,
-                model,
-                optimizer,
-                processed,
-                random=random,
-                device=target_device,
-            )
-            kl_update = kl_controller.update(optimisation.approximate_kl, optimizer)
-            environment_steps += batch.step_count
-            policy_version += 1
-            termination_delta = cursor.termination_counts - previous_terminations
-            diagnostic_metrics = _rollout_metric_values(
-                batch,
-                rollout_diagnostics,
-                processed.predicted_rewards,
-            )
-            metrics = PPOIterationMetrics(
-                iteration=iteration,
-                policy_version=policy_version,
-                environment_steps=environment_steps,
-                rollout_steps=batch.step_count,
-                episodes_completed=cursor.episodes_completed,
-                crash_terminations=cursor.termination_counts[TerminationReason.CRASH.value],
-                off_track_terminations=cursor.termination_counts[TerminationReason.OFF_TRACK.value],
-                stalled_terminations=cursor.termination_counts[TerminationReason.STALLED.value],
-                excessive_body_sideslip_terminations=cursor.termination_counts[
-                    TerminationReason.EXCESSIVE_BODY_SIDESLIP.value
-                ],
-                lap_completions=cursor.termination_counts[TerminationReason.LAP_COMPLETE.value],
-                time_limit_truncations=cursor.termination_counts["time_limit"],
-                crash_terminations_delta=termination_delta[TerminationReason.CRASH.value],
-                off_track_terminations_delta=termination_delta[TerminationReason.OFF_TRACK.value],
-                stalled_terminations_delta=termination_delta[TerminationReason.STALLED.value],
-                excessive_body_sideslip_terminations_delta=termination_delta[
-                    TerminationReason.EXCESSIVE_BODY_SIDESLIP.value
-                ],
-                lap_completions_delta=termination_delta[TerminationReason.LAP_COMPLETE.value],
-                time_limit_truncations_delta=termination_delta["time_limit"],
-                environment_reward_mean=float(batch.rewards.mean()),
-                shaped_reward_mean=float(processed.rewards.mean()),
-                predictor_valid_samples=(
-                    int(np.count_nonzero(processed.predictor_valid_mask))
-                    if processed.predictor_valid_mask is not None
-                    else 0
-                ),
-                kl_target=kl_controller.target,
-                kl_lower_bound=kl_controller.lower_bound,
-                kl_upper_bound=kl_controller.upper_bound,
-                kl_status=kl_update.status,
-                kl_adjustment=kl_update.adjustment,
-                learning_rate=kl_update.learning_rate,
-                action_sigma_mean=float(model.action_log_std.detach().exp().mean().cpu()),
-                **diagnostic_metrics,
-                **asdict(optimisation),
-            )
-            recorder.record_step(asdict(metrics))
-            LOGGER.info(
-                "Iteration %s/%s | steps=%s | env_reward=%.4f | shaped_reward=%.4f | "
-                "policy_loss=%.6f | value_loss=%.6f | entropy=%.6f | kl=%.6f | clip=%.4f | "
-                "predictor_loss=%.6f | lr=%.2e | kl_status=%s | episodes=%s | "
-                "ends=crash:%s/off_track:%s/body_sideslip:%s/stalled:%s/lap:%s/time:%s",
-                iteration,
-                expected_iterations,
-                environment_steps,
-                metrics.environment_reward_mean,
-                metrics.shaped_reward_mean,
-                metrics.policy_loss,
-                metrics.value_loss,
-                metrics.entropy,
-                metrics.approximate_kl,
-                metrics.clip_fraction,
-                metrics.predictor_loss,
-                metrics.learning_rate,
-                metrics.kl_status,
-                metrics.episodes_completed,
-                metrics.crash_terminations,
-                metrics.off_track_terminations,
-                metrics.excessive_body_sideslip_terminations,
-                metrics.stalled_terminations,
-                metrics.lap_completions,
-                metrics.time_limit_truncations,
-            )
-            save_checkpoint(
-                checkpoint_path,
+            metrics, cursor = _run_training_update(
+                config=config,
+                environment=environment,
                 model=model,
                 optimizer=optimizer,
-                training_state=TrainingState(
-                    iteration=iteration,
-                    environment_steps=environment_steps,
-                    policy_version=policy_version,
-                ),
-                configuration={
-                    "method_variant": config.ppo.method_variant,
-                    "action_method_variant": config.actions.method_variant,
-                    "project": config.to_dict(),
-                    "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
-                    "initial_checkpoint": initial_checkpoint or None,
-                    "backend": backend_name,
-                },
+                cursor=cursor,
+                random=random,
+                device=target_device,
+                iteration=iteration,
+                environment_steps=environment_steps,
+                policy_version=policy_version,
             )
+            environment_steps = metrics.environment_steps
+            policy_version = metrics.policy_version
+            recorder.record_step(asdict(metrics))
+            _log_training_metrics(tracker, metrics)
+            _save_training_checkpoint(
+                checkpoint_path=checkpoint_path,
+                model=model,
+                optimizer=optimizer,
+                config=config,
+                metrics=metrics,
+                initial_checkpoint=initial_checkpoint,
+                backend_name=backend_name,
+            )
+
+        run_status = "FINISHED"
+
+    except KeyboardInterrupt:
+        run_status = "KILLED"
+        raise
+
     finally:
         recorder.close()
+        _end_tracking_run(tracker, status=run_status)
 
     result = PPOTrainingResult(
         run_directory=recorder.run_directory,
@@ -447,23 +265,258 @@ def train_ppo(  # noqa: PLR0915
         environment_steps=environment_steps,
         policy_version=policy_version,
         episodes_completed=cursor.episodes_completed,
-        termination_counts=dict(cursor.termination_counts),
     )
+    _write_training_summary(
+        recorder=recorder,
+        result=result,
+        config=config,
+        backend_name=backend_name,
+    )
+    return result
+
+
+def _validate_training_configuration(config: ProjectConfig) -> None:
+    """Reject configurations that do not match the stabilized PPO contract."""
+
+    if config.ppo.method_variant != STABILIZED_PPO_METHOD_VARIANT:
+        raise ValueError(
+            "train_ppo only supports " f"{STABILIZED_PPO_METHOD_VARIANT!r}"
+        )
+    if config.reference.mode != "fixed":
+        raise ValueError(
+            f"{STABILIZED_PPO_METHOD_VARIANT!r} requires reference.mode='fixed'"
+        )
+
+
+def _initialise_training_model(
+    config: ProjectConfig,
+    device: torch.device,
+) -> tuple[DriverNetwork, torch.optim.Optimizer, str]:
+    """Create the model and optimizer and apply an optional warm start."""
+
+    torch.manual_seed(
+        config.experiment.seed
+    )  # pyright: ignore[reportUnknownMemberType]
+    np.random.seed(config.experiment.seed)
+    torch.use_deterministic_algorithms(True)
+    model = build_driver_network(config).to(device)
+    initial_checkpoint = config.ppo.initial_checkpoint_path.strip()
+
+    if initial_checkpoint:
+        source = Path(initial_checkpoint)
+        if not source.is_file():
+            raise FileNotFoundError(f"initial PPO checkpoint does not exist: {source}")
+        _, checkpoint_configuration = load_checkpoint(
+            source,
+            model=model,
+            map_location=device,
+        )
+        _validate_initial_checkpoint(checkpoint_configuration)
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config.ppo.learning_rate,
+    )
+    return model, optimizer, initial_checkpoint
+
+
+def _prepare_tracking_run(
+    *,
+    config: ProjectConfig,
+    recorder: ExperimentRecorder,
+    command: list[str],
+    backend_name: str,
+    target_device: torch.device,
+    initial_checkpoint: str,
+    tracking_run_name: str | None,
+) -> tuple[dict[str, Any], str]:
+    """Build the immutable parameters and resolved name for one tracking run."""
+
+    parameters = flatten_parameters(
+        {
+            **config.to_dict(),
+            "runtime": {
+                "backend": backend_name,
+                "device": str(target_device),
+                "command": command,
+                "initial_checkpoint": initial_checkpoint or None,
+            },
+        }
+    )
+    run_name = (
+        tracking_run_name.strip()
+        if tracking_run_name and tracking_run_name.strip()
+        else recorder.run_directory.name
+    )
+    return parameters, run_name
+
+
+def _start_tracking_run(
+    tracker: ExperimentTracker | None,
+    *,
+    run_name: str,
+    parameters: dict[str, Any],
+    config: ProjectConfig,
+    backend_name: str,
+) -> None:
+    """Start the optional experiment tracking run."""
+
+    if tracker is None:
+        return
+
+    tracker.start_run(
+        run_name=run_name,
+        parameters=parameters,
+        tags={
+            "run_type": "training",
+            "algorithm": "PPO",
+            "method_variant": config.ppo.method_variant,
+            "backend": backend_name,
+        },
+    )
+
+
+def _run_training_update(
+    *,
+    config: ProjectConfig,
+    environment: AssettoCorsaEnv,
+    model: DriverNetwork,
+    optimizer: torch.optim.Optimizer,
+    cursor: _CollectionCursor,
+    random: np.random.Generator,
+    device: torch.device,
+    iteration: int,
+    environment_steps: int,
+    policy_version: int,
+) -> tuple[PPOIterationMetrics, _CollectionCursor]:
+    """Collect, post-process and optimise one complete PPO update."""
+
+    rollout_step_count = min(
+        config.ppo.rollout_steps,
+        config.ppo.total_environment_steps - environment_steps,
+    )
+    batch, next_cursor = _collect_rollout(
+        environment,
+        model,
+        cursor,
+        policy_version=policy_version,
+        step_count=rollout_step_count,
+        device=device,
+    )
+    processed = _postprocess_rollout(
+        config,
+        environment,
+        model,
+        batch,
+        device,
+    )
+    optimisation = _optimise_ppo(
+        config,
+        model,
+        optimizer,
+        processed,
+        random=random,
+        device=device,
+    )
+    next_environment_steps = environment_steps + batch.step_count
+    next_policy_version = policy_version + 1
+    metrics = PPOIterationMetrics(
+        iteration=iteration,
+        policy_version=next_policy_version,
+        environment_steps=next_environment_steps,
+        rollout_steps=batch.step_count,
+        episodes_completed=next_cursor.episodes_completed,
+        environment_reward_mean=float(batch.rewards.mean()),
+        predicted_progress_mean_m=float(processed.predicted_progress_m.mean()),
+        shaped_reward_mean=float(processed.rewards.mean()),
+        predictor_valid_samples=int(
+            np.count_nonzero(processed.predictor_targets.valid_mask)
+        ),
+        **asdict(optimisation),
+    )
+    return metrics, next_cursor
+
+
+def _log_training_metrics(
+    tracker: ExperimentTracker | None,
+    metrics: PPOIterationMetrics,
+) -> None:
+    """Forward one PPO update to the active experiment tracker."""
+
+    if tracker is None or not tracker.active:
+        return
+
+    tracker.log_metrics(
+        _tracking_metrics(metrics),
+        step=metrics.environment_steps,
+    )
+
+
+def _save_training_checkpoint(
+    *,
+    checkpoint_path: Path,
+    model: DriverNetwork,
+    optimizer: torch.optim.Optimizer,
+    config: ProjectConfig,
+    metrics: PPOIterationMetrics,
+    initial_checkpoint: str,
+    backend_name: str,
+) -> None:
+    """Persist the latest training state after one successful PPO update."""
+
+    save_checkpoint(
+        checkpoint_path,
+        model=model,
+        optimizer=optimizer,
+        training_state=TrainingState(
+            iteration=metrics.iteration,
+            environment_steps=metrics.environment_steps,
+            policy_version=metrics.policy_version,
+        ),
+        configuration={
+            "method_variant": config.ppo.method_variant,
+            "project": config.to_dict(),
+            "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
+            "initial_checkpoint": initial_checkpoint or None,
+            "backend": backend_name,
+        },
+    )
+
+
+def _end_tracking_run(
+    tracker: ExperimentTracker | None,
+    *,
+    status: str,
+) -> None:
+    """Finish the optional tracking run if it was started successfully."""
+
+    if tracker is not None and tracker.active:
+        tracker.end_run(status=status)
+
+
+def _write_training_summary(
+    *,
+    recorder: ExperimentRecorder,
+    result: PPOTrainingResult,
+    config: ProjectConfig,
+    backend_name: str,
+) -> None:
+    """Write the local summary for a completed PPO invocation."""
+
     recorder.write_summary(
         {
             "method_variant": config.ppo.method_variant,
-            "action_method_variant": config.actions.method_variant,
             "backend": backend_name,
             "iterations": result.iterations,
             "environment_steps": result.environment_steps,
             "policy_version": result.policy_version,
             "episodes_completed": result.episodes_completed,
-            "termination_counts": result.termination_counts,
-            "predicted_progress_reward_enabled": config.ppo.use_predicted_progress_reward,
-            "checkpoint": checkpoint_path.name,
+            "predicted_progress_reward_enabled": (
+                config.ppo.use_predicted_progress_reward
+            ),
+            "checkpoint": result.checkpoint_path.name,
         }
     )
-    return result
 
 
 def _collect_rollout(  # noqa: PLR0915
@@ -474,13 +527,13 @@ def _collect_rollout(  # noqa: PLR0915
     policy_version: int,
     step_count: int,
     device: torch.device,
-) -> tuple[RolloutBatch, _CollectionCursor, _RolloutDiagnostics]:
-    """Collect one on-policy rollout fragment from the environment.
+) -> tuple[RolloutBatch, _CollectionCursor]:
+    """Collect exactly one fragment with a single frozen policy version.
 
-    The fragment may span multiple episodes, and the cursor preserves the last
-    observation and episode state across iterations. The returned batch is
-    ready for advantage estimation and PPO optimisation.
+    Log probabilities and value estimates are stored at sampling time because
+    PPO compares the updated policy against these fixed rollout-time values.
     """
+
     observations: list[FloatArray] = []
     actions: list[FloatArray] = []
     rewards: list[float] = []
@@ -494,17 +547,14 @@ def _collect_rollout(  # noqa: PLR0915
     simulation_times: list[float] = []
     trajectory_ids: list[int] = []
     reference_progress: list[float] = []
-    progress_rewards: list[float] = []
-    speed_mps: list[float] = []
-    tyres_out: list[int] = []
     observation = cursor.observation
     info = cursor.info
     trajectory_id = cursor.trajectory_id
     episodes_completed = cursor.episodes_completed
-    termination_counts = cursor.termination_counts.copy()
     model.eval()
 
     for _ in range(step_count):
+        # Context is recorded with the transition for later reward/target processing.
         observations.append(observation.copy())
         positions.append(np.asarray(info["position_xy_m"], dtype=np.float32))
         headings.append(float(info["vehicle_heading_rad"]))
@@ -515,14 +565,22 @@ def _collect_rollout(  # noqa: PLR0915
 
         observation_tensor = torch.as_tensor(observation, device=device).unsqueeze(0)
         with torch.no_grad():
+            # The policy predicts action-delta distribution parameters.
             output = model(observation_tensor)
-            distribution = SquashedNormal(output.action_location, output.action_log_std)
+            distribution: Independent[Normal] = Independent(
+                Normal(output.action_mean, output.action_log_std.exp()),
+                1,
+            )
             action_tensor = distribution.sample()
-            log_probability = distribution.log_prob(action_tensor)
+            log_probability = distribution.log_prob(  # type: ignore[no-untyped-call]
+                action_tensor
+            )
         action = np.asarray(action_tensor.squeeze(0).cpu(), dtype=np.float32)
         # step() applies the action and returns the next feature vector computed
         # by AssettoCorsaEnv from the latest simulator telemetry.
-        next_observation, reward, is_terminated, is_truncated, next_info = environment.step(action)
+        next_observation, reward, is_terminated, is_truncated, next_info = (
+            environment.step(action)
+        )
         with torch.no_grad():
             # Bootstrap from the actual successor before a possible episode reset.
             next_value = model(
@@ -536,18 +594,10 @@ def _collect_rollout(  # noqa: PLR0915
         log_probabilities.append(float(log_probability.item()))
         values.append(float(output.value.item()))
         next_values.append(float(next_value))
-        progress_rewards.append(float(next_info["reward_terms"]["reward_progress"]))
-        speed_mps.append(float(next_info["telemetry"]["speed_mps"]))
-        backend_diagnostics = next_info["backend"]
-        tyres_out.append(int(backend_diagnostics.get("number_of_tyres_out", 0)))
 
         if is_terminated or is_truncated:
             # A new trajectory id prevents future processing across episode boundaries.
             episodes_completed += 1
-            reason = next_info["termination_reason"] if is_terminated else "time_limit"
-            if not isinstance(reason, str):
-                raise RuntimeError("completed episode has no termination reason")
-            termination_counts[reason] += 1
             trajectory_id += 1
             observation, info = environment.reset()
         else:
@@ -577,72 +627,68 @@ def _collect_rollout(  # noqa: PLR0915
     )
     # The collector validates fragment length and rejects stale policy versions.
     collector.add(fragment)
-    return (
-        collector.build(),
-        _CollectionCursor(
-            observation=observation,
-            info=info,
-            trajectory_id=trajectory_id,
-            episodes_completed=episodes_completed,
-            termination_counts=termination_counts,
-        ),
-        _RolloutDiagnostics(
-            progress_rewards=np.asarray(progress_rewards, dtype=np.float32),
-            speed_mps=np.asarray(speed_mps, dtype=np.float32),
-            tyres_out=np.asarray(tyres_out, dtype=np.int64),
-        ),
+    return collector.build(), _CollectionCursor(
+        observation=observation,
+        info=info,
+        trajectory_id=trajectory_id,
+        episodes_completed=episodes_completed,
     )
 
 
 def _postprocess_rollout(
     config: ProjectConfig,
-    batch: RolloutBatch,
-    *,
+    environment: AssettoCorsaEnv,
     model: DriverNetwork,
-    reference: ReferenceTrajectory,
+    batch: RolloutBatch,
     device: torch.device,
 ) -> _ProcessedRollout:
-    """Apply prediction shaping and targets before termination-aware GAE."""
+    """Build predictor targets, shape rewards, and then compute GAE.
 
-    shaped_rewards = batch.rewards.copy()
-    predicted_rewards = np.zeros_like(batch.rewards)
+    Learned reward terms deliberately live at this rollout boundary rather
+    than in simulator dynamics. This ordering guarantees that GAE sees the
+    complete baseline reward while the Gymnasium environment remains purely
+    telemetry- and termination-driven.
+    """
+
+    if batch.context is None:
+        raise ValueError("PPO rollout requires trajectory context")
     context = batch.context
-    if context is None and (
-        config.ppo.use_predicted_progress_reward or config.ppo.predictor_loss_coefficient > 0
-    ):
-        raise ValueError("trajectory context is required for prediction post-processing")
-
+    targets = build_observed_trajectory_targets(
+        positions_xy_m=context.positions_xy_m,
+        heading_rad=context.vehicle_heading_rad,
+        simulation_time_s=context.simulation_time_s,
+        trajectory_id=context.trajectory_id,
+    )
+    predicted_progress = np.zeros(batch.step_count, dtype=np.float32)
+    shaped_rewards = batch.rewards.copy()
     if config.ppo.use_predicted_progress_reward:
-        if context is None:  # pragma: no cover - guarded above for type narrowing
-            raise RuntimeError("trajectory context is unavailable")
-        model.eval()
         with torch.no_grad():
-            output = model(torch.as_tensor(batch.observations, device=device))
-            predicted_trajectory = np.asarray(
-                decode_bezier_trajectory(output.trajectory_parameters).cpu(),
-                dtype=np.float32,
+            prediction = decode_bezier_trajectory(
+                model(
+                    torch.as_tensor(batch.observations, device=device)
+                ).trajectory_parameters,
+                sample_count=REFERENCE_TIME_OFFSETS_S.size,
             )
+        reward_mask = np.ones(batch.step_count, dtype=np.bool_)
         reference_paths = build_reference_projection_paths(
-            reference=reference,
+            reference=environment.active_reference,
             progress_m=context.reference_progress_m,
             positions_xy_m=context.positions_xy_m,
             heading_rad=context.vehicle_heading_rad,
-            valid_mask=np.ones(context.step_count, dtype=np.bool_),
+            valid_mask=reward_mask,
         )
-        prediction_reward = PredictedProgressReward(
-            horizon_discount=config.rewards.prediction_horizon_discount,
-        ).compute(
-            predicted_trajectory,
+        prediction_terms = PredictedProgressReward().compute(
+            np.asarray(prediction.cpu(), dtype=np.float32),
             reference_paths.points_xz_m,
             reference_paths.progress_m,
             reference_paths.valid_mask,
         )
+        predicted_progress = prediction_terms.predicted_progress
         shaped_rewards = PredictedProgressReward.shape_rollout_rewards(
             batch.rewards,
-            prediction_reward,
+            prediction_terms,
             predicted_progress_scale=config.rewards.prediction_progress_scale,
         )
-        predicted_rewards = np.asarray(shaped_rewards - batch.rewards, dtype=np.float32)
     advantages = compute_gae(
         rewards=shaped_rewards,
         values=batch.values,
@@ -652,27 +698,12 @@ def _postprocess_rollout(
         gamma=config.ppo.gamma,
         gae_lambda=config.ppo.gae_lambda,
     )
-    predictor_targets = None
-    predictor_valid_mask = None
-    if config.ppo.predictor_loss_coefficient > 0:
-        if context is None:  # pragma: no cover - guarded above for type narrowing
-            raise RuntimeError("trajectory context is unavailable")
-        observed_targets = build_observed_trajectory_targets(
-            positions_xy_m=context.positions_xy_m,
-            heading_rad=context.vehicle_heading_rad,
-            simulation_time_s=context.simulation_time_s.astype(np.float64),
-            trajectory_id=context.trajectory_id,
-        )
-        predictor_targets = observed_targets.trajectory_xz_m
-        predictor_valid_mask = observed_targets.valid_mask
-
     return _ProcessedRollout(
         batch=batch,
         rewards=shaped_rewards,
         advantages=advantages,
-        predicted_rewards=predicted_rewards,
-        predictor_targets=predictor_targets,
-        predictor_valid_mask=predictor_valid_mask,
+        predictor_targets=targets,
+        predicted_progress_m=predicted_progress,
     )
 
 
@@ -685,31 +716,35 @@ def _optimise_ppo(
     random: np.random.Generator,
     device: torch.device,
 ) -> _OptimisationMetrics:
-    """Perform PPO updates over the collected rollout batch.
+    """Optimise the clipped policy objective and value head on one rollout."""
 
-    The rollout is shuffled and split into minibatches for multiple epochs.
-    The clipped surrogate objective is combined with value regression and
-    entropy regularisation to stabilise policy improvement.
-    """
     batch = rollout.batch
     observation = torch.as_tensor(batch.observations, device=device)
     action = torch.as_tensor(batch.actions, device=device)
     old_log_probability = torch.as_tensor(batch.log_probabilities, device=device)
     returns = torch.as_tensor(rollout.advantages.returns, device=device)
     advantage_values = rollout.advantages.advantages
+    # Normalisation changes optimisation scale, not the underlying return targets.
     normalised_advantage = (advantage_values - advantage_values.mean()) / (
         advantage_values.std() + 1e-8
     )
     advantage = torch.as_tensor(normalised_advantage, device=device)
+    predictor_target = torch.as_tensor(
+        rollout.predictor_targets.trajectory_xz_m,
+        device=device,
+    )
+    predictor_valid = torch.as_tensor(
+        rollout.predictor_targets.valid_mask,
+        device=device,
+    )
     metric_values: dict[str, list[float]] = {
         "policy_loss": [],
         "value_loss": [],
         "entropy": [],
         "predictor_loss": [],
+        "approximate_kl": [],
+        "clip_fraction": [],
     }
-    approximate_kl = 0.0
-    clip_fraction = 0.0
-    update_epochs_completed = 0
     model.train()
     for _ in range(config.ppo.update_epochs):
         permutation = random.permutation(batch.step_count)
@@ -719,11 +754,17 @@ def _optimise_ppo(
                 device=device,
             )
             output = model(observation[indices])
-            distribution = SquashedNormal(output.action_location, output.action_log_std)
-            new_log_probability = distribution.log_prob(action[indices])
+            distribution: Independent[Normal] = Independent(
+                Normal(output.action_mean, output.action_log_std.exp()),
+                1,
+            )
+            new_log_probability = distribution.log_prob(  # type: ignore[no-untyped-call]
+                action[indices]
+            )
             log_ratio = new_log_probability - old_log_probability[indices]
             ratio = log_ratio.exp()
             minibatch_advantage = advantage[indices]
+            # PPO uses the pessimistic of the unclipped and clipped surrogates.
             unclipped = ratio * minibatch_advantage
             clipped = (
                 ratio.clamp(1.0 - config.ppo.clip_range, 1.0 + config.ppo.clip_range)
@@ -731,166 +772,70 @@ def _optimise_ppo(
             )
             policy_loss = -torch.minimum(unclipped, clipped).mean()
             value_loss = torch.nn.functional.mse_loss(output.value, returns[indices])
-            entropy = distribution.entropy().mean()
+            entropy = distribution.entropy().mean()  # type: ignore[no-untyped-call]
+            minibatch_valid = predictor_valid[indices]
+            predictor_loss = _masked_predictor_loss(
+                output.trajectory_parameters,
+                predictor_target[indices],
+                minibatch_valid,
+            )
             total_loss = (
                 policy_loss
                 + config.ppo.value_loss_coefficient * value_loss
                 - config.ppo.entropy_coefficient * entropy
+                + config.ppo.predictor_loss_coefficient * predictor_loss
             )
-            predictor_loss_value = 0.0
-            if rollout.predictor_targets is not None and rollout.predictor_valid_mask is not None:
-                target_batch = torch.as_tensor(
-                    rollout.predictor_targets[indices.cpu().numpy()],
-                    device=device,
-                )
-                valid_mask = torch.as_tensor(
-                    rollout.predictor_valid_mask[indices.cpu().numpy()],
-                    device=device,
-                    dtype=torch.bool,
-                )
-                if valid_mask.any():
-                    predictor_loss = bezier_trajectory_prediction_loss(
-                        output.trajectory_parameters[valid_mask],
-                        target_batch[valid_mask],
-                    )
-                    predictor_loss_value = float(predictor_loss.detach())
-                    total_loss = total_loss + config.ppo.predictor_loss_coefficient * predictor_loss
             optimizer.zero_grad(set_to_none=True)
-            total_loss.backward()  # type: ignore[no-untyped-call]
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.ppo.max_gradient_norm)
+            total_loss.backward()  # pyright: ignore[reportUnknownMemberType]
+            # Bound unusually large updates before advancing the policy version.
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), config.ppo.max_gradient_norm
+            )
             optimizer.step()
 
+            with torch.no_grad():
+                approximate_kl = ((ratio - 1.0) - log_ratio).mean()
+                clip_fraction = (
+                    (torch.abs(ratio - 1.0) > config.ppo.clip_range).float().mean()
+                )
             for name, value in {
                 "policy_loss": policy_loss,
                 "value_loss": value_loss,
                 "entropy": entropy,
+                "predictor_loss": predictor_loss,
+                "approximate_kl": approximate_kl,
+                "clip_fraction": clip_fraction,
             }.items():
                 metric_values[name].append(float(value.detach().item()))
-            metric_values["predictor_loss"].append(predictor_loss_value)
-        update_epochs_completed += 1
-        approximate_kl, clip_fraction = _policy_change_metrics(
-            model,
-            observation,
-            action,
-            old_log_probability,
-            clip_range=config.ppo.clip_range,
-        )
-        if approximate_kl > config.ppo.kl_target + config.ppo.kl_tolerance:
-            break
     return _OptimisationMetrics(
-        policy_loss=float(np.mean(metric_values["policy_loss"])),
-        value_loss=float(np.mean(metric_values["value_loss"])),
-        entropy=float(np.mean(metric_values["entropy"])),
-        approximate_kl=approximate_kl,
-        clip_fraction=clip_fraction,
-        predictor_loss=float(np.mean(metric_values["predictor_loss"])),
-        update_epochs_completed=update_epochs_completed,
+        **{name: float(np.mean(values)) for name, values in metric_values.items()}
     )
 
 
-def _policy_change_metrics(
-    model: DriverNetwork,
-    observation: torch.Tensor,
-    action: torch.Tensor,
-    old_log_probability: torch.Tensor,
-    *,
-    clip_range: float,
-) -> tuple[float, float]:
-    """Measure the complete rollout against the policy that collected it."""
+def _masked_predictor_loss(
+    flat_prediction: Tensor,
+    target_xz_m: Tensor,
+    valid_mask: Tensor,
+) -> Tensor:
+    """Evaluate auxiliary trajectory loss only where a full future exists."""
 
-    with torch.no_grad():
-        output = model(observation)
-        distribution = SquashedNormal(output.action_location, output.action_log_std)
-        log_ratio = distribution.log_prob(action) - old_log_probability
-        ratio = log_ratio.exp()
-        approximate_kl = ((ratio - 1.0) - log_ratio).mean()
-        clip_fraction = (torch.abs(ratio - 1.0) > clip_range).float().mean()
-    return float(approximate_kl), float(clip_fraction)
-
-
-def _rollout_metric_values(
-    batch: RolloutBatch,
-    diagnostics: _RolloutDiagnostics,
-    predicted_rewards: FloatArray,
-) -> dict[str, Any]:
-    """Aggregate flat rollout diagnostics for CSV and Aim monitoring."""
-
-    pedal = batch.actions[:, 0]
-    throttle = np.clip(pedal, 0.0, 1.0)
-    brake = np.clip(-pedal, 0.0, 1.0)
-    pedal_state = np.zeros(pedal.size, dtype=np.int8)
-    pedal_state[pedal > 0.05] = 1
-    pedal_state[pedal < -0.05] = -1
-    same_episode_transition = ~(batch.terminated[:-1] | batch.truncated[:-1])
-    direct_switch = pedal_state[1:] * pedal_state[:-1] == -1
-    switches = int(np.count_nonzero(direct_switch & same_episode_transition))
-    switch_denominator = max(1, int(np.count_nonzero(same_episode_transition)))
-    predicted_magnitude = float(np.abs(predicted_rewards).sum())
-    progress_magnitude = float(np.abs(diagnostics.progress_rewards).sum())
-    total_shaping_magnitude = progress_magnitude + predicted_magnitude
-    return {
-        "progress_reward_mean": float(diagnostics.progress_rewards.mean()),
-        "predicted_progress_reward_mean": float(predicted_rewards.mean()),
-        "predicted_reward_share": (
-            predicted_magnitude / total_shaping_magnitude if total_shaping_magnitude > 0.0 else 0.0
-        ),
-        "predicted_to_progress_ratio": (
-            predicted_magnitude / progress_magnitude if progress_magnitude > 0.0 else 0.0
-        ),
-        "pedal_mean": float(pedal.mean()),
-        "pedal_std": float(pedal.std()),
-        "pedal_p10": float(np.quantile(pedal, 0.1)),
-        "pedal_p50": float(np.quantile(pedal, 0.5)),
-        "pedal_p90": float(np.quantile(pedal, 0.9)),
-        "throttle_mean": float(throttle.mean()),
-        "brake_mean": float(brake.mean()),
-        "throttle_fraction": float(np.mean(pedal_state == 1)),
-        "brake_fraction": float(np.mean(pedal_state == -1)),
-        "coast_fraction": float(np.mean(pedal_state == 0)),
-        "pedal_switches": switches,
-        "pedal_switch_rate": switches / switch_denominator,
-        "speed_mean_mps": float(diagnostics.speed_mps.mean()),
-        "speed_min_mps": float(diagnostics.speed_mps.min()),
-        "speed_max_mps": float(diagnostics.speed_mps.max()),
-        "tyres_out_mean": float(diagnostics.tyres_out.mean()),
-        "tyres_out_max": int(diagnostics.tyres_out.max()),
-        "tyres_out_any_fraction": float(np.mean(diagnostics.tyres_out > 0)),
-    }
+    if bool(valid_mask.any()):
+        return bezier_trajectory_prediction_loss(
+            flat_prediction,
+            target_xz_m,
+            valid_mask,
+        )
+    return flat_prediction.sum() * 0.0
 
 
 def _validate_initial_checkpoint(configuration: dict[str, Any]) -> None:
-    """Verify any provided checkpoint matches the current action/feature schema."""
+    """Reject warm starts with a different method or observation contract."""
 
     method = configuration.get("method_variant")
-    if method not in {BASELINE_METHOD_VARIANT, STABILIZED_PPO_METHOD_VARIANT}:
+    if method != BASELINE_METHOD_VARIANT:
         raise ValueError(
-            f"initial checkpoint is not compatible with {STABILIZED_PPO_METHOD_VARIANT}"
+            "initial checkpoint was not produced by " f"{BASELINE_METHOD_VARIANT!r}"
         )
-    if configuration.get("action_method_variant") != ACTION_METHOD_VARIANT:
-        raise ValueError("initial checkpoint action schema does not match")
     feature_names = configuration.get("observation_feature_names")
     if feature_names != list(OBSERVATION_FEATURE_NAMES):
         raise ValueError("initial checkpoint observation feature schema does not match")
-
-
-def _apply_post_bc_exploration(
-    model: DriverNetwork,
-    config: ProjectConfig,
-    checkpoint_configuration: dict[str, Any],
-) -> bool:
-    """Lower exploration only for checkpoints produced by behavioural cloning."""
-
-    is_bc_checkpoint = (
-        checkpoint_configuration.get("training_stage") == "behavioral_cloning"
-        or "predictor_trained_with_bc" in checkpoint_configuration
-    )
-    if not is_bc_checkpoint:
-        return False
-    with torch.no_grad():
-        model.action_log_std.fill_(config.ppo.initial_log_std_after_bc)
-    LOGGER.info(
-        "Applied post-BC action sigma %.4f (log_std=%.4f)",
-        float(np.exp(config.ppo.initial_log_std_after_bc)),
-        config.ppo.initial_log_std_after_bc,
-    )
-    return True

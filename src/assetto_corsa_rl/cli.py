@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from assetto_corsa_monitoring import MonitoringConfig, create_tracker
 from assetto_corsa_rl.ac_integration.diagnostics import (
     TelemetryDiagnosticSummary,
     capture_telemetry,
@@ -71,13 +72,7 @@ from assetto_corsa_rl.envs.factory import (
 )
 from assetto_corsa_rl.experiment import ExperimentRecorder
 from assetto_corsa_rl.policies import MockDriverPolicy
-from assetto_corsa_rl.training.aim_integration import migrate_run
 from assetto_corsa_rl.training.behavioral_cloning import train_behavioral_cloning
-from assetto_corsa_rl.training.monitor import (
-    TrainingMonitorError,
-    monitor_training_run,
-    resolve_training_run_directory,
-)
 from assetto_corsa_rl.training.ppo import train_ppo
 from assetto_corsa_rl.training.readiness import (
     TrainingReadinessReport,
@@ -87,7 +82,7 @@ from assetto_corsa_rl.training.readiness import (
 LOGGER = logging.getLogger("assetto_corsa_rl")
 
 
-def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CLI options
+def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     """Build the command tree for local data, training, and diagnostic workflows.
 
     Returns:
@@ -322,86 +317,9 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CL
         help="PyTorch device, for example cpu or cuda.",
     )
     rl_train.add_argument(
-        "--monitor-ui",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Automatically start Aim logging and its independent local web UI.",
-    )
-    rl_train.add_argument(
-        "--monitor-backend",
-        choices=("aim", "none"),
-        default="aim",
-        help="Which monitor backend to use when --monitor-ui is enabled.",
-    )
-    rl_train.add_argument(
         "--launch-game",
         action="store_true",
         help="Prepare and launch the configured local AC Hotlap session before live training.",
-    )
-
-    training_monitor = subparsers.add_parser(
-        "training-monitor",
-        help="Open the standalone dashboard for a running or completed PPO run.",
-        description=(
-            "Follow one PPO run's metrics.csv independently of its training process, "
-            "or reopen a completed run for inspection."
-        ),
-        formatter_class=formatter,
-    )
-    training_monitor.add_argument(
-        "--run",
-        type=Path,
-        default=None,
-        help="Run directory or metrics.csv path; otherwise select the newest PPO run.",
-    )
-    training_monitor.add_argument(
-        "--runs-root",
-        type=Path,
-        default=Path("runs"),
-        help="Root searched when --run is omitted.",
-    )
-    training_monitor.add_argument(
-        "--poll-interval",
-        type=float,
-        default=0.25,
-        help="Seconds between metrics.csv polls.",
-    )
-    training_monitor.add_argument(
-        "--monitor",
-        choices=("aim", "none"),
-        default="aim",
-        help="Use Aim for live viewing or explicitly disable monitoring.",
-    )
-    training_monitor.add_argument(
-        "--monitor-start-ui",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Automatically start the local Aim web UI.",
-    )
-    training_monitor.add_argument(
-        "--parent-pid",
-        type=int,
-        default=None,
-        help=argparse.SUPPRESS,
-    )
-
-    aim_migrate = subparsers.add_parser(
-        "aim-migrate",
-        help="Migrate an existing PPO run into an Aim repository.",
-        description="Stream metrics.csv and small artefacts into Aim.",
-        formatter_class=formatter,
-    )
-    aim_migrate.add_argument(
-        "--run",
-        type=Path,
-        default=None,
-        help="Run directory or metrics.csv path; otherwise select the newest PPO run.",
-    )
-    aim_migrate.add_argument(
-        "--runs-root",
-        type=Path,
-        default=Path("runs"),
-        help="Root searched when --run is omitted.",
     )
 
     diagnose = subparsers.add_parser(
@@ -524,7 +442,9 @@ def run_x360_setup(*, duration_s: float) -> None:
         writer.close()
 
 
-def run_mock(config: ProjectConfig, *, record: bool, command: list[str]) -> dict[str, object]:
+def run_mock(
+    config: ProjectConfig, *, record: bool, command: list[str]
+) -> dict[str, object]:
     """Exercise the complete environment loop with a simple controller."""
 
     seed_everything(config.experiment.seed)
@@ -708,7 +628,8 @@ def _run_slip_diagnostic_command(arguments: argparse.Namespace) -> int:
     )
     angle_range = (
         f"{min(summary.slip_angle_raw_min):.3f}..{max(summary.slip_angle_raw_max):.3f}"
-        if summary.slip_angle_raw_min is not None and summary.slip_angle_raw_max is not None
+        if summary.slip_angle_raw_min is not None
+        and summary.slip_angle_raw_max is not None
         else "unavailable"
     )
     LOGGER.info(
@@ -878,7 +799,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         return 0
     if arguments.command == "bc-train":
         config = ProjectConfig.from_toml(arguments.config)
-        dataset_path = arguments.dataset or Path(config.behavioral_cloning.dataset_artifact_path)
+        dataset_path = arguments.dataset or Path(
+            config.behavioral_cloning.dataset_artifact_path
+        )
         dataset = BehavioralCloningDataset.from_npz(dataset_path)
         command = ["ac-rl-driver", *(argv if argv is not None else sys.argv[1:])]
         bc_result = train_behavioral_cloning(
@@ -1031,7 +954,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 if live_summary.drive_off is not None
                 else "n/a"
             ),
-            (live_summary.drive_off.maximum_rpms if live_summary.drive_off is not None else "n/a"),
+            (
+                live_summary.drive_off.maximum_rpms
+                if live_summary.drive_off is not None
+                else "n/a"
+            ),
             (
                 f"{live_summary.drive_off.maximum_abs_slip_ratio:.3f}"
                 if live_summary.drive_off is not None
@@ -1044,36 +971,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         for issue in live_summary.issues:
             LOGGER.error("%s/%s: %s", issue.stage, issue.code, issue.message)
         return 0 if live_summary.passed else 3
-    if arguments.command == "training-monitor":
-        try:
-            run_directory = resolve_training_run_directory(
-                arguments.run,
-                runs_root=arguments.runs_root,
-            )
-            if arguments.monitor != "none":
-                monitor_training_run(
-                    run_directory,
-                    poll_interval_s=arguments.poll_interval,
-                    parent_pid=arguments.parent_pid,
-                    start_ui=bool(arguments.monitor_start_ui),
-                )
-        except (TrainingMonitorError, ValueError) as error:
-            LOGGER.error("cannot open training dashboard: %s", error)
-            return 2
-        return 0
-    if arguments.command == "aim-migrate":
-        try:
-            run_directory = resolve_training_run_directory(
-                arguments.run,
-                runs_root=arguments.runs_root,
-            )
-            migrate_run(run_directory)
-        except Exception as error:
-            LOGGER.error("aim migration failed: %s", error)
-            return 2
-        return 0
     if arguments.command == "rl-train":
         config = ProjectConfig.from_toml(arguments.config)
+        monitoring_config = MonitoringConfig.from_toml(arguments.config)
+        tracker = create_tracker(monitoring_config)
         if arguments.launch_game and arguments.backend != "assetto-corsa":
             LOGGER.error("--launch-game is supported only with --backend assetto-corsa")
             return 2
@@ -1102,7 +1003,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 if arguments.launch_game
                 else None
             )
-            launch_context = session_launcher if session_launcher is not None else nullcontext()
+            launch_context = (
+                session_launcher if session_launcher is not None else nullcontext()
+            )
             with launch_context:
                 environment = None
                 try:
@@ -1120,16 +1023,21 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                         command=command,
                         backend_name=arguments.backend,
                         device=arguments.device,
-                        monitor_ui=arguments.monitor_ui,
-                        monitor_backend=arguments.monitor_backend,
+                        tracker=tracker,
+                        tracking_run_name=monitoring_config.run_name,
                     )
                 finally:
                     try:
                         if environment is not None:
                             environment.close()
                     finally:
-                        if session_launcher is not None and session_launcher.stop_owned_session():
-                            LOGGER.info("Stopped the Assetto Corsa session owned by training")
+                        if (
+                            session_launcher is not None
+                            and session_launcher.stop_owned_session()
+                        ):
+                            LOGGER.info(
+                                "Stopped the Assetto Corsa session owned by training"
+                            )
         except AssettoCorsaLaunchError as error:
             LOGGER.error("cannot launch Assetto Corsa: %s", error)
             return 2
@@ -1156,3 +1064,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     if arguments.command == "slip-diagnose":
         return _run_slip_diagnostic_command(arguments)
     raise RuntimeError(f"unhandled command: {arguments.command}")
+
+if __name__ == "__main__":
+    raise SystemExit(main())

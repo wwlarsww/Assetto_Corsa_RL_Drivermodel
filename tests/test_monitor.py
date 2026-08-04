@@ -8,9 +8,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from assetto_corsa_rl.training.aim_integration import AimMonitor
 
 from assetto_corsa_rl.training import monitor as monitor_module
-from assetto_corsa_rl.training.aim_integration import AimMonitor
 from assetto_corsa_rl.training.monitor import (
     launch_training_monitor,
     monitor_training_run,

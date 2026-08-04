@@ -4,6 +4,17 @@ max_episode_steps = 1200
 truncate_on_max_episode_steps = true
 output_directory = "runs"
 
+[monitoring]
+enabled = true
+backend = "mlflow"
+tracking_uri = "http://127.0.0.1:5000"
+experiment_name = "Assetto Corsa PPO"
+run_name = ""
+log_interval_updates = 1
+
+# Beim ersten Test Fehler nicht verschlucken.
+fail_on_error = true
+
 [environment]
 control_frequency_hz = 20.0
 mock_track_length_m = 1000.0

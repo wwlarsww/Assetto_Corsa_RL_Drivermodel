@@ -43,43 +43,6 @@ class ExperimentConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class MonitoringConfig:
-    """Configuration for optional experiment tracking."""
-
-    backend: str = "none"
-    tracking_uri: str = "http://127.0.0.1:5000"
-    experiment_name: str = "Assetto Corsa PPO"
-    run_name: str = ""
-    fail_on_error: bool = False
-
-    def __post_init__(self) -> None:
-        backend = self.normalized_backend
-
-        if backend not in {"none", "mlflow"}:
-            raise ValueError(
-                "monitoring.backend must be 'none' or 'mlflow', "
-                f"got {self.backend!r}"
-            )
-
-        if backend == "mlflow":
-            if not self.tracking_uri.strip():
-                raise ValueError("monitoring.tracking_uri must not be empty")
-
-            if not self.experiment_name.strip():
-                raise ValueError("monitoring.experiment_name must not be empty")
-
-    @property
-    def normalized_backend(self) -> str:
-        """Return the normalized backend identifier."""
-        return self.backend.strip().lower()
-
-    @property
-    def enabled(self) -> bool:
-        """Return whether experiment tracking is enabled."""
-        return self.normalized_backend != "none"
-
-
-@dataclass(frozen=True, slots=True)
 class EnvironmentConfig:
     """Control rate plus explicitly mock-only vehicle and track settings."""
 
@@ -131,7 +94,9 @@ class ActionConfig:
 
     def __post_init__(self) -> None:
         if self.method_variant != ACTION_METHOD_VARIANT:
-            raise ValueError(f"actions.method_variant must be {ACTION_METHOD_VARIANT!r}")
+            raise ValueError(
+                f"actions.method_variant must be {ACTION_METHOD_VARIANT!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,7 +149,9 @@ class ModelConfig:
         if self.trajectory_codec != "bezier-5x2":
             raise ValueError("model.trajectory_codec must be 'bezier-5x2'")
         if self.trajectory_output_size != 10:
-            raise ValueError("the bezier-5x2 codec requires trajectory_output_size = 10")
+            raise ValueError(
+                "the bezier-5x2 codec requires trajectory_output_size = 10"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +205,9 @@ class BehavioralCloningConfig:
                 f"behavioral_cloning.method_variant must be {BASELINE_METHOD_VARIANT!r}"
             )
         if not self.dataset_artifact_path.strip():
-            raise ValueError("behavioral_cloning.dataset_artifact_path must not be empty")
+            raise ValueError(
+                "behavioral_cloning.dataset_artifact_path must not be empty"
+            )
         for name in (
             "epochs",
             "batch_size",
@@ -246,7 +215,9 @@ class BehavioralCloningConfig:
             "minimum_speed_mps",
         ):
             _positive(f"behavioral_cloning.{name}", getattr(self, name))
-        _non_negative("behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight)
+        _non_negative(
+            "behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight
+        )
         if self.weight_decay < 0:
             raise ValueError("behavioral_cloning.weight_decay must be non-negative")
         for name in ("validation_fraction", "test_fraction"):
@@ -254,7 +225,9 @@ class BehavioralCloningConfig:
             if not 0 < value < 1:
                 raise ValueError(f"behavioral_cloning.{name} must lie in (0, 1)")
         if self.validation_fraction + self.test_fraction >= 1:
-            raise ValueError("behavioral-cloning split fractions must leave training sessions")
+            raise ValueError(
+                "behavioral-cloning split fractions must leave training sessions"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +262,9 @@ class PPOConfig:
 
     def __post_init__(self) -> None:
         if self.method_variant != STABILIZED_PPO_METHOD_VARIANT:
-            raise ValueError(f"ppo.method_variant must be {STABILIZED_PPO_METHOD_VARIANT!r}")
+            raise ValueError(
+                f"ppo.method_variant must be {STABILIZED_PPO_METHOD_VARIANT!r}"
+            )
         for name in (
             "total_environment_steps",
             "rollout_steps",
@@ -315,7 +290,9 @@ class PPOConfig:
         if not math.isfinite(self.initial_log_std_after_bc):
             raise ValueError("ppo.initial_log_std_after_bc must be finite")
         if self.kl_control_method_variant != KL_CONTROL_METHOD_VARIANT:
-            raise ValueError(f"ppo.kl_control_method_variant must be {KL_CONTROL_METHOD_VARIANT!r}")
+            raise ValueError(
+                f"ppo.kl_control_method_variant must be {KL_CONTROL_METHOD_VARIANT!r}"
+            )
         _positive("ppo.kl_target", self.kl_target)
         _positive("ppo.kl_tolerance", self.kl_tolerance)
         if self.kl_tolerance >= self.kl_target:
@@ -333,7 +310,9 @@ class PPOConfig:
 class AssettoCorsaRuntimeConfig:
     """Local Windows paths and explicit, auditable live adapter settings."""
 
-    installation_directory: str = r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
+    installation_directory: str = (
+        r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
+    )
     controls_configuration_path: str = ""
     control_backend: str = "vgamepad"
     reset_backend: str = "csp_hotlap_spawn_v1"
@@ -365,7 +344,9 @@ class AssettoCorsaRuntimeConfig:
                 "'python_ext_reset_car_v1'"
             )
         if self.crash_termination != "csp_collision_latched_v1":
-            raise ValueError("assetto_corsa.crash_termination must be 'csp_collision_latched_v1'")
+            raise ValueError(
+                "assetto_corsa.crash_termination must be 'csp_collision_latched_v1'"
+            )
         if self.telemetry_calibration != "assetto_corsa_gym_world_v1":
             raise ValueError(
                 "assetto_corsa.telemetry_calibration must be 'assetto_corsa_gym_world_v1'"
@@ -416,15 +397,18 @@ class ProjectConfig:
     """Complete immutable experiment configuration."""
 
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
-    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     actions: ActionConfig = field(default_factory=ActionConfig)
     rewards: RewardConfig = field(default_factory=RewardConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
-    behavioral_cloning: BehavioralCloningConfig = field(default_factory=BehavioralCloningConfig)
+    behavioral_cloning: BehavioralCloningConfig = field(
+        default_factory=BehavioralCloningConfig
+    )
     ppo: PPOConfig = field(default_factory=PPOConfig)
-    assetto_corsa: AssettoCorsaRuntimeConfig = field(default_factory=AssettoCorsaRuntimeConfig)
+    assetto_corsa: AssettoCorsaRuntimeConfig = field(
+        default_factory=AssettoCorsaRuntimeConfig
+    )
     reference: ReferenceConfig = field(default_factory=ReferenceConfig)
 
     @classmethod
@@ -455,7 +439,6 @@ class ProjectConfig:
 
         return cls(
             experiment=_load_section(ExperimentConfig, raw.get("experiment", {})),
-            monitoring=_load_section(MonitoringConfig,raw.get("monitoring", {}),),
             environment=_load_section(EnvironmentConfig, raw.get("environment", {})),
             actions=_load_section(ActionConfig, raw.get("actions", {})),
             rewards=_load_section(RewardConfig, raw.get("rewards", {})),
