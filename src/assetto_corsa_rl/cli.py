@@ -82,7 +82,7 @@ from assetto_corsa_rl.training.readiness import (
 LOGGER = logging.getLogger("assetto_corsa_rl")
 
 
-def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
+def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CLI options
     """Build the command tree for local data, training, and diagnostic workflows.
 
     Returns:
@@ -442,9 +442,7 @@ def run_x360_setup(*, duration_s: float) -> None:
         writer.close()
 
 
-def run_mock(
-    config: ProjectConfig, *, record: bool, command: list[str]
-) -> dict[str, object]:
+def run_mock(config: ProjectConfig, *, record: bool, command: list[str]) -> dict[str, object]:
     """Exercise the complete environment loop with a simple controller."""
 
     seed_everything(config.experiment.seed)
@@ -628,8 +626,7 @@ def _run_slip_diagnostic_command(arguments: argparse.Namespace) -> int:
     )
     angle_range = (
         f"{min(summary.slip_angle_raw_min):.3f}..{max(summary.slip_angle_raw_max):.3f}"
-        if summary.slip_angle_raw_min is not None
-        and summary.slip_angle_raw_max is not None
+        if summary.slip_angle_raw_min is not None and summary.slip_angle_raw_max is not None
         else "unavailable"
     )
     LOGGER.info(
@@ -799,9 +796,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         return 0
     if arguments.command == "bc-train":
         config = ProjectConfig.from_toml(arguments.config)
-        dataset_path = arguments.dataset or Path(
-            config.behavioral_cloning.dataset_artifact_path
-        )
+        dataset_path = arguments.dataset or Path(config.behavioral_cloning.dataset_artifact_path)
         dataset = BehavioralCloningDataset.from_npz(dataset_path)
         command = ["ac-rl-driver", *(argv if argv is not None else sys.argv[1:])]
         bc_result = train_behavioral_cloning(
@@ -954,11 +949,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 if live_summary.drive_off is not None
                 else "n/a"
             ),
-            (
-                live_summary.drive_off.maximum_rpms
-                if live_summary.drive_off is not None
-                else "n/a"
-            ),
+            (live_summary.drive_off.maximum_rpms if live_summary.drive_off is not None else "n/a"),
             (
                 f"{live_summary.drive_off.maximum_abs_slip_ratio:.3f}"
                 if live_summary.drive_off is not None
@@ -983,6 +974,16 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         if not report.is_ready:
             return 4
         command = ["ac-rl-driver", *(argv if argv is not None else sys.argv[1:])]
+        if config.evaluation.enabled and arguments.backend != "mock":
+            LOGGER.error(
+                "periodic evaluation is currently supported only with --backend mock"
+            )
+            return 2
+        evaluation_environment_factory = (
+            (lambda: create_mock_environment(config))
+            if config.evaluation.enabled
+            else None
+        )
         launch_control_writer = (
             VGamepadControlWriter(
                 steering_output_sign=config.assetto_corsa.steering_output_sign,
@@ -1003,9 +1004,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 if arguments.launch_game
                 else None
             )
-            launch_context = (
-                session_launcher if session_launcher is not None else nullcontext()
-            )
+            launch_context = session_launcher if session_launcher is not None else nullcontext()
             with launch_context:
                 environment = None
                 try:
@@ -1025,19 +1024,17 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                         device=arguments.device,
                         tracker=tracker,
                         tracking_run_name=monitoring_config.run_name,
+                        evaluation_environment_factory=(
+                            evaluation_environment_factory
+                        ),
                     )
                 finally:
                     try:
                         if environment is not None:
                             environment.close()
                     finally:
-                        if (
-                            session_launcher is not None
-                            and session_launcher.stop_owned_session()
-                        ):
-                            LOGGER.info(
-                                "Stopped the Assetto Corsa session owned by training"
-                            )
+                        if session_launcher is not None and session_launcher.stop_owned_session():
+                            LOGGER.info("Stopped the Assetto Corsa session owned by training")
         except AssettoCorsaLaunchError as error:
             LOGGER.error("cannot launch Assetto Corsa: %s", error)
             return 2
@@ -1045,10 +1042,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             if launch_control_writer is not None:
                 launch_control_writer.close()
         LOGGER.info(
-            "PPO complete: steps=%s iterations=%s policy_version=%s artefacts=%s",
+            "PPO complete: steps=%s iterations=%s policy_version=%s "
+            "evaluations=%s artefacts=%s",
             ppo_result.environment_steps,
             ppo_result.iterations,
             ppo_result.policy_version,
+            ppo_result.evaluations_completed,
             ppo_result.run_directory,
         )
         return 0
@@ -1064,6 +1063,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     if arguments.command == "slip-diagnose":
         return _run_slip_diagnostic_command(arguments)
     raise RuntimeError(f"unhandled command: {arguments.command}")
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

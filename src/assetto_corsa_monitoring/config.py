@@ -1,4 +1,4 @@
-"""Configuration models for experiment monitoring."""
+"""Configuration models for optional experiment monitoring."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any, Self
 
 @dataclass(frozen=True, slots=True)
 class MonitoringConfig:
-    """Configuration for optional experiment tracking."""
+    """Settings for the optional experiment tracking backend."""
 
     enabled: bool = False
     backend: str = "none"
@@ -21,68 +21,52 @@ class MonitoringConfig:
     fail_on_error: bool = False
 
     def __post_init__(self) -> None:
-        """Validate the monitoring configuration."""
+        """Validate monitoring settings independently of the RL config."""
 
         backend = self.normalized_backend
-
         if backend not in {"none", "mlflow"}:
             raise ValueError(
-                "Monitoring backend must be 'none' or 'mlflow', "
-                f"but received {self.backend!r}."
+                "monitoring.backend must be 'none' or 'mlflow', "
+                f"got {self.backend!r}"
             )
-
         if self.log_interval_updates < 1:
-            raise ValueError("log_interval_updates must be at least 1.")
-
+            raise ValueError("monitoring.log_interval_updates must be at least 1")
         if self.enabled and backend == "mlflow":
             if not self.tracking_uri.strip():
-                raise ValueError(
-                    "tracking_uri must not be empty when MLflow is enabled."
-                )
-
+                raise ValueError("monitoring.tracking_uri must not be empty")
             if not self.experiment_name.strip():
-                raise ValueError(
-                    "experiment_name must not be empty when MLflow is enabled."
-                )
+                raise ValueError("monitoring.experiment_name must not be empty")
 
     @property
     def normalized_backend(self) -> str:
-        """Return the normalized monitoring backend."""
+        """Return the normalized backend identifier."""
 
         return self.backend.strip().lower()
 
     @classmethod
-    def from_toml(
-        cls,
-        path: str | Path,
-    ) -> Self:
-        """Load the monitoring section from a TOML configuration file."""
+    def from_toml(cls, path: str | Path) -> Self:
+        """Load only the ``[monitoring]`` table from a TOML file."""
 
         config_path = Path(path)
-
         if not config_path.is_file():
-            raise FileNotFoundError(f"Configuration file does not exist: {config_path}")
-
+            raise FileNotFoundError(
+                f"Configuration file does not exist: {config_path}"
+            )
         with config_path.open("rb") as handle:
-            raw_config = tomllib.load(handle)
+            payload = tomllib.load(handle)
 
-        raw_monitoring = raw_config.get("monitoring", {})
+        raw = payload.get("monitoring", {})
+        if not isinstance(raw, dict):
+            raise ValueError("[monitoring] must be a TOML table")
 
-        if not isinstance(raw_monitoring, dict):
-            raise ValueError("[monitoring] must be a TOML table.")
-
-        allowed_keys = {field.name for field in fields(cls)}
-        unknown_keys = set(raw_monitoring) - allowed_keys
-
-        if unknown_keys:
-            names = ", ".join(sorted(unknown_keys))
+        allowed = {field.name for field in fields(cls)}
+        unknown = set(raw) - allowed
+        if unknown:
+            names = ", ".join(sorted(unknown))
             raise ValueError(f"Unknown key(s) in [monitoring]: {names}")
 
-        values: dict[str, Any] = dict(raw_monitoring)
-
+        values: dict[str, Any] = dict(raw)
         run_name = values.get("run_name")
-
         if isinstance(run_name, str) and not run_name.strip():
             values["run_name"] = None
-
         return cls(**values)

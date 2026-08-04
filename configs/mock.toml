@@ -74,3 +74,13 @@ initial_checkpoint_path = ""
 initial_checkpoint_metrics_path = ""
 maximum_initial_predictor_ade_m = 25.0
 maximum_initial_predictor_fde_m = 40.0
+
+# Add this table once to configs/mock.toml.
+[evaluation]
+enabled = true
+interval_updates = 5
+episodes = 3
+deterministic = true
+seed_offset = 10000
+record_trajectories = true
+evaluate_final_update = true

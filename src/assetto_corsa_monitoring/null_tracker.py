@@ -1,4 +1,4 @@
-"""No operation implementation of experiment tracking."""
+"""No-operation implementation of experiment tracking."""
 
 from __future__ import annotations
 
@@ -12,12 +12,19 @@ from assetto_corsa_rl.training.tracking import (
 
 
 class NullTracker:
-    """Silently discard all experiment tracking data."""
+    """Tracker implementation that silently discards all data."""
 
     @property
     def active(self) -> bool:
         """A null tracker never has an active run."""
+
         return False
+
+    @property
+    def run_id(self) -> str | None:
+        """A null tracker never owns a run identifier."""
+
+        return None
 
     def start_run(
         self,
@@ -25,16 +32,18 @@ class NullTracker:
         run_name: str | None = None,
         parameters: Mapping[str, ParameterValue] | None = None,
         tags: Mapping[str, str] | None = None,
-    ) -> str | None:
+        nested: bool = False,
+    ) -> None:
         """Discard run metadata."""
-        del run_name, parameters, tags
-        return None
+
+        del run_name, parameters, tags, nested
 
     def log_parameters(
         self,
         parameters: Mapping[str, ParameterValue],
     ) -> None:
-        """Discard run parameters."""
+        """Discard parameters."""
+
         del parameters
 
     def log_metrics(
@@ -43,7 +52,8 @@ class NullTracker:
         *,
         step: int,
     ) -> None:
-        """Discard training metrics."""
+        """Discard metrics."""
+
         del metrics, step
 
     def log_artifact(
@@ -53,13 +63,15 @@ class NullTracker:
         artifact_path: str | None = None,
     ) -> None:
         """Discard an artifact."""
+
         del path, artifact_path
 
     def set_tags(
         self,
         tags: Mapping[str, str],
     ) -> None:
-        """Discard run tags."""
+        """Discard tags."""
+
         del tags
 
     def end_run(
@@ -67,5 +79,6 @@ class NullTracker:
         *,
         status: str = "FINISHED",
     ) -> None:
-        """Discard the final run status."""
+        """Discard the terminal status."""
+
         del status

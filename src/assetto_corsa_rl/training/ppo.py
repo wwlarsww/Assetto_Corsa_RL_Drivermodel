@@ -35,6 +35,10 @@ from assetto_corsa_rl.training.checkpoints import (
     load_checkpoint,
     save_checkpoint,
 )
+from assetto_corsa_rl.training.evaluation import (
+    EnvironmentFactory,
+    evaluate_policy,
+)
 from assetto_corsa_rl.training.gae import AdvantageBatch, compute_gae
 from assetto_corsa_rl.training.losses import bezier_trajectory_prediction_loss
 from assetto_corsa_rl.training.rollout import (
@@ -113,6 +117,17 @@ class PPOTrainingResult:
     environment_steps: int
     policy_version: int
     episodes_completed: int
+    evaluations_completed: int
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointSnapshot:
+    """Immutable checkpoint files associated with one PPO update."""
+
+    directory: Path
+    checkpoint_path: Path
+    metadata_path: Path
+    iteration: int
 
 
 @dataclass(slots=True)
@@ -171,6 +186,7 @@ def train_ppo(
     device: str | torch.device = "cpu",
     tracker: ExperimentTracker | None = None,
     tracking_run_name: str | None = None,
+    evaluation_environment_factory: EnvironmentFactory | None = None,
 ) -> PPOTrainingResult:
     """Train the stabilized PPO variant with synchronous, versioned updates.
 
@@ -179,15 +195,17 @@ def train_ppo(
     written to the checkpoint.
     """
 
-    _validate_training_configuration(config)
+    _validate_training_configuration(
+        config,
+        evaluation_environment_factory=evaluation_environment_factory,
+    )
     target_device = torch.device(device)
     model, optimizer, initial_checkpoint = _initialise_training_model(
         config,
         target_device,
     )
     recorder = ExperimentRecorder.create(
-        output_directory=Path(config.experiment.output_directory)
-        / f"ppo-{backend_name}",
+        output_directory=Path(config.experiment.output_directory) / f"ppo-{backend_name}",
         config=config,
         command=command,
     )
@@ -211,6 +229,7 @@ def train_ppo(
     iteration = 0
     environment_steps = 0
     policy_version = 0
+    evaluations_completed = 0
     run_status = "FAILED"
 
     try:
@@ -240,7 +259,7 @@ def train_ppo(
             policy_version = metrics.policy_version
             recorder.record_step(asdict(metrics))
             _log_training_metrics(tracker, metrics)
-            _save_training_checkpoint(
+            snapshot = _save_training_checkpoint(
                 checkpoint_path=checkpoint_path,
                 model=model,
                 optimizer=optimizer,
@@ -250,6 +269,24 @@ def train_ppo(
                 backend_name=backend_name,
                 tracker=tracker,
             )
+            if _should_run_evaluation(config, metrics):
+                if snapshot is None or evaluation_environment_factory is None:
+                    raise RuntimeError(
+                        "evaluation requires a versioned checkpoint and environment factory"
+                    )
+                evaluate_policy(
+                    config=config,
+                    model=model,
+                    environment_factory=evaluation_environment_factory,
+                    device=target_device,
+                    training_run_directory=recorder.run_directory,
+                    checkpoint_path=snapshot.checkpoint_path,
+                    checkpoint_update=metrics.iteration,
+                    environment_steps=metrics.environment_steps,
+                    backend_name=backend_name,
+                    tracker=tracker,
+                )
+                evaluations_completed += 1
 
         run_status = "FINISHED"
 
@@ -268,6 +305,7 @@ def train_ppo(
         environment_steps=environment_steps,
         policy_version=policy_version,
         episodes_completed=cursor.episodes_completed,
+        evaluations_completed=evaluations_completed,
     )
     _write_training_summary(
         recorder=recorder,
@@ -278,16 +316,25 @@ def train_ppo(
     return result
 
 
-def _validate_training_configuration(config: ProjectConfig) -> None:
+def _validate_training_configuration(
+    config: ProjectConfig,
+    *,
+    evaluation_environment_factory: EnvironmentFactory | None,
+) -> None:
     """Reject configurations that do not match the stabilized PPO contract."""
 
     if config.ppo.method_variant != STABILIZED_PPO_METHOD_VARIANT:
         raise ValueError(
-            "train_ppo only supports " f"{STABILIZED_PPO_METHOD_VARIANT!r}"
+            "train_ppo only supports "
+            f"{STABILIZED_PPO_METHOD_VARIANT!r}"
         )
     if config.reference.mode != "fixed":
         raise ValueError(
             f"{STABILIZED_PPO_METHOD_VARIANT!r} requires reference.mode='fixed'"
+        )
+    if config.evaluation.enabled and evaluation_environment_factory is None:
+        raise ValueError(
+            "evaluation.enabled requires a separate evaluation environment factory"
         )
 
 
@@ -297,9 +344,7 @@ def _initialise_training_model(
 ) -> tuple[DriverNetwork, torch.optim.Optimizer, str]:
     """Create the model and optimizer and apply an optional warm start."""
 
-    torch.manual_seed(
-        config.experiment.seed
-    )  # pyright: ignore[reportUnknownMemberType]
+    torch.manual_seed(config.experiment.seed)  # pyright: ignore[reportUnknownMemberType]
     np.random.seed(config.experiment.seed)
     torch.use_deterministic_algorithms(True)
     model = build_driver_network(config).to(device)
@@ -308,7 +353,9 @@ def _initialise_training_model(
     if initial_checkpoint:
         source = Path(initial_checkpoint)
         if not source.is_file():
-            raise FileNotFoundError(f"initial PPO checkpoint does not exist: {source}")
+            raise FileNotFoundError(
+                f"initial PPO checkpoint does not exist: {source}"
+            )
         _, checkpoint_configuration = load_checkpoint(
             source,
             model=model,
@@ -465,7 +512,7 @@ def _save_training_checkpoint(
     initial_checkpoint: str,
     backend_name: str,
     tracker: ExperimentTracker | None,
-) -> None:
+) -> CheckpointSnapshot | None:
     """Persist the latest state and periodically publish immutable snapshots."""
 
     save_checkpoint(
@@ -487,10 +534,12 @@ def _save_training_checkpoint(
     )
 
     if not _should_save_versioned_checkpoint(config, metrics):
-        return
+        return None
 
     snapshot_directory = (
-        checkpoint_path.parent / "checkpoints" / f"update_{metrics.iteration:06d}"
+        checkpoint_path.parent
+        / "checkpoints"
+        / f"update_{metrics.iteration:06d}"
     )
     snapshot_directory.mkdir(parents=True, exist_ok=True)
     snapshot_path = snapshot_directory / "checkpoint.pt"
@@ -521,6 +570,12 @@ def _save_training_checkpoint(
         metadata_path=metadata_path,
         iteration=metrics.iteration,
     )
+    return CheckpointSnapshot(
+        directory=snapshot_directory,
+        checkpoint_path=snapshot_path,
+        metadata_path=metadata_path,
+        iteration=metrics.iteration,
+    )
 
 
 def _should_save_versioned_checkpoint(
@@ -529,8 +584,27 @@ def _should_save_versioned_checkpoint(
 ) -> bool:
     """Return whether this update requires an immutable checkpoint snapshot."""
 
-    is_interval = metrics.iteration % config.ppo.checkpoint_interval_updates == 0
+    is_interval = (
+        metrics.iteration % config.ppo.checkpoint_interval_updates == 0
+    )
+    is_evaluation = _should_run_evaluation(config, metrics)
     is_final = metrics.environment_steps >= config.ppo.total_environment_steps
+    return is_interval or is_evaluation or is_final
+
+
+def _should_run_evaluation(
+    config: ProjectConfig,
+    metrics: PPOIterationMetrics,
+) -> bool:
+    """Return whether this update should create an evaluation child run."""
+
+    if not config.evaluation.enabled:
+        return False
+    is_interval = metrics.iteration % config.evaluation.interval_updates == 0
+    is_final = (
+        config.evaluation.evaluate_final_update
+        and metrics.environment_steps >= config.ppo.total_environment_steps
+    )
     return is_interval or is_final
 
 
@@ -583,8 +657,12 @@ def _write_training_summary(
                 config.ppo.use_predicted_progress_reward
             ),
             "checkpoint": result.checkpoint_path.name,
-            "checkpoint_interval_updates": (config.ppo.checkpoint_interval_updates),
+            "checkpoint_interval_updates": (
+                config.ppo.checkpoint_interval_updates
+            ),
             "versioned_checkpoints_directory": "checkpoints",
+            "evaluations_completed": result.evaluations_completed,
+            "evaluations_directory": "evaluations",
         }
     )
 
@@ -648,9 +726,7 @@ def _collect_rollout(  # noqa: PLR0915
         action = np.asarray(action_tensor.squeeze(0).cpu(), dtype=np.float32)
         # step() applies the action and returns the next feature vector computed
         # by AssettoCorsaEnv from the latest simulator telemetry.
-        next_observation, reward, is_terminated, is_truncated, next_info = (
-            environment.step(action)
-        )
+        next_observation, reward, is_terminated, is_truncated, next_info = environment.step(action)
         with torch.no_grad():
             # Bootstrap from the actual successor before a possible episode reset.
             next_value = model(
@@ -734,9 +810,7 @@ def _postprocess_rollout(
     if config.ppo.use_predicted_progress_reward:
         with torch.no_grad():
             prediction = decode_bezier_trajectory(
-                model(
-                    torch.as_tensor(batch.observations, device=device)
-                ).trajectory_parameters,
+                model(torch.as_tensor(batch.observations, device=device)).trajectory_parameters,
                 sample_count=REFERENCE_TIME_OFFSETS_S.size,
             )
         reward_mask = np.ones(batch.step_count, dtype=np.bool_)
@@ -858,16 +932,12 @@ def _optimise_ppo(
             optimizer.zero_grad(set_to_none=True)
             total_loss.backward()  # pyright: ignore[reportUnknownMemberType]
             # Bound unusually large updates before advancing the policy version.
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), config.ppo.max_gradient_norm
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.ppo.max_gradient_norm)
             optimizer.step()
 
             with torch.no_grad():
                 approximate_kl = ((ratio - 1.0) - log_ratio).mean()
-                clip_fraction = (
-                    (torch.abs(ratio - 1.0) > config.ppo.clip_range).float().mean()
-                )
+                clip_fraction = (torch.abs(ratio - 1.0) > config.ppo.clip_range).float().mean()
             for name, value in {
                 "policy_loss": policy_loss,
                 "value_loss": value_loss,
@@ -904,7 +974,8 @@ def _validate_initial_checkpoint(configuration: dict[str, Any]) -> None:
     method = configuration.get("method_variant")
     if method != BASELINE_METHOD_VARIANT:
         raise ValueError(
-            "initial checkpoint was not produced by " f"{BASELINE_METHOD_VARIANT!r}"
+            "initial checkpoint was not produced by "
+            f"{BASELINE_METHOD_VARIANT!r}"
         )
     feature_names = configuration.get("observation_feature_names")
     if feature_names != list(OBSERVATION_FEATURE_NAMES):
