@@ -237,6 +237,7 @@ class PPOConfig:
     method_variant: str = STABILIZED_PPO_METHOD_VARIANT
     total_environment_steps: int = 1024
     rollout_steps: int = 256
+    checkpoint_interval_updates: int = 5
     update_epochs: int = 4
     minibatch_size: int = 128
     learning_rate: float = 3e-4
@@ -268,6 +269,7 @@ class PPOConfig:
         for name in (
             "total_environment_steps",
             "rollout_steps",
+            "checkpoint_interval_updates",
             "update_epochs",
             "minibatch_size",
             "learning_rate",

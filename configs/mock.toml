@@ -49,6 +49,7 @@ initial_log_std = -0.5
 
 [ppo]
 method_variant = "ai_spline_absolute_stabilized_v2"
+checkpoint_interval_updates = 1
 total_environment_steps = 512
 rollout_steps = 256
 update_epochs = 2

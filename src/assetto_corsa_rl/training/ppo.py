@@ -8,6 +8,8 @@ learning state and reproducible training artefacts.
 
 from __future__ import annotations
 
+import json
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -246,6 +248,7 @@ def train_ppo(
                 metrics=metrics,
                 initial_checkpoint=initial_checkpoint,
                 backend_name=backend_name,
+                tracker=tracker,
             )
 
         run_status = "FINISHED"
@@ -461,8 +464,9 @@ def _save_training_checkpoint(
     metrics: PPOIterationMetrics,
     initial_checkpoint: str,
     backend_name: str,
+    tracker: ExperimentTracker | None,
 ) -> None:
-    """Persist the latest training state after one successful PPO update."""
+    """Persist the latest state and periodically publish immutable snapshots."""
 
     save_checkpoint(
         checkpoint_path,
@@ -481,6 +485,70 @@ def _save_training_checkpoint(
             "backend": backend_name,
         },
     )
+
+    if not _should_save_versioned_checkpoint(config, metrics):
+        return
+
+    snapshot_directory = (
+        checkpoint_path.parent / "checkpoints" / f"update_{metrics.iteration:06d}"
+    )
+    snapshot_directory.mkdir(parents=True, exist_ok=True)
+    snapshot_path = snapshot_directory / "checkpoint.pt"
+    shutil.copy2(checkpoint_path, snapshot_path)
+
+    metadata_path = snapshot_directory / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "backend": backend_name,
+                "environment_steps": metrics.environment_steps,
+                "final_update": (
+                    metrics.environment_steps >= config.ppo.total_environment_steps
+                ),
+                "iteration": metrics.iteration,
+                "method_variant": config.ppo.method_variant,
+                "policy_version": metrics.policy_version,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _log_checkpoint_artifacts(
+        tracker,
+        snapshot_path=snapshot_path,
+        metadata_path=metadata_path,
+        iteration=metrics.iteration,
+    )
+
+
+def _should_save_versioned_checkpoint(
+    config: ProjectConfig,
+    metrics: PPOIterationMetrics,
+) -> bool:
+    """Return whether this update requires an immutable checkpoint snapshot."""
+
+    is_interval = metrics.iteration % config.ppo.checkpoint_interval_updates == 0
+    is_final = metrics.environment_steps >= config.ppo.total_environment_steps
+    return is_interval or is_final
+
+
+def _log_checkpoint_artifacts(
+    tracker: ExperimentTracker | None,
+    *,
+    snapshot_path: Path,
+    metadata_path: Path,
+    iteration: int,
+) -> None:
+    """Upload one immutable checkpoint directory to the active tracker."""
+
+    if tracker is None or not tracker.active:
+        return
+
+    artifact_path = f"checkpoints/update_{iteration:06d}"
+    tracker.log_artifact(snapshot_path, artifact_path=artifact_path)
+    tracker.log_artifact(metadata_path, artifact_path=artifact_path)
 
 
 def _end_tracking_run(
@@ -515,6 +583,8 @@ def _write_training_summary(
                 config.ppo.use_predicted_progress_reward
             ),
             "checkpoint": result.checkpoint_path.name,
+            "checkpoint_interval_updates": (config.ppo.checkpoint_interval_updates),
+            "versioned_checkpoints_directory": "checkpoints",
         }
     )
 
