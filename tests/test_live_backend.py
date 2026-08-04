@@ -147,6 +147,7 @@ def _physics(
     *,
     speed_kmh: float = 36.0,
     local_velocity_mps: tuple[float, float, float] = (0.0, 0.0, 10.0),
+    number_of_tyres_out: int = 0,
 ) -> PhysicsPage:
     return PhysicsPage(
         packet_id=packet_id,
@@ -171,7 +172,7 @@ def _physics(
             (0.0, 0.0, 0.0),
             (0.0, 0.0, 0.0),
         ),
-        number_of_tyres_out=0,
+        number_of_tyres_out=number_of_tyres_out,
         brake_bias=0.6,
     )
 
@@ -212,6 +213,7 @@ def _telemetry(
     laps: int = 0,
     speed_kmh: float = 36.0,
     local_velocity_mps: tuple[float, float, float] = (0.0, 0.0, 10.0),
+    number_of_tyres_out: int = 0,
 ) -> AssettoCorsaTelemetry:
     return AssettoCorsaTelemetry(
         monotonic_time_s=packet_id * 0.1,
@@ -219,6 +221,7 @@ def _telemetry(
             packet_id,
             speed_kmh=speed_kmh,
             local_velocity_mps=local_velocity_mps,
+            number_of_tyres_out=number_of_tyres_out,
         ),
         graphics=_graphics(packet_id, phase=phase, completed_laps=laps),
         static=_static(),
@@ -265,7 +268,8 @@ def _backend(
         expected_car_id="bmw_z4_gt3",
         expected_track_id="monza",
         minimum_speed_mps=2.0,
-        minimum_speed_grace_steps=10,
+        stall_startup_grace_steps=25,
+        stall_debounce_steps=3,
         critical_body_sideslip_angle_deg=20.0,
         minimum_body_sideslip_termination_speed_mps=5.0,
         frame_timeout_s=0.5,
@@ -349,6 +353,46 @@ def test_live_backend_primes_configured_action_after_safe_reset() -> None:
     assert control.neutral_count == 1
     assert len(control.actions) == 1
     np.testing.assert_allclose(control.actions[0], [1.0, 0.0])
+
+
+def test_live_backend_terminates_when_one_tyre_is_out() -> None:
+    backend, _control, _reset = _backend(
+        [
+            _telemetry(1, phase=0.5),
+            _telemetry(2, phase=0.01),
+            _telemetry(3, phase=0.01),
+            _telemetry(4, phase=0.01),
+            _telemetry(5, phase=0.02, number_of_tyres_out=1),
+        ]
+    )
+    backend.reset(seed=None, reference=_reference())
+
+    transition = backend.step(np.zeros(2, dtype=np.float32))
+
+    assert transition.termination_reason is TerminationReason.OFF_TRACK
+    assert transition.diagnostics is not None
+    assert transition.diagnostics["number_of_tyres_out"] == 1
+
+
+def test_live_backend_debounces_stall_after_successful_motion() -> None:
+    backend, _control, _reset = _backend(
+        [
+            _telemetry(1, phase=0.5),
+            _telemetry(2, phase=0.01),
+            _telemetry(3, phase=0.01),
+            _telemetry(4, phase=0.01),
+        ]
+    )
+    frame = backend.reset(seed=None, reference=_reference())
+    snapshot = _telemetry(5, phase=0.02, speed_kmh=0.0)
+    backend._update_stall_detection(10.0)
+
+    for _ in range(2):
+        backend._update_stall_detection(0.0)
+        assert backend._termination_reason(snapshot, frame, False, 0.0) is None
+    backend._update_stall_detection(0.0)
+
+    assert backend._termination_reason(snapshot, frame, False, 0.0) is TerminationReason.STALLED
 
 
 def test_live_backend_ignores_longitudinal_tyre_slip_for_termination() -> None:

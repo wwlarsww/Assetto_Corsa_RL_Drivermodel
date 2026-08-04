@@ -1,8 +1,10 @@
 # Training workflow
 
-The executable baseline is `ai_spline_absolute_v1`: one BMW Z4 GT3, one Monza
-AI-spline reference, bounded absolute actions, and progress plus predicted-progress
-reward only.
+The thesis baseline remains `ai_spline_absolute_v1`: one BMW Z4 GT3, one Monza
+AI-spline reference and bounded absolute actions. Current PPO configurations use
+the explicitly named `ai_spline_absolute_stabilized_v2` training variant. It
+keeps the baseline observation/action geometry but adds the documented safety,
+discounted prediction-reward and KL-control changes below.
 
 ## Safe preflight
 
@@ -42,8 +44,8 @@ Each synchronous iteration performs this fixed sequence:
 2. reject stale fragments at the collector boundary;
 3. build actual future-path targets without crossing episodes;
 4. decode the 10-output `bezier-5x2` predictor;
-5. project its endpoint onto the current fixed reference and add predicted
-   progress after collection;
+5. project every predicted horizon point onto the current fixed reference,
+   discount later progress increments, and add the scaled prediction term;
 6. compute GAE with separate termination and time-limit semantics;
 7. optimise clipped PPO, the value head and the auxiliary predictor;
 8. increment the policy version and atomically save a checkpoint.
@@ -51,17 +53,23 @@ Each synchronous iteration performs this fixed sequence:
 During `rl-train`, the CLI prints live iteration summaries to the console at
 INFO level, including total environment steps, average environment and shaped
 rewards, policy/value losses, entropy, approximate KL divergence, clip fraction,
-and completed episode count. These same scalar metrics are also appended to
-`runs/ppo-<backend>/<timestamp>/metrics.csv` so you can monitor the training
-progress in real time.
+the adaptive learning rate and completed episode count. The append-only
+`metrics.csv` additionally records pedal quantiles and throttle/brake/coast
+fractions, direct gas-to-brake switches, speed range, progress without the
+termination penalty, predictor share, per-iteration termination deltas, tyres
+outside and the KL target band. Aim streams the same schema without becoming
+the source of record.
 
 Metrics and the full configuration are stored below `runs/ppo-<backend>/`.
 Time-limit truncations bootstrap from their final observation but stop the GAE
 trace; true terminations do not bootstrap. This remains supported for mock and
-named finite-horizon experiments. The live baseline disables time-limit
-truncation and instead terminates below 5 km/h after its 10 s launch grace
-period, or on another explicit terminal condition such as crash, off-track,
-excessive vehicle body sideslip, or lap completion.
+named finite-horizon experiments. The named termination variant
+`any_tyre_armed_stall_v1` ends an episode as soon as one tyre is reported
+outside. Stall detection is inactive at reset, arms after the car first reaches
+5 km/h, and subsequently terminates after five consecutive low-speed frames
+(0.2 s at 25 Hz). If the car never reaches 5 km/h, a separate 25-step startup
+fallback terminates after 1 s. Crash, excessive vehicle body sideslip and lap
+completion remain separate terminal conditions.
 
 ## Live-control prerequisites
 
@@ -144,10 +152,11 @@ only as the explicitly named legacy variant `python_ext_reset_car_v1`.
   --device cpu
 ```
 
-The desktop dashboard opens automatically in an independent process for mock
-and live PPO runs. It follows the run's flushed `metrics.csv`; closing the
-window never stops training, and training completion does not wait for the
-window. Disable automatic opening explicitly with `--no-monitor-ui`:
+When the `monitoring` extra is installed, PPO starts an independent CSV follower
+and `aim up` web server automatically. The server uses the run directory as its
+repository and remains available at `http://127.0.0.1:43800` after training
+finishes. Monitoring never blocks or controls the learner. Disable it explicitly
+with `--no-monitor-ui`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m assetto_corsa_rl rl-train `
@@ -157,66 +166,36 @@ window. Disable automatic opening explicitly with `--no-monitor-ui`:
    --no-monitor-ui
 ```
 
-The dashboard keeps rewards, policy loss, value loss and predictor loss in
-separate panels. Additional panels expose entropy, approximate KL divergence,
-clip fraction and completed episodes. A compact header reports progress,
-throughput, the current policy version and the most important latest values.
-History is bounded and artists are updated in place, so UI work stays small
-during long runs. The normal CSV metrics remain the source of record. Press
-`Q` or `Esc` to close the dashboard without stopping training; after training,
-the independent final view stays open until it is closed.
-
 ## Aim (Aimstack) integration
 
-An optional Aim integration is available to collect scalar metrics live and
-view them in the Aim web UI. The integration is best-effort and activates
-only when the `aim` Python package is installed.
-
-Quick start:
-
-1. Install Aim in your active environment:
+Aim 3.29.1 is the supported monitoring backend and no separate plotting package
+is a project dependency. Upstream Aim wheels currently support CPython through 3.12, so use
+Python 3.11 or 3.12 for an environment that needs the automatic web UI:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install aim
+.\.venv\Scripts\python.exe -m pip install `
+  -c requirements\tested.txt `
+  -e ".[dev,monitoring]"
 ```
 
-2. Start the Aim UI in a separate shell:
-
-```powershell
-aim up
-```
-
-3. Stream an existing run into Aim (example):
-
-Create a tiny Python script `stream_to_aim.py` with the following contents:
-
-```python
-from pathlib import Path
-from assetto_corsa_rl.training.monitor import resolve_training_run_directory, monitor_training_run
-from assetto_corsa_rl.training.aim_integration import AimMonitor
-
-run_dir = resolve_training_run_directory(None, runs_root=Path("runs"))
-monitor_training_run(run_dir, monitor_factory=AimMonitor)
-```
-
-Run it while a training `metrics.csv` is being appended and the Aim UI will
-receive the scalar metrics for live inspection. The `AimMonitor` is optional
-and safe to install side-by-side with the existing Matplotlib dashboard.
-
-Notes:
-
-- The repository does not automatically install or start Aim. Installing
-  `aim` and starting `aim up` are required to view results in the Aim UI.
-- The `AimMonitor` currently tracks scalar fields from `metrics.csv`.
-  Archival of additional run artefacts (plots, CSV snapshots, model
-  checkpoints) can be added in a follow-up change if desired.
-
-
-Open the newest PPO run manually with:
+`rl-train` then creates the Aim run and starts the UI automatically. Reopen or
+follow the newest run manually with:
 
 ```powershell
 .\.venv\Scripts\ac-rl-driver.exe training-monitor
 ```
+
+Select a particular run with `--run`, or import an already completed CSV once:
+
+```powershell
+.\.venv\Scripts\ac-rl-driver.exe aim-migrate `
+  --run runs\smoke\ppo-assetto-corsa\<run-id>
+```
+
+Python 3.13/3.14 remains supported for the simulator-independent code and test
+suite, but Aim itself is unavailable there until upstream publishes compatible
+wheels. Use `--no-monitor-ui` in such an environment. A supported Python 3.12
+environment can still inspect the recorded CSV later.
 
 Or select any running or completed run explicitly:
 

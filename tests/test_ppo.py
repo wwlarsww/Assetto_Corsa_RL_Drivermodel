@@ -9,7 +9,7 @@ import pytest
 
 from assetto_corsa_rl.config import (
     ACTION_METHOD_VARIANT,
-    BASELINE_METHOD_VARIANT,
+    STABILIZED_PPO_METHOD_VARIANT,
     EnvironmentConfig,
     ExperimentConfig,
     ModelConfig,
@@ -51,7 +51,7 @@ def test_short_mock_ppo_run_updates_versioned_policy(tmp_path: Path) -> None:
             mock_track_half_width_m=1_000.0,
             initial_speed_mps=20.0,
             minimum_speed_mps=1.0,
-            minimum_speed_grace_steps=10_000,
+            stall_debounce_steps=10_000,
             critical_body_sideslip_angle_deg=90.0,
         ),
         model=ModelConfig(
@@ -87,7 +87,7 @@ def test_short_mock_ppo_run_updates_versioned_policy(tmp_path: Path) -> None:
     model = build_driver_network(config)
     state, checkpoint_config = load_checkpoint(result.checkpoint_path, model=model)
     assert state.policy_version == 1
-    assert checkpoint_config["method_variant"] == BASELINE_METHOD_VARIANT
+    assert checkpoint_config["method_variant"] == STABILIZED_PPO_METHOD_VARIANT
     assert checkpoint_config["action_method_variant"] == ACTION_METHOD_VARIANT
 
     with (result.run_directory / "metrics.csv").open(
@@ -97,6 +97,33 @@ def test_short_mock_ppo_run_updates_versioned_policy(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert "excessive_body_sideslip_terminations" in rows[0]
     assert "excessive_slip_terminations" not in rows[0]
+    assert {
+        "progress_reward_mean",
+        "predicted_reward_share",
+        "predicted_to_progress_ratio",
+        "pedal_p10",
+        "pedal_p50",
+        "pedal_p90",
+        "throttle_fraction",
+        "brake_fraction",
+        "coast_fraction",
+        "pedal_switches",
+        "pedal_switch_rate",
+        "speed_mean_mps",
+        "speed_min_mps",
+        "speed_max_mps",
+        "tyres_out_mean",
+        "tyres_out_max",
+        "tyres_out_any_fraction",
+        "crash_terminations_delta",
+        "off_track_terminations_delta",
+        "stalled_terminations_delta",
+        "kl_target",
+        "kl_lower_bound",
+        "kl_upper_bound",
+        "kl_status",
+        "action_sigma_mean",
+    } <= rows[0].keys()
     assert float(rows[0]["predicted_progress_reward_mean"]) > 0.0
     assert float(rows[0]["shaped_reward_mean"]) > float(rows[0]["environment_reward_mean"])
     assert int(rows[0]["predictor_valid_samples"]) > 0

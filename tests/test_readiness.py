@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from assetto_corsa_rl.config import AssettoCorsaRuntimeConfig, PPOConfig, ProjectConfig
+from assetto_corsa_rl.config import (
+    AssettoCorsaRuntimeConfig,
+    BASELINE_METHOD_VARIANT,
+    PPOConfig,
+    ProjectConfig,
+    STABILIZED_PPO_METHOD_VARIANT,
+)
 from assetto_corsa_rl.training.readiness import (
     _checkpoint_variant_check,
     _collision_bridge_capability_check,
@@ -33,6 +39,28 @@ def test_legacy_delta_action_checkpoint_is_rejected(tmp_path: Path) -> None:
     check = _checkpoint_variant_check(ProjectConfig(), metrics)
     assert check.severity == "error"
     assert "method/action variant" in check.message
+
+
+def test_baseline_checkpoint_is_accepted_for_stabilized_ppo(tmp_path: Path) -> None:
+    metrics = tmp_path / "summary.json"
+    metrics.write_text(
+        json.dumps(
+            {
+                "method_variant": BASELINE_METHOD_VARIANT,
+                "action_method_variant": "absolute_bounded_v1",
+                "final_validation": {
+                    "predictor_ade_m": 1.0,
+                    "predictor_fde_m": 1.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = ProjectConfig()
+    assert config.ppo.method_variant == STABILIZED_PPO_METHOD_VARIANT
+    check = _checkpoint_variant_check(config, metrics)
+    assert check.severity == "ok"
+    assert "BC checkpoint variants match" in check.message
 
 
 def test_collision_bridge_capability_requires_latched_callback(tmp_path: Path) -> None:

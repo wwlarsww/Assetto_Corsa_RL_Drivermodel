@@ -15,7 +15,12 @@ from assetto_corsa_rl.ac_integration.launcher import (
     configured_fast_lane_path,
     configured_track_model_path,
 )
-from assetto_corsa_rl.config import ACTION_METHOD_VARIANT, ProjectConfig
+from assetto_corsa_rl.config import (
+    ACTION_METHOD_VARIANT,
+    BASELINE_METHOD_VARIANT,
+    STABILIZED_PPO_METHOD_VARIANT,
+    ProjectConfig,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +60,11 @@ def assess_training_readiness(
     if backend not in {"mock", "assetto-corsa"}:
         raise ValueError("backend must be mock or assetto-corsa")
     stall_speed_kmh = config.environment.minimum_speed_mps * 3.6
-    stall_grace_s = (
-        config.environment.minimum_speed_grace_steps / config.environment.control_frequency_hz
+    stall_debounce_s = (
+        config.environment.stall_debounce_steps / config.environment.control_frequency_hz
+    )
+    stall_startup_grace_s = (
+        config.environment.stall_startup_grace_steps / config.environment.control_frequency_hz
     )
     checks = [
         ReadinessCheck(
@@ -77,7 +85,10 @@ def assess_training_readiness(
             "episode_end",
             "ok",
             (
-                f"stall below {stall_speed_kmh:.3f} km/h after {stall_grace_s:.1f} s; "
+                f"{config.environment.termination_method_variant}: stall detection arms after "
+                f"driving above {stall_speed_kmh:.3f} km/h and terminates after "
+                f"{stall_debounce_s:.2f} s continuously below it; a car that never drives off "
+                f"terminates after {stall_startup_grace_s:.2f} s; "
                 + (
                     f"time-limit truncation after {config.experiment.max_episode_steps} steps"
                     if config.experiment.truncate_on_max_episode_steps
@@ -200,16 +211,25 @@ def _checkpoint_variant_check(
             f"cannot read method/action variant from {metrics_path}: {error}",
         )
     expected = config.ppo.method_variant
-    matches = method_variant == expected and action_method_variant == ACTION_METHOD_VARIANT
+    acceptable_method_variants = {
+        expected,
+    }
+    if expected == STABILIZED_PPO_METHOD_VARIANT:
+        acceptable_method_variants.add(BASELINE_METHOD_VARIANT)
+    matches = (
+        method_variant in acceptable_method_variants
+        and action_method_variant == ACTION_METHOD_VARIANT
+    )
+    message = (
+        f"BC checkpoint variants match {method_variant}/{ACTION_METHOD_VARIANT}"
+        if matches
+        else "BC checkpoint uses incompatible method/action variants; rebuild it for "
+        f"{expected!r}/{ACTION_METHOD_VARIANT!r}"
+    )
     return ReadinessCheck(
         "checkpoint_variant",
         "ok" if matches else "error",
-        (
-            f"BC checkpoint variants match {expected}/{ACTION_METHOD_VARIANT}"
-            if matches
-            else "BC checkpoint uses incompatible method/action variants; rebuild it for "
-            f"{expected!r}/{ACTION_METHOD_VARIANT!r}"
-        ),
+        message,
     )
 
 

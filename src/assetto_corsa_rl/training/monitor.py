@@ -1,4 +1,9 @@
-"""Optional, low-overhead desktop dashboard for live PPO diagnostics."""
+"""Backend-independent runner and Matplotlib dashboard for PPO diagnostics.
+
+The training package owns the monitor contract and the CSV polling lifecycle.
+Concrete external backends such as MLflow are supplied through a factory and
+therefore remain outside :mod:`assetto_corsa_rl`.
+"""
 
 from __future__ import annotations
 
@@ -41,19 +46,36 @@ class TrainingMonitorError(RuntimeError):
     """Raised when a requested standalone training monitor cannot start."""
 
 
-class _Monitor(Protocol):
+class TrainingMonitor(Protocol):
+    """Interface implemented by live training monitor backends."""
+
     @property
-    def is_enabled(self) -> bool: ...
+    def is_enabled(self) -> bool:
+        """Return whether the monitor is active."""
+        ...
 
-    def update(self, metrics: dict[str, Any]) -> None: ...
+    def update(self, metrics: dict[str, Any]) -> None:
+        """Process one row of training metrics."""
+        ...
 
-    def finish(self, *, completed: bool) -> None: ...
+    def finish(self, *, completed: bool) -> None:
+        """Record whether the monitored training completed."""
+        ...
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release resources owned by the monitor."""
+        ...
 
-    def wait_for_close(self) -> None: ...
+    def wait_for_close(self) -> None:
+        """Wait until the monitor window has been closed."""
+        ...
 
-    def process_events(self) -> None: ...
+    def process_events(self) -> None:
+        """Process pending interface events."""
+        ...
+
+
+MonitorFactory = Callable[..., TrainingMonitor]
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +167,7 @@ class LiveMonitor:
         *,
         total_environment_steps: int | None = None,
         run_label: str = "PPO",
+        run_directory: Path | None = None,
         max_history_points: int = 5_000,
         refresh_interval_s: float = 0.1,
     ) -> None:
@@ -160,6 +183,7 @@ class LiveMonitor:
         self._enabled = False
         self._total_environment_steps = total_environment_steps
         self._run_label = run_label
+        self._run_directory = run_directory
         self._refresh_interval_s = refresh_interval_s
         self._history: dict[str, deque[float]] = {
             series.key: deque(maxlen=max_history_points)
@@ -650,7 +674,7 @@ def monitor_training_run(
     *,
     poll_interval_s: float = 0.25,
     parent_pid: int | None = None,
-    monitor_factory: Callable[..., _Monitor] | None = None,
+    monitor_factory: MonitorFactory | None = None,
     sleep: Callable[[float], None] = time.sleep,
     parent_alive: Callable[[int], bool] | None = None,
 ) -> None:
@@ -663,12 +687,14 @@ def monitor_training_run(
     descriptor = describe_training_run(run_directory)
     factory = monitor_factory or LiveMonitor
     monitor = factory(
+        run_directory=descriptor.run_directory,
         total_environment_steps=descriptor.total_environment_steps,
         run_label=descriptor.run_label,
     )
     if not monitor.is_enabled:
         raise TrainingMonitorError(
-            "training dashboard is unavailable; verify the Matplotlib GUI installation"
+            "the requested training monitor could not be started; "
+            "verify its optional dependencies and configuration"
         )
     metric_path = run_directory / "metrics.csv"
     summary_path = run_directory / "summary.json"
@@ -700,18 +726,27 @@ def monitor_training_run(
 def launch_training_monitor(
     run_directory: Path,
     *,
+    monitor_backend: str = "matplotlib",
     poll_interval_s: float = 0.25,
     process_factory: Callable[..., Any] | None = None,
 ) -> int | None:
-    """Start an independent GUI process following one training run."""
+    """Start an independent process following one training run.
+
+    The backend name is forwarded to the CLI. Backend construction remains
+    outside this module so that the RL core has no dependency on MLflow or any
+    other experiment tracking package.
+    """
 
     if poll_interval_s <= 0:
         raise ValueError("poll_interval_s must be positive")
-    if plt is None:
+    backend = monitor_backend.strip().casefold()
+    if not backend:
+        raise ValueError("monitor_backend must not be empty")
+    if backend == "matplotlib" and plt is None:
         LOGGER.warning("training dashboard unavailable; Matplotlib is not installed")
         return None
     executable = Path(sys.executable)
-    if sys.platform == "win32":
+    if sys.platform == "win32" and backend == "matplotlib":
         pythonw = executable.with_name("pythonw.exe")
         if pythonw.is_file():
             executable = pythonw
@@ -724,6 +759,8 @@ def launch_training_monitor(
         str(run_directory.resolve()),
         "--poll-interval",
         str(poll_interval_s),
+        "--monitor",
+        backend,
         "--parent-pid",
         str(os.getpid()),
     ]
@@ -745,7 +782,12 @@ def launch_training_monitor(
         LOGGER.warning("could not launch training dashboard: %s", error)
         return None
     pid = int(process.pid)
-    LOGGER.info("Opened independent training dashboard for %s (PID %s)", run_directory, pid)
+    LOGGER.info(
+        "Opened independent %s training monitor for %s (PID %s)",
+        backend,
+        run_directory,
+        pid,
+    )
     return pid
 
 

@@ -77,7 +77,13 @@ class PredictedProgressRewardBreakdown:
 
 @dataclass(frozen=True, slots=True)
 class PredictedProgressReward:
-    """Project the predicted Bézier path onto the prescribed reference line."""
+    """Reward early predicted progress more strongly than late progress."""
+
+    horizon_discount: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.horizon_discount <= 1.0:
+            raise ValueError("horizon_discount must lie in (0, 1]")
 
     def compute(
         self,
@@ -122,7 +128,16 @@ class PredictedProgressReward:
                 reference[index],
                 reference_progress[index],
             )
-            progress[index] = projected_progress[-1]
+            progress_increments = np.diff(
+                np.concatenate(
+                    (np.zeros(1, dtype=np.float32), projected_progress),
+                )
+            )
+            horizon_weights = self.horizon_discount ** np.arange(
+                projected_progress.size,
+                dtype=np.float32,
+            )
+            progress[index] = float(np.dot(progress_increments, horizon_weights))
         progress = np.where(mask, progress, 0.0)
         return PredictedProgressRewardBreakdown(
             predicted_progress=np.asarray(progress, dtype=np.float32),

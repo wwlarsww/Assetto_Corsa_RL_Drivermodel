@@ -32,7 +32,8 @@ def create_mock_environment(config: ProjectConfig) -> AssettoCorsaEnv:
         track_half_width_m=environment.mock_track_half_width_m,
         initial_speed_mps=environment.initial_speed_mps,
         minimum_speed_mps=environment.minimum_speed_mps,
-        minimum_speed_grace_steps=environment.minimum_speed_grace_steps,
+        stall_startup_grace_steps=environment.stall_startup_grace_steps,
+        stall_debounce_steps=environment.stall_debounce_steps,
         critical_body_sideslip_angle_deg=environment.critical_body_sideslip_angle_deg,
         minimum_body_sideslip_termination_speed_mps=(
             environment.minimum_body_sideslip_termination_speed_mps
@@ -82,7 +83,8 @@ def create_assetto_corsa_environment(
         expected_car_id=config.dataset.car_id,
         expected_track_id=config.dataset.track_id,
         minimum_speed_mps=environment.minimum_speed_mps,
-        minimum_speed_grace_steps=environment.minimum_speed_grace_steps,
+        stall_startup_grace_steps=environment.stall_startup_grace_steps,
+        stall_debounce_steps=environment.stall_debounce_steps,
         critical_body_sideslip_angle_deg=environment.critical_body_sideslip_angle_deg,
         minimum_body_sideslip_termination_speed_mps=(
             environment.minimum_body_sideslip_termination_speed_mps

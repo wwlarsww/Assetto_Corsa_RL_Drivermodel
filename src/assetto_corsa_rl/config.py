@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -9,7 +10,11 @@ from typing import Any, Self, TypeVar
 
 ConfigSection = TypeVar("ConfigSection")
 BASELINE_METHOD_VARIANT = "ai_spline_absolute_v1"
+STABILIZED_PPO_METHOD_VARIANT = "ai_spline_absolute_stabilized_v2"
 ACTION_METHOD_VARIANT = "absolute_bounded_v1"
+TERMINATION_METHOD_VARIANT = "any_tyre_armed_stall_v1"
+PREDICTION_REWARD_METHOD_VARIANT = "discounted_progress_increments_v1"
+KL_CONTROL_METHOD_VARIANT = "target_band_learning_rate_v1"
 
 
 def _positive(name: str, value: float | int) -> None:
@@ -38,6 +43,43 @@ class ExperimentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MonitoringConfig:
+    """Configuration for optional experiment tracking."""
+
+    backend: str = "none"
+    tracking_uri: str = "http://127.0.0.1:5000"
+    experiment_name: str = "Assetto Corsa PPO"
+    run_name: str = ""
+    fail_on_error: bool = False
+
+    def __post_init__(self) -> None:
+        backend = self.normalized_backend
+
+        if backend not in {"none", "mlflow"}:
+            raise ValueError(
+                "monitoring.backend must be 'none' or 'mlflow', "
+                f"got {self.backend!r}"
+            )
+
+        if backend == "mlflow":
+            if not self.tracking_uri.strip():
+                raise ValueError("monitoring.tracking_uri must not be empty")
+
+            if not self.experiment_name.strip():
+                raise ValueError("monitoring.experiment_name must not be empty")
+
+    @property
+    def normalized_backend(self) -> str:
+        """Return the normalized backend identifier."""
+        return self.backend.strip().lower()
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether experiment tracking is enabled."""
+        return self.normalized_backend != "none"
+
+
+@dataclass(frozen=True, slots=True)
 class EnvironmentConfig:
     """Control rate plus explicitly mock-only vehicle and track settings."""
 
@@ -45,8 +87,10 @@ class EnvironmentConfig:
     mock_track_length_m: float = 1000.0
     mock_track_half_width_m: float = 5.0
     initial_speed_mps: float = 20.0
-    minimum_speed_mps: float = 2.0
-    minimum_speed_grace_steps: int = 100
+    termination_method_variant: str = TERMINATION_METHOD_VARIANT
+    minimum_speed_mps: float = 5.0 / 3.6
+    stall_startup_grace_steps: int = 25
+    stall_debounce_steps: int = 5
     initial_combined_pedal: float = 1.0
     critical_body_sideslip_angle_deg: float = 20.0
     minimum_body_sideslip_termination_speed_mps: float = 5.0
@@ -64,8 +108,15 @@ class EnvironmentConfig:
             _positive(f"environment.{name}", getattr(self, name))
         if self.minimum_speed_mps >= self.initial_speed_mps:
             raise ValueError("minimum speed must be lower than the initial speed")
-        if self.minimum_speed_grace_steps < 0:
-            raise ValueError("minimum_speed_grace_steps must be non-negative")
+        if self.termination_method_variant != TERMINATION_METHOD_VARIANT:
+            raise ValueError(
+                f"environment.termination_method_variant must be {TERMINATION_METHOD_VARIANT!r}"
+            )
+        _positive("environment.stall_debounce_steps", self.stall_debounce_steps)
+        _positive(
+            "environment.stall_startup_grace_steps",
+            self.stall_startup_grace_steps,
+        )
         if not -1.0 <= self.initial_combined_pedal <= 1.0:
             raise ValueError("initial_combined_pedal must lie in [-1, 1]")
         if self.critical_body_sideslip_angle_deg > 90.0:
@@ -85,18 +136,26 @@ class ActionConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    """Progress and predicted-progress coefficients for the initial method."""
+    """Progress and named rollout prediction-reward configuration."""
 
     progress_scale: float = 1.0
     termination_penalty: float = -100.0
-    prediction_progress_scale: float = 0.05
+    prediction_method_variant: str = PREDICTION_REWARD_METHOD_VARIANT
+    prediction_progress_scale: float = 0.01
+    prediction_horizon_discount: float = 0.5
 
     def __post_init__(self) -> None:
         _positive("rewards.progress_scale", self.progress_scale)
         if self.termination_penalty > 0:
             raise ValueError("termination_penalty must be non-positive")
+        if self.prediction_method_variant != PREDICTION_REWARD_METHOD_VARIANT:
+            raise ValueError(
+                f"rewards.prediction_method_variant must be {PREDICTION_REWARD_METHOD_VARIANT!r}"
+            )
         if self.prediction_progress_scale < 0:
             raise ValueError("prediction_progress_scale must be non-negative")
+        if not 0.0 < self.prediction_horizon_discount <= 1.0:
+            raise ValueError("prediction_horizon_discount must lie in (0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,9 +259,9 @@ class BehavioralCloningConfig:
 
 @dataclass(frozen=True, slots=True)
 class PPOConfig:
-    """Named synchronous PPO baseline for the fixed-reference setup."""
+    """Named synchronous PPO variant for the fixed-reference setup."""
 
-    method_variant: str = BASELINE_METHOD_VARIANT
+    method_variant: str = STABILIZED_PPO_METHOD_VARIANT
     total_environment_steps: int = 1024
     rollout_steps: int = 256
     update_epochs: int = 4
@@ -214,6 +273,13 @@ class PPOConfig:
     value_loss_coefficient: float = 0.5
     entropy_coefficient: float = 0.0
     predictor_loss_coefficient: float = 0.0
+    initial_log_std_after_bc: float = -1.5
+    kl_control_method_variant: str = KL_CONTROL_METHOD_VARIANT
+    kl_target: float = 0.01
+    kl_tolerance: float = 0.003
+    kl_learning_rate_decrease_factor: float = 0.5
+    kl_learning_rate_increase_factor: float = 1.1
+    minimum_learning_rate: float = 3e-5
     max_gradient_norm: float = 0.5
     use_predicted_progress_reward: bool = False
     initial_checkpoint_path: str = ""
@@ -222,8 +288,8 @@ class PPOConfig:
     maximum_initial_predictor_fde_m: float = 40.0
 
     def __post_init__(self) -> None:
-        if self.method_variant != BASELINE_METHOD_VARIANT:
-            raise ValueError(f"ppo.method_variant must be {BASELINE_METHOD_VARIANT!r}")
+        if self.method_variant != STABILIZED_PPO_METHOD_VARIANT:
+            raise ValueError(f"ppo.method_variant must be {STABILIZED_PPO_METHOD_VARIANT!r}")
         for name in (
             "total_environment_steps",
             "rollout_steps",
@@ -246,6 +312,21 @@ class PPOConfig:
             raise ValueError("ppo.clip_range must lie in (0, 1)")
         _non_negative("ppo.entropy_coefficient", self.entropy_coefficient)
         _non_negative("ppo.predictor_loss_coefficient", self.predictor_loss_coefficient)
+        if not math.isfinite(self.initial_log_std_after_bc):
+            raise ValueError("ppo.initial_log_std_after_bc must be finite")
+        if self.kl_control_method_variant != KL_CONTROL_METHOD_VARIANT:
+            raise ValueError(f"ppo.kl_control_method_variant must be {KL_CONTROL_METHOD_VARIANT!r}")
+        _positive("ppo.kl_target", self.kl_target)
+        _positive("ppo.kl_tolerance", self.kl_tolerance)
+        if self.kl_tolerance >= self.kl_target:
+            raise ValueError("ppo.kl_tolerance must be lower than kl_target")
+        if not 0.0 < self.kl_learning_rate_decrease_factor < 1.0:
+            raise ValueError("ppo.kl_learning_rate_decrease_factor must lie in (0, 1)")
+        if self.kl_learning_rate_increase_factor <= 1.0:
+            raise ValueError("ppo.kl_learning_rate_increase_factor must exceed one")
+        _positive("ppo.minimum_learning_rate", self.minimum_learning_rate)
+        if self.minimum_learning_rate > self.learning_rate:
+            raise ValueError("ppo.minimum_learning_rate may not exceed learning_rate")
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +416,7 @@ class ProjectConfig:
     """Complete immutable experiment configuration."""
 
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
     actions: ActionConfig = field(default_factory=ActionConfig)
     rewards: RewardConfig = field(default_factory=RewardConfig)
@@ -355,6 +437,7 @@ class ProjectConfig:
 
         allowed_sections = {
             "experiment",
+            "monitoring",
             "environment",
             "actions",
             "rewards",
@@ -372,6 +455,7 @@ class ProjectConfig:
 
         return cls(
             experiment=_load_section(ExperimentConfig, raw.get("experiment", {})),
+            monitoring=_load_section(MonitoringConfig,raw.get("monitoring", {}),),
             environment=_load_section(EnvironmentConfig, raw.get("environment", {})),
             actions=_load_section(ActionConfig, raw.get("actions", {})),
             rewards=_load_section(RewardConfig, raw.get("rewards", {})),

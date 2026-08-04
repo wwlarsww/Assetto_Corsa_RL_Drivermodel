@@ -23,6 +23,13 @@ components are recorded under the named variant
 `ai_spline_absolute_v1`. A later experiment must use its own
 named configuration and must not silently change this baseline.
 
+The current PPO configurations therefore use the distinct
+`ai_spline_absolute_stabilized_v2` variant. It retains the baseline geometry,
+observation and bounded-action contracts while explicitly selecting
+`any_tyre_armed_stall_v1`, `discounted_progress_increments_v1`, and
+`target_band_learning_rate_v1`. It is a stabilised experimental variant, not a
+silent redefinition of the thesis baseline.
+
 The fixed reference combines the installed track's `ai/fast_lane.ai`
 world-space centreline with a robust human-median speed profile. The same file
 provides lap length and side distances for boundary features. The speed profile
@@ -119,7 +126,7 @@ termination penalty:
 ```text
 r_fixed =
     c * delta_reference_progress
-  + alpha_pred * predicted_progress
+  + alpha_pred * discounted_predicted_progress
   + termination_penalty
 ```
 
@@ -138,16 +145,17 @@ recorded only after the acknowledged deterministic `HOTLAP_START` reset, stable
 frames and a configured neutral quiescence interval so reset-induced callbacks
 cannot leak into the episode. Every subsequent CSP collision event terminates immediately as
 `CRASH`; damage and inferred vehicle dimensions
-are not part of the criterion. Off-track, stalled, and vehicle body-sideslip
-checks remain explicit additional safety conditions. The body-sideslip
+are not part of the criterion. The explicitly named termination variant
+`any_tyre_armed_stall_v1` terminates as soon as Assetto Corsa reports one tyre
+outside; the earlier four-tyre condition is not used. Vehicle body-sideslip
+remains an explicit additional safety condition. The body-sideslip
 termination computes the body slip angle as
 `beta = atan2(local_velocity_x, local_velocity_z)`: AC local x is the
 calibrated lateral axis and local z is forward-positive. It terminates when
 `abs(beta)` exceeds `critical_body_sideslip_angle_deg = 20.0` at or above
 `minimum_body_sideslip_termination_speed_mps = 5.0`. Longitudinal tyre slip
 ratio remains an observation but is no longer a termination criterion, so
-launch wheelspin is permitted. The stalled check still handles failure to move
-after its grace interval.
+launch wheelspin is permitted.
 Every episode starts from the explicit absolute action `[+1, 0]`: full
 throttle and centred steering. The live backend keeps the controller neutral
 during reset validation and collision quiescence, then applies this initial
@@ -155,8 +163,11 @@ action immediately before returning the first observation. The same action is
 stored in the observation's previous-action fields. This primes the actuator
 without creating an unrecorded simulator transition; the policy may replace
 both commands without a delta limit on its first regular step.
-For the live baseline, `minimum_speed_mps = 1.3888888889` terminates below
-5 km/h after a 250-step (10 s at 25 Hz) launch grace period. Normal
+For the live configurations, `minimum_speed_mps = 1.3888888889` arms stall
+detection after the first successful drive-off. Five consecutive later frames
+below 5 km/h then terminate. A separate 25-step startup fallback terminates a
+car that never drives off after 1 s at 25 Hz. These settings are recorded under
+`any_tyre_armed_stall_v1`; they are not the former 250-step launch grace. Normal
 `max_episode_steps` truncation is disabled: an episode ends by lap completion
 or an explicit safety termination. Transport timeouts remain adapter errors
 and never become successful environment transitions.
@@ -164,13 +175,14 @@ and never become successful environment transitions.
 After the rollout, the predictor is decoded into twenty ego-frame Bézier
 samples. The same frame contains a reference polyline comprising the exact
 current projection point followed by the twenty prescribed future reference
-points. The predicted endpoint is projected onto this polyline, and its
-along-line arc coordinate is the predicted progress:
+points. Every predicted horizon point is projected onto this polyline. The
+named `discounted_progress_increments_v1` reward discounts later increments:
 
 ```text
 reference_path = [current_reference_projection, future_reference_points...]
-predicted_progress =
-    project_to_reference_arc(bezier_samples[-1], reference_path)
+p_i = project_to_reference_arc(bezier_samples[i], reference_path)
+delta_p_i = p_i - p_(i-1), with p_(-1) = 0
+discounted_predicted_progress = sum_i discount^i * delta_p_i
 ```
 
 Origins without a complete observed future horizon in the same fragment are
@@ -178,7 +190,10 @@ masked only for auxiliary predictor supervision. Predicted progress itself is
 available at every rollout origin because the prediction and fixed future
 reference are already known. This is not raw ego-frame `z` displacement:
 bends in the reference line contribute their full arc length.
-`PredictedProgressReward` contains no imitation cost or Lagrange update.
+The configured discount is `0.5` and `alpha_pred` is `0.01`, reduced from the
+earlier endpoint scale of `0.05`. A discount of one exactly recovers endpoint
+progress, which makes the method difference testable. `PredictedProgressReward`
+contains no imitation cost or Lagrange update.
 
 Prediction terms are added **after rollout collection and before GAE**. They
 must never be calculated inside simulator dynamics or appended after advantage
@@ -201,6 +216,17 @@ predictor target is the actually observed future human path, not the prescribed
 reference points in the observation. During RL, predictor supervision remains
 an auxiliary update against actually observed future positions.
 
+The network default remains the baseline `initial_log_std = -0.5`. When PPO
+loads a checkpoint identified as a behavioural-cloning checkpoint, the
+stabilised variant sets `initial_log_std_after_bc = -1.5`, corresponding to
+`sigma ~= 0.223`. A resumed PPO checkpoint keeps its learned standard
+deviation and is not reset. The named `target_band_learning_rate_v1` controller
+measures approximate KL on the complete rollout after each update epoch. It
+stops further epochs above the configured upper boundary and adjusts the next
+iteration's learning rate: multiply by `0.5` above the band, by `1.1` below the
+band (up to the configured base rate), and hold it inside the band. With target
+`0.01` and tolerance `0.003`, the logged target band is `[0.007, 0.013]`.
+
 The thesis fixes the Bézier-head width to 10 but does not disclose how those
 scalars are packed. The scaffold therefore names its replaceable **public
 convention** `bezier-5x2`: five ego-frame 2D control points are decoded into 20
@@ -219,8 +245,8 @@ For each current-policy fragment:
 4. transform future positions into each origin's ego frame;
 5. build the current reference projection plus future reference points in
    exactly the same ego frames;
-6. decode rollout predictions, project their endpoint, and compute predicted
-   reference arc progress;
+6. decode rollout predictions, project every horizon point, and compute the
+   discounted sum of reference-progress increments;
 7. add predicted-progress rewards to environment rewards;
 8. compute termination-aware GAE;
 9. update clipped PPO, the value function and the predictor on valid observed

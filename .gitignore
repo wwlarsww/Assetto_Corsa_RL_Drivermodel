@@ -41,3 +41,8 @@ Masterarbeit*.pdf
 # OS files
 .DS_Store
 Thumbs.db
+
+# monitoring
+runs/mlflow/
+mlflow.db
+mlruns/

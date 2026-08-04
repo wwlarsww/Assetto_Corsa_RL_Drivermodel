@@ -156,6 +156,7 @@ def train_behavioral_cloning(
                     policy_version=0,
                 ),
                 configuration={
+                    "training_stage": "behavioral_cloning",
                     "method_variant": config.behavioral_cloning.method_variant,
                     "action_method_variant": config.actions.method_variant,
                     "project": config.to_dict(),

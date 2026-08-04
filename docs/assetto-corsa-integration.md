@@ -262,9 +262,10 @@ body-sideslip termination uses the calibrated shared-memory local
 velocity axes and a configurable 20-degree absolute threshold above 5 m/s;
 longitudinal tyre slip ratio is not a terminal condition. External timeouts
 are adapter errors, not successful terminal states.
-The live baseline has no ordinary time-limit truncation. After a 10 s launch
-grace period, speed below 5 km/h produces `STALLED` termination and the next
-episode performs the deterministic `HOTLAP_START` reset.
+The live baseline has no ordinary time-limit truncation. Stall detection arms
+after the car first reaches 5 km/h; five consecutive later low-speed frames
+produce `STALLED`. A separate 25-step fallback terminates a car that never
+drives off. The next episode performs the deterministic `HOTLAP_START` reset.
 
 The deterministic reset explicitly engages first gear after placing the car at
 `HOTLAP_START`. For sessions started by the launcher, the user's `assists.ini`

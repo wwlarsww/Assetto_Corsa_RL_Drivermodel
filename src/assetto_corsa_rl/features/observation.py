@@ -19,7 +19,7 @@ from assetto_corsa_rl.types import FloatArray, TelemetryFrame
 
 @dataclass(frozen=True, slots=True)
 class ObservationLayout:
-    """Stable slice layout of the 77-dimensional baseline observation."""
+    """Stable slice layout of the 77-dimensional baseline vector observation."""
 
     vehicle_state: slice = field(default_factory=lambda: slice(0, 7))
     left_track_boundary: slice = field(default_factory=lambda: slice(7, 21))

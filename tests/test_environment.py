@@ -104,7 +104,7 @@ def test_body_sideslip_termination_uses_speed_gate_and_configured_angle() -> Non
     low_speed = MockAssettoCorsaBackend(
         initial_speed_mps=1.0,
         minimum_speed_mps=0.1,
-        minimum_speed_grace_steps=100,
+        stall_debounce_steps=5,
         critical_body_sideslip_angle_deg=0.1,
         minimum_body_sideslip_termination_speed_mps=5.0,
     )
@@ -127,13 +127,15 @@ def test_stall_termination_uses_the_configured_five_kmh_threshold() -> None:
     backend = MockAssettoCorsaBackend(
         initial_speed_mps=1.5,
         minimum_speed_mps=5.0 / 3.6,
-        minimum_speed_grace_steps=0,
+        stall_debounce_steps=3,
     )
     backend.reset(seed=None, reference=reference)
-    moving = backend.step(np.zeros(2, dtype=np.float32))
+    moving = backend.step(np.asarray([1.0, 0.0], dtype=np.float32))
+    assert moving.telemetry.vehicle_state.speed_mps >= 5.0 / 3.6
     assert moving.termination_reason is None
 
-    backend.reset(seed=None, reference=reference)
-    too_slow = backend.step(np.asarray([-1.0, 0.0], dtype=np.float32))
-    assert too_slow.telemetry.vehicle_state.speed_mps < 5.0 / 3.6
-    assert too_slow.termination_reason is TerminationReason.STALLED
+    backend._speed_mps = 0.0
+    assert backend.step(np.zeros(2, dtype=np.float32)).termination_reason is None
+    assert backend.step(np.zeros(2, dtype=np.float32)).termination_reason is None
+    stalled = backend.step(np.zeros(2, dtype=np.float32))
+    assert stalled.termination_reason is TerminationReason.STALLED

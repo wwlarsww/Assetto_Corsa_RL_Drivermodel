@@ -73,8 +73,8 @@ width/length, and geometric wall intersection are deliberately not consulted.
 3. Complete future paths are interpolated at twenty `0.25 s` offsets; targets
    crossing an episode or fragment boundary are masked.
 4. The network's ten Bézier parameters are decoded into twenty path points.
-5. Predicted endpoint progress on the same reference is added after collection
-   and before GAE.
+5. Discounted predicted progress increments on the same reference are added
+   after collection and before GAE.
 6. GAE and clipped PPO update policy/value heads plus the auxiliary predictor.
 7. The policy version increments only after optimisation; stale fragments are
    rejected.
@@ -83,6 +83,8 @@ width/length, and geometric wall intersection are deliberately not consulted.
 
 This method name freezes action semantics, geometry provenance, observation
 order, reward terms, network codec, and target construction. A change to one of
-those contracts requires a new method name and configuration. In particular,
-legacy `fixed_reference_v1` delta-action checkpoints are incompatible and are
-rejected rather than silently loaded.
+those contracts requires a new method name and configuration. The stabilised
+PPO configuration is consequently named `ai_spline_absolute_stabilized_v2`;
+it does not redefine this baseline. In particular, legacy `fixed_reference_v1`
+delta-action checkpoints are incompatible and are rejected rather than
+silently loaded.

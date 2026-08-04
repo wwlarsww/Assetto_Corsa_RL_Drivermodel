@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from assetto_corsa_rl.config import (
+    KL_CONTROL_METHOD_VARIANT,
+    PREDICTION_REWARD_METHOD_VARIANT,
+    STABILIZED_PPO_METHOD_VARIANT,
+    TERMINATION_METHOD_VARIANT,
     ActionConfig,
     AssettoCorsaRuntimeConfig,
     BehavioralCloningConfig,
@@ -31,10 +35,21 @@ def test_load_project_config() -> None:
     assert fixed.reference.mode == "fixed"
     assert fixed.behavioral_cloning.method_variant == "ai_spline_absolute_v1"
     assert fixed.actions.method_variant == "absolute_bounded_v1"
+    assert fixed.environment.termination_method_variant == TERMINATION_METHOD_VARIANT
+    assert fixed.rewards.prediction_method_variant == PREDICTION_REWARD_METHOD_VARIANT
+    assert fixed.ppo.method_variant == STABILIZED_PPO_METHOD_VARIANT
+    assert fixed.ppo.kl_control_method_variant == KL_CONTROL_METHOD_VARIANT
     assert fixed.environment.mock_track_length_m == pytest.approx(1000.0)
     assert fixed.environment.minimum_speed_mps * 3.6 == pytest.approx(5.0)
+    assert fixed.environment.stall_startup_grace_steps == 25
+    assert fixed.environment.stall_debounce_steps == 5
     assert fixed.environment.initial_combined_pedal == pytest.approx(1.0)
     assert fixed.environment.critical_body_sideslip_angle_deg == pytest.approx(20.0)
+    assert fixed.rewards.prediction_progress_scale == pytest.approx(0.01)
+    assert fixed.rewards.prediction_horizon_discount == pytest.approx(0.5)
+    assert fixed.ppo.initial_log_std_after_bc == pytest.approx(-1.5)
+    assert fixed.ppo.kl_target == pytest.approx(0.01)
+    assert fixed.ppo.kl_tolerance == pytest.approx(0.003)
     assert not fixed.experiment.truncate_on_max_episode_steps
 
     live_smoke = ProjectConfig.from_toml(Path("configs/bmw_z4_gt3_monza_live_smoke.toml"))

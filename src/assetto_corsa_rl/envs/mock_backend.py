@@ -35,7 +35,8 @@ class MockAssettoCorsaBackend:
     track_half_width_m: float = 5.0
     initial_speed_mps: float = 20.0
     minimum_speed_mps: float = 2.0
-    minimum_speed_grace_steps: int = 100
+    stall_startup_grace_steps: int = 25
+    stall_debounce_steps: int = 5
     critical_body_sideslip_angle_deg: float = 20.0
     minimum_body_sideslip_termination_speed_mps: float = 5.0
     _reference: ReferenceTrajectory | None = field(init=False, default=None, repr=False)
@@ -51,6 +52,8 @@ class MockAssettoCorsaBackend:
     _last_rear_slip: float = field(init=False, default=0.0, repr=False)
     _last_body_sideslip_angle_rad: float = field(init=False, default=0.0, repr=False)
     _last_steering: float = field(init=False, default=0.0, repr=False)
+    _stall_detection_armed: bool = field(init=False, default=False, repr=False)
+    _consecutive_low_speed_steps: int = field(init=False, default=0, repr=False)
 
     def __post_init__(self) -> None:
         positive_values = (
@@ -66,10 +69,21 @@ class MockAssettoCorsaBackend:
             raise ValueError("mock backend physical settings must be positive")
         if self.minimum_speed_mps >= self.initial_speed_mps:
             raise ValueError("minimum speed must be below initial speed")
-        if self.minimum_speed_grace_steps < 0:
-            raise ValueError("minimum speed grace steps must be non-negative")
+        if self.stall_debounce_steps <= 0:
+            raise ValueError("stall debounce steps must be positive")
+        if self.stall_startup_grace_steps <= 0:
+            raise ValueError("stall startup grace steps must be positive")
         if self.critical_body_sideslip_angle_deg > 90.0:
             raise ValueError("critical body sideslip angle must not exceed 90 degrees")
+
+    def _update_stall_detection(self) -> None:
+        """Arm after driving off and debounce subsequent low-speed frames."""
+
+        if self._speed_mps >= self.minimum_speed_mps:
+            self._stall_detection_armed = True
+            self._consecutive_low_speed_steps = 0
+        elif self._stall_detection_armed:
+            self._consecutive_low_speed_steps += 1
 
     def reset(
         self,
@@ -94,6 +108,8 @@ class MockAssettoCorsaBackend:
         self._heading_error_rad = 0.0
         self._speed_mps = self.initial_speed_mps
         self._step_count = 0
+        self._stall_detection_armed = False
+        self._consecutive_low_speed_steps = 0
         self._last_longitudinal_acceleration = 0.0
         self._last_lateral_acceleration = 0.0
         self._last_front_slip = 0.0
@@ -142,6 +158,8 @@ class MockAssettoCorsaBackend:
         self._last_body_sideslip_angle_rad = 0.5 * self._heading_error_rad
         self._last_steering = steering
 
+        self._update_stall_detection()
+
         termination_reason = self._termination_reason()
         telemetry = self._telemetry()
         return BackendTransition(
@@ -153,6 +171,9 @@ class MockAssettoCorsaBackend:
                 "absolute_steering": steering,
                 "body_sideslip_angle_rad": self._last_body_sideslip_angle_rad,
                 "body_sideslip_angle_deg": math.degrees(self._last_body_sideslip_angle_rad),
+                "number_of_tyres_out": int(abs(self._lateral_offset_m) > self.track_half_width_m),
+                "stall_detection_armed": self._stall_detection_armed,
+                "consecutive_low_speed_steps": self._consecutive_low_speed_steps,
             },
         )
 
@@ -168,9 +189,11 @@ class MockAssettoCorsaBackend:
         if abs(self._lateral_offset_m) > self.track_half_width_m:
             return TerminationReason.OFF_TRACK
         if (
-            self._step_count > self.minimum_speed_grace_steps
-            and self._speed_mps < self.minimum_speed_mps
+            self._stall_detection_armed
+            and self._consecutive_low_speed_steps >= self.stall_debounce_steps
         ):
+            return TerminationReason.STALLED
+        if not self._stall_detection_armed and self._step_count >= self.stall_startup_grace_steps:
             return TerminationReason.STALLED
         if self._speed_mps >= self.minimum_body_sideslip_termination_speed_mps and abs(
             self._last_body_sideslip_angle_rad

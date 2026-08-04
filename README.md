@@ -24,7 +24,8 @@ training always runs locally; see
   progress after a rollout; no imitation term is active in the initial variant;
 - a two-layer shared feature extractor with Gaussian policy, value and
   auxiliary trajectory-prediction heads;
-- a named `ai_spline_absolute_v1` baseline whose line, lap length and
+- a frozen `ai_spline_absolute_v1` thesis baseline plus the explicitly named
+  `ai_spline_absolute_stabilized_v2` PPO variant whose line, lap length and
   boundaries come from the installed track's `ai/fast_lane.ai`;
 - on-policy policy-version checks for PPO rollout collection;
 - synchronous PPO/GAE training with auxiliary predictor updates and explicit
@@ -66,9 +67,9 @@ For a guarded real-time smoke test, `rl-train` with
 all live prerequisites pass. See [docs/training.md](docs/training.md) before
 enabling control. When training finishes or fails, it gracefully closes only
 the AC process it launched itself; an attached pre-existing session is left running.
-The independent training dashboard opens automatically; pass `--no-monitor-ui`
-to suppress it or run `ac-rl-driver training-monitor` to reopen the newest PPO
-run manually.
+With the optional `monitoring` extra on Python 3.11/3.12, the independent Aim
+dashboard opens automatically. Pass `--no-monitor-ui` to suppress it or run
+`ac-rl-driver training-monitor` to reopen the newest PPO run manually.
 
 With Assetto Corsa running in an on-track session, validate its direct,
 read-only telemetry transport with:

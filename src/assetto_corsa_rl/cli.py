@@ -71,6 +71,7 @@ from assetto_corsa_rl.envs.factory import (
 )
 from assetto_corsa_rl.experiment import ExperimentRecorder
 from assetto_corsa_rl.policies import MockDriverPolicy
+from assetto_corsa_rl.training.aim_integration import migrate_run
 from assetto_corsa_rl.training.behavioral_cloning import train_behavioral_cloning
 from assetto_corsa_rl.training.monitor import (
     TrainingMonitorError,
@@ -324,7 +325,13 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CL
         "--monitor-ui",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Automatically open an independent live PPO diagnostics dashboard.",
+        help="Automatically start Aim logging and its independent local web UI.",
+    )
+    rl_train.add_argument(
+        "--monitor-backend",
+        choices=("aim", "none"),
+        default="aim",
+        help="Which monitor backend to use when --monitor-ui is enabled.",
     )
     rl_train.add_argument(
         "--launch-game",
@@ -361,9 +368,15 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CL
     )
     training_monitor.add_argument(
         "--monitor",
-        choices=("matplotlib", "aim", "none"),
-        default="matplotlib",
-        help="Which monitor backend to use for live viewing.",
+        choices=("aim", "none"),
+        default="aim",
+        help="Use Aim for live viewing or explicitly disable monitoring.",
+    )
+    training_monitor.add_argument(
+        "--monitor-start-ui",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Automatically start the local Aim web UI.",
     )
     training_monitor.add_argument(
         "--parent-pid",
@@ -1037,58 +1050,23 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 arguments.run,
                 runs_root=arguments.runs_root,
             )
-            # Select monitor factory based on CLI flag
-            monitor_factory = None
-            if arguments.monitor == "aim":
-                try:
-                    from assetto_corsa_rl.training.aim_integration import AimMonitor
-
-                    monitor_factory = AimMonitor
-                except Exception as error:  # pragma: no cover - optional dependency
-                    LOGGER.error("Aim monitor requested but unavailable: %s", error)
-                    return 2
-            elif arguments.monitor == "none":
-                # Provide a minimal no-op monitor factory
-                class _NoOpMonitor:
-                    def __init__(self, *args, **kwargs):
-                        self._enabled = False
-
-                    @property
-                    def is_enabled(self):
-                        return False
-
-                    def update(self, *_):
-                        return
-
-                    def finish(self, *, completed: bool):
-                        return
-
-                    def close(self):
-                        return
-
-                    def wait_for_close(self):
-                        return
-
-                    def process_events(self):
-                        return
-
-                monitor_factory = _NoOpMonitor
-
-            monitor_training_run(
-                run_directory,
-                poll_interval_s=arguments.poll_interval,
-                parent_pid=arguments.parent_pid,
-                monitor_factory=monitor_factory,
-            )
+            if arguments.monitor != "none":
+                monitor_training_run(
+                    run_directory,
+                    poll_interval_s=arguments.poll_interval,
+                    parent_pid=arguments.parent_pid,
+                    start_ui=bool(arguments.monitor_start_ui),
+                )
         except (TrainingMonitorError, ValueError) as error:
             LOGGER.error("cannot open training dashboard: %s", error)
             return 2
         return 0
     if arguments.command == "aim-migrate":
         try:
-            from assetto_corsa_rl.training.aim_integration import migrate_run
-
-            run_directory = resolve_training_run_directory(arguments.run, runs_root=arguments.runs_root)
+            run_directory = resolve_training_run_directory(
+                arguments.run,
+                runs_root=arguments.runs_root,
+            )
             migrate_run(run_directory)
         except Exception as error:
             LOGGER.error("aim migration failed: %s", error)
@@ -1143,6 +1121,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                         backend_name=arguments.backend,
                         device=arguments.device,
                         monitor_ui=arguments.monitor_ui,
+                        monitor_backend=arguments.monitor_backend,
                     )
                 finally:
                     try:

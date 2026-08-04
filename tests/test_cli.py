@@ -176,11 +176,13 @@ def test_live_rl_training_selects_live_environment(
         backend_name: str,
         device: str,
         monitor_ui: bool,
+        monitor_backend: str,
     ) -> SimpleNamespace:
         assert selected_environment is environment
         assert command[0] == "ac-rl-driver"
         assert device == "cpu"
         assert monitor_ui is True
+        assert monitor_backend == "aim"
         observed_backends.append(backend_name)
         return SimpleNamespace(
             environment_steps=1,
@@ -228,8 +230,10 @@ def test_standalone_training_monitor_cli_selects_and_opens_run(
     monkeypatch.setattr(
         cli,
         "monitor_training_run",
-        lambda run, *, poll_interval_s, parent_pid: opened.append(
-            (run, poll_interval_s, parent_pid)
+        lambda run, *, poll_interval_s, parent_pid, start_ui: (
+            opened.append((run, poll_interval_s, parent_pid))
+            if start_ui
+            else pytest.fail("Aim UI should start by default")
         ),
     )
 

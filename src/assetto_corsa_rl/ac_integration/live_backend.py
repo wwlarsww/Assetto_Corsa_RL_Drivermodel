@@ -125,7 +125,8 @@ class AssettoCorsaLiveBackend:
         expected_car_id: str,
         expected_track_id: str,
         minimum_speed_mps: float,
-        minimum_speed_grace_steps: int,
+        stall_startup_grace_steps: int,
+        stall_debounce_steps: int,
         critical_body_sideslip_angle_deg: float,
         minimum_body_sideslip_termination_speed_mps: float,
         frame_timeout_s: float = 2.0,
@@ -151,8 +152,10 @@ class AssettoCorsaLiveBackend:
         )
         if any(value <= 0 for value in positive):
             raise ValueError("live backend timing and safety values must be positive")
-        if minimum_speed_grace_steps < 0:
-            raise ValueError("minimum_speed_grace_steps must be non-negative")
+        if stall_debounce_steps <= 0:
+            raise ValueError("stall_debounce_steps must be positive")
+        if stall_startup_grace_steps <= 0:
+            raise ValueError("stall_startup_grace_steps must be positive")
         if critical_body_sideslip_angle_deg > 90.0:
             raise ValueError("critical body sideslip angle must not exceed 90 degrees")
         if reset_stable_frames <= 0:
@@ -171,7 +174,8 @@ class AssettoCorsaLiveBackend:
         self.expected_car_id = expected_car_id
         self.expected_track_id = expected_track_id
         self.minimum_speed_mps = minimum_speed_mps
-        self.minimum_speed_grace_steps = minimum_speed_grace_steps
+        self.stall_startup_grace_steps = stall_startup_grace_steps
+        self.stall_debounce_steps = stall_debounce_steps
         self.critical_body_sideslip_angle_rad = math.radians(critical_body_sideslip_angle_deg)
         self.minimum_body_sideslip_termination_speed_mps = (
             minimum_body_sideslip_termination_speed_mps
@@ -190,6 +194,8 @@ class AssettoCorsaLiveBackend:
         self._episode_origin_monotonic_s = 0.0
         self._episode_start_completed_laps = 0
         self._step_count = 0
+        self._stall_detection_armed = False
+        self._consecutive_low_speed_steps = 0
         self._last_reset_acknowledgement: ResetAcknowledgement | None = None
         self._last_collision_state: CollisionState | None = None
         self._closed = False
@@ -203,7 +209,8 @@ class AssettoCorsaLiveBackend:
         expected_car_id: str,
         expected_track_id: str,
         minimum_speed_mps: float,
-        minimum_speed_grace_steps: int,
+        stall_startup_grace_steps: int,
+        stall_debounce_steps: int,
         critical_body_sideslip_angle_deg: float,
         minimum_body_sideslip_termination_speed_mps: float,
         frame_timeout_s: float,
@@ -251,7 +258,8 @@ class AssettoCorsaLiveBackend:
                 expected_car_id=expected_car_id,
                 expected_track_id=expected_track_id,
                 minimum_speed_mps=minimum_speed_mps,
-                minimum_speed_grace_steps=minimum_speed_grace_steps,
+                stall_startup_grace_steps=stall_startup_grace_steps,
+                stall_debounce_steps=stall_debounce_steps,
                 critical_body_sideslip_angle_deg=critical_body_sideslip_angle_deg,
                 minimum_body_sideslip_termination_speed_mps=(
                     minimum_body_sideslip_termination_speed_mps
@@ -301,6 +309,8 @@ class AssettoCorsaLiveBackend:
             self._episode_origin_monotonic_s = snapshot.monotonic_time_s
             self._episode_start_completed_laps = snapshot.graphics.completed_laps
             self._step_count = 0
+            self._stall_detection_armed = False
+            self._consecutive_low_speed_steps = 0
             self._last_reset_acknowledgement = acknowledgement
             self._last_collision_state = collision_state
             if action is not None:
@@ -343,6 +353,7 @@ class AssettoCorsaLiveBackend:
         body_sideslip_angle_rad = assetto_corsa_body_sideslip_angle_rad(
             snapshot.physics.local_velocity_mps
         )
+        self._update_stall_detection(frame.vehicle_state.speed_mps)
         termination = self._termination_reason(
             snapshot,
             frame,
@@ -374,6 +385,9 @@ class AssettoCorsaLiveBackend:
             "rear_slip_ratio": frame.vehicle_state.rear_slip_ratio,
             "body_sideslip_angle_rad": body_sideslip_angle_rad,
             "body_sideslip_angle_deg": math.degrees(body_sideslip_angle_rad),
+            "number_of_tyres_out": snapshot.physics.number_of_tyres_out,
+            "stall_detection_armed": self._stall_detection_armed,
+            "consecutive_low_speed_steps": self._consecutive_low_speed_steps,
             "reset_method_variant": (
                 self._last_reset_acknowledgement.method_variant
                 if self._last_reset_acknowledgement is not None
@@ -566,12 +580,9 @@ class AssettoCorsaLiveBackend:
             return TerminationReason.CRASH
         if snapshot.graphics.completed_laps > self._episode_start_completed_laps:
             return TerminationReason.LAP_COMPLETE
-        if snapshot.physics.number_of_tyres_out >= 4:
+        if snapshot.physics.number_of_tyres_out > 0:
             return TerminationReason.OFF_TRACK
-        if (
-            self._step_count > self.minimum_speed_grace_steps
-            and frame.vehicle_state.speed_mps < self.minimum_speed_mps
-        ):
+        if self._stall_termination_due():
             return TerminationReason.STALLED
         if (
             frame.vehicle_state.speed_mps >= self.minimum_body_sideslip_termination_speed_mps
@@ -579,6 +590,20 @@ class AssettoCorsaLiveBackend:
         ):
             return TerminationReason.EXCESSIVE_BODY_SIDESLIP
         return None
+
+    def _stall_termination_due(self) -> bool:
+        if self._stall_detection_armed:
+            return self._consecutive_low_speed_steps >= self.stall_debounce_steps
+        return self._step_count >= self.stall_startup_grace_steps
+
+    def _update_stall_detection(self, speed_mps: float) -> None:
+        """Arm after driving off and debounce subsequent low-speed frames."""
+
+        if speed_mps >= self.minimum_speed_mps:
+            self._stall_detection_armed = True
+            self._consecutive_low_speed_steps = 0
+        elif self._stall_detection_armed:
+            self._consecutive_low_speed_steps += 1
 
     def _require_open(self) -> None:
         if self._closed:
