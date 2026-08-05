@@ -25,7 +25,7 @@ from assetto_corsa_rl.config import ProjectConfig
 _AI_POINT_STRUCT = struct.Struct("<3ffi")
 _AI_POINT_EXTRA_STRUCT = struct.Struct("<9f3ff3f2f")
 _SUPPORTED_AI_VERSION = 7
-_ASSET_SCHEMA = 4
+_ASSET_SCHEMA = 5
 CANONICAL_COORDINATE_FRAME = "assetto_corsa_gym_world_xy_v1"
 SOURCE_COORDINATE_FRAME = "assetto_corsa_native_world_xz"
 
@@ -703,8 +703,14 @@ def _write_track_geometry(
         parsed.forward_vector_xyz,
         native_position_xz,
     )
+    # The repository exposes the horizontal plane as [AC z, AC x].
+    # Because this axis swap reverses the planar orientation, physical
+    # left in native AC [x, z] is the clockwise rotation of forward.
     native_left_xz = np.column_stack(
-        (-native_forward_xz[:, 1], native_forward_xz[:, 0])
+        (
+            native_forward_xz[:, 1],
+            -native_forward_xz[:, 0],
+        )
     )
     native_right_xz = -native_left_xz
 

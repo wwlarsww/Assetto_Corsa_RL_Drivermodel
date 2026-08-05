@@ -88,7 +88,7 @@ minimum_speed_mps = 5.0
 method_variant = "ai_spline_absolute_stabilized_v2"
 # Sixteen PPO updates provide a meaningful end-to-end stability test.
 # At 20 Hz, 4096 environment steps correspond to about 205 s of simulator time.
-total_environment_steps = 256
+total_environment_steps = 8192
 rollout_steps = 256
 checkpoint_interval_updates = 1
 update_epochs = 1
