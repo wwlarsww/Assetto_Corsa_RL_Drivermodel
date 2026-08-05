@@ -1,0 +1,86 @@
+{
+  "assetto_corsa_version": "1.16.4",
+  "car_model": "ks_bmw_z4_gt3",
+  "elapsed_s": 1.0,
+  "feature_readiness": [
+    {
+      "feature": "speed",
+      "source": "physics.speedKmh",
+      "status": "direct"
+    },
+    {
+      "feature": "longitudinal/lateral acceleration",
+      "source": "physics.accG raw axes",
+      "status": "calibration_required"
+    },
+    {
+      "feature": "front/rear slip ratio",
+      "source": "acsys.CS.SlipRatio",
+      "status": "bridge_required"
+    },
+    {
+      "feature": "front/rear side-slip angle",
+      "source": "acsys.CS.SlipAngle",
+      "status": "bridge_required"
+    },
+    {
+      "feature": "world pose and track phase",
+      "source": "graphics.carCoordinates + normalizedCarPosition",
+      "status": "direct"
+    }
+  ],
+  "forward_axis_mean_error_kmh": null,
+  "fresh_poll_fraction": 0.1,
+  "inferred_forward_local_velocity_axis": null,
+  "inferred_forward_local_velocity_sign": null,
+  "issues": [
+    {
+      "code": "control_range",
+      "message": "Gas, brake, or clutch left its documented [0, 1] range.",
+      "severity": "error"
+    },
+    {
+      "code": "session_not_live",
+      "message": "No AC_LIVE frame was observed; menus, pause, and replay are not RL transitions.",
+      "severity": "warning"
+    },
+    {
+      "code": "stale_physics_page",
+      "message": "Only one coherent dynamic snapshot was observed; a page is stale or the game is paused.",
+      "severity": "error"
+    },
+    {
+      "code": "low_fresh_frame_fraction",
+      "message": "Fewer than 25% of polls returned fresh physics and graphics pages.",
+      "severity": "warning"
+    },
+    {
+      "code": "forward_axis_unresolved",
+      "message": "Drive above 5 km/h for several frames to calibrate the local forward axis.",
+      "severity": "warning"
+    },
+    {
+      "code": "slip_ratio_bridge_required",
+      "message": "Shared-memory wheelSlip semantics are not accepted as the thesis slip ratio; use the in-game acsys.CS.SlipRatio bridge.",
+      "severity": "warning"
+    },
+    {
+      "code": "side_slip_bridge_required",
+      "message": "Front/rear side-slip angle is not published in shared memory; use the in-game acsys.CS.SlipAngle bridge.",
+      "severity": "warning"
+    }
+  ],
+  "observed_physics_frequency_hz": null,
+  "poll_count": 10,
+  "requested_duration_s": 1.0,
+  "shared_memory_version": "1.1",
+  "speed_max_kmh": 36.0,
+  "speed_min_kmh": 36.0,
+  "status_counts": {
+    "pause": 1
+  },
+  "track": "monza",
+  "track_configuration": "",
+  "track_spline_length_m": 5793.0,
+  "unique_physics_frames": 1
+}

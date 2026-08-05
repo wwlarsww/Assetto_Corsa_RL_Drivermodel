@@ -101,7 +101,12 @@ def capture_telemetry(
     clock: Callable[[], float] = time.perf_counter,
     sleep: Callable[[float], None] = time.sleep,
 ) -> DiagnosticCapture:
-    """Poll for a fixed wall-clock duration and retain each physics packet once."""
+    """Poll for a fixed duration and retain coherent dynamic snapshots.
+
+    Physics and graphics are published independently.  A snapshot is retained
+    only after both packet IDs have advanced since the last retained sample,
+    which prevents stale world poses from being paired with fresh physics.
+    """
 
     if duration_s <= 0 or poll_frequency_hz <= 0:
         raise ValueError("duration_s and poll_frequency_hz must be positive")
@@ -110,15 +115,19 @@ def capture_telemetry(
     deadline = start + duration_s
     next_poll = start
     poll_count = 0
-    last_packet_id: int | None = None
+    last_physics_packet_id: int | None = None
+    last_graphics_packet_id: int | None = None
     snapshots: list[AssettoCorsaTelemetry] = []
 
     while clock() < deadline:
         snapshot = reader.read()
         poll_count += 1
-        if snapshot.physics.packet_id != last_packet_id:
+        physics_is_fresh = snapshot.physics.packet_id != last_physics_packet_id
+        graphics_is_fresh = snapshot.graphics.packet_id != last_graphics_packet_id
+        if physics_is_fresh and graphics_is_fresh:
             snapshots.append(snapshot)
-            last_packet_id = snapshot.physics.packet_id
+            last_physics_packet_id = snapshot.physics.packet_id
+            last_graphics_packet_id = snapshot.graphics.packet_id
         next_poll += interval
         delay = next_poll - clock()
         if delay > 0:
@@ -268,9 +277,27 @@ def summarise_capture(capture: DiagnosticCapture) -> TelemetryDiagnosticSummary:
             DiagnosticIssue(
                 "error",
                 "stale_physics_page",
-                "Only one physics packet was observed; the page is stale or the game is paused.",
+                "Only one coherent dynamic snapshot was observed; "
+                "a page is stale or the game is paused.",
             )
         )
+
+    if len(snapshots) >= 2:
+        timestamps = np.asarray(
+            [snapshot.monotonic_time_s for snapshot in snapshots],
+            dtype=np.float64,
+        )
+        maximum_gap_s = float(np.max(np.diff(timestamps)))
+        stale_gap_threshold_s = max(0.25, 3.0 / capture.poll_frequency_hz)
+        if maximum_gap_s > stale_gap_threshold_s:
+            issues.append(
+                DiagnosticIssue(
+                    "warning",
+                    "stale_dynamic_page",
+                    "A physics or graphics page stopped advancing for "
+                    f"{maximum_gap_s:.3f} s during the capture.",
+                )
+            )
 
     fresh_fraction = len(snapshots) / max(capture.poll_count, 1)
     if fresh_fraction < 0.25:
@@ -278,7 +305,7 @@ def summarise_capture(capture: DiagnosticCapture) -> TelemetryDiagnosticSummary:
             DiagnosticIssue(
                 "warning",
                 "low_fresh_frame_fraction",
-                "Fewer than 25% of polls returned a new physics packet.",
+                "Fewer than 25% of polls returned fresh physics and graphics pages.",
             )
         )
 
@@ -375,6 +402,8 @@ def _csv_row(snapshot: AssettoCorsaTelemetry) -> dict[str, float | int]:
         "session": graphics.session,
         "completed_laps": graphics.completed_laps,
         "current_lap_time_ms": graphics.current_lap_time_ms,
+        "is_in_pit": int(graphics.is_in_pit),
+        "is_in_pit_lane": int(graphics.is_in_pit_lane),
         "normalized_car_position": graphics.normalized_car_position,
         "distance_traveled_m": graphics.distance_traveled_m,
         "speed_kmh": physics.speed_kmh,

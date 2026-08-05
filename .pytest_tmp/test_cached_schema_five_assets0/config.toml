@@ -1,0 +1,20 @@
+
+[dataset]
+track_id = "test_track"
+track_layout = ""
+car_id = "test_car"
+root_directory = "data"
+steering_lock_degrees = 320.0
+steering_lock_normalized = 0.7
+
+[track_assets]
+source = "assetto_corsa_fast_lane"
+auto_build = true
+cache_directory = "C:/Users/larsk/OneDrive/Projekte/Assetto_Corsa_RL_Drivermodel/.pytest_tmp/test_cached_schema_five_assets0/cache"
+reference_speed_source = "ai"
+human_reference_artifact_path = ""
+minimum_reference_speed_mps = 5.0
+
+[reference]
+mode = "fixed"
+artifact_path = "auto"

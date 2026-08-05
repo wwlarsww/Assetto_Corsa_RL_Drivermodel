@@ -1,0 +1,13 @@
+{
+  "asset_schema": 5,
+  "geometry_path": "C:\\Users\\larsk\\OneDrive\\Projekte\\Assetto_Corsa_RL_Drivermodel\\.pytest_tmp\\test_ensure_track_assets_build0\\cache\\test_track\\default\\track_geometry.npz",
+  "geometry_sha256": "cfe5c4eb14357b3f10c2a2fa1aa3f490515ab3dfab67dc53026498936821564d",
+  "reference_path": "C:\\Users\\larsk\\OneDrive\\Projekte\\Assetto_Corsa_RL_Drivermodel\\.pytest_tmp\\test_ensure_track_assets_build0\\cache\\test_track\\default\\reference.npz",
+  "reference_sha256": "2909cb4eeb2415070a3c1099c14b511c9ee93d1f7ced884e5cda0bb67eaa288a",
+  "reference_speed_source": "ai",
+  "source": "assetto_corsa_fast_lane",
+  "source_fast_lane_path": "C:\\Users\\larsk\\OneDrive\\Projekte\\Assetto_Corsa_RL_Drivermodel\\.pytest_tmp\\test_ensure_track_assets_build0\\fast_lane.ai",
+  "source_fast_lane_sha256": "bb1086fd6741c4702e6c19be122bffea6f7ef4038f344a3f521383a31170b30b",
+  "track_id": "test_track",
+  "track_layout": "default"
+}

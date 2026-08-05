@@ -123,9 +123,7 @@ def parse_fast_lane(path: str | Path) -> ParsedFastLane:
     def read_int32(label: str) -> int:
         nonlocal offset
         if offset + 4 > len(data):
-            raise TrackAssetBuildError(
-                f"truncated fast_lane.ai while reading {label}: {source}"
-            )
+            raise TrackAssetBuildError(f"truncated fast_lane.ai while reading {label}: {source}")
         value = struct.unpack_from("<i", data, offset)[0]
         offset += 4
         return int(value)
@@ -141,18 +139,14 @@ def parse_fast_lane(path: str | Path) -> ParsedFastLane:
     lap_time_ms = read_int32("lap time")
     sample_count = read_int32("sample count")
     if point_count < 2 or point_count > 10_000_000:
-        raise TrackAssetBuildError(
-            f"implausible AI spline point count {point_count}: {source}"
-        )
+        raise TrackAssetBuildError(f"implausible AI spline point count {point_count}: {source}")
 
     positions = np.empty((point_count, 3), dtype=np.float32)
     point_length = np.empty(point_count, dtype=np.float32)
     point_ids = np.empty(point_count, dtype=np.int32)
     required = point_count * _AI_POINT_STRUCT.size
     if offset + required > len(data):
-        raise TrackAssetBuildError(
-            f"truncated base point array in fast_lane.ai: {source}"
-        )
+        raise TrackAssetBuildError(f"truncated base point array in fast_lane.ai: {source}")
     for index in range(point_count):
         x, y, z, length, point_id = _AI_POINT_STRUCT.unpack_from(data, offset)
         offset += _AI_POINT_STRUCT.size
@@ -170,9 +164,7 @@ def parse_fast_lane(path: str | Path) -> ParsedFastLane:
     extras = np.empty((extra_count, 18), dtype=np.float32)
     required = extra_count * _AI_POINT_EXTRA_STRUCT.size
     if offset + required > len(data):
-        raise TrackAssetBuildError(
-            f"truncated extra point array in fast_lane.ai: {source}"
-        )
+        raise TrackAssetBuildError(f"truncated extra point array in fast_lane.ai: {source}")
     for index in range(extra_count):
         values = _AI_POINT_EXTRA_STRUCT.unpack_from(data, offset)
         offset += _AI_POINT_EXTRA_STRUCT.size
@@ -203,7 +195,6 @@ def parse_fast_lane(path: str | Path) -> ParsedFastLane:
     )
 
 
-
 def resolve_configured_fast_lane_path(config: ProjectConfig) -> Path:
     """Resolve the track/layout AI spline from the installed game data."""
 
@@ -227,6 +218,7 @@ def resolve_configured_fast_lane_path(config: ProjectConfig) -> Path:
             f"configured track layout {layout!r} has no fast_lane.ai; expected {expected}"
         )
     return configured_fast_lane_path(config)
+
 
 def resolve_track_asset_paths(
     config: ProjectConfig,
@@ -259,9 +251,7 @@ def ensure_track_assets(
     """Build or reuse geometry/reference assets for the configured AC track."""
 
     if config.track_assets.source != "assetto_corsa_fast_lane":
-        raise TrackAssetBuildError(
-            "track_assets.source must be 'assetto_corsa_fast_lane'"
-        )
+        raise TrackAssetBuildError("track_assets.source must be 'assetto_corsa_fast_lane'")
 
     source = resolve_configured_fast_lane_path(config)
     if not source.is_file():
@@ -270,13 +260,10 @@ def ensure_track_assets(
     paths = resolve_track_asset_paths(config, fast_lane_path=source)
     paths.directory.mkdir(parents=True, exist_ok=True)
 
-    geometry_valid = (
-        not force
-        and _npz_metadata_matches(
-            paths.geometry_path,
-            source_digest=source_digest,
-            asset_kind="track_geometry",
-        )
+    geometry_valid = not force and _npz_metadata_matches(
+        paths.geometry_path,
+        source_digest=source_digest,
+        asset_kind="track_geometry",
     )
     if not geometry_valid:
         parsed = parse_fast_lane(source)
@@ -288,13 +275,10 @@ def ensure_track_assets(
             config=config,
         )
 
-    reference_valid = (
-        not force
-        and _npz_metadata_matches(
-            paths.reference_path,
-            source_digest=source_digest,
-            asset_kind="reference",
-        )
+    reference_valid = not force and _npz_metadata_matches(
+        paths.reference_path,
+        source_digest=source_digest,
+        asset_kind="reference",
     )
     if not reference_valid:
         _write_reference(
@@ -313,7 +297,8 @@ def ensure_track_assets(
         "source_fast_lane_path": str(source.resolve()),
         "source_fast_lane_sha256": source_digest,
         "track_id": config.dataset.track_id,
-        "track_layout": config.dataset.track_layout or _layout_from_source(
+        "track_layout": config.dataset.track_layout
+        or _layout_from_source(
             source,
             config.dataset.track_id,
         ),
@@ -441,7 +426,6 @@ def vehicle_fl_to_world_xz(
     )
 
 
-
 def geometry_centerline_world_xy(geometry_arrays: Mapping[str, np.ndarray]) -> np.ndarray:
     """Return a geometry centerline in canonical telemetry world XY order."""
 
@@ -474,6 +458,7 @@ def reference_line_world_xz(reference_arrays: Mapping[str, np.ndarray]) -> np.nd
     """Compatibility alias for :func:`reference_line_world_xy`."""
 
     return reference_line_world_xy(reference_arrays)
+
 
 def project_world_position(
     path_xy_m: np.ndarray,
@@ -511,8 +496,7 @@ def project_world_position(
     offset = position[None, :] - segment_start
     fraction = np.zeros(path.shape[0], dtype=np.float64)
     fraction[valid] = np.clip(
-        np.einsum("ij,ij->i", offset[valid], segment_vector[valid])
-        / segment_length_squared[valid],
+        np.einsum("ij,ij->i", offset[valid], segment_vector[valid]) / segment_length_squared[valid],
         0.0,
         1.0,
     )
@@ -614,9 +598,7 @@ def reference_preview_world(
                     track_length,
                 )[0]
             )
-            current_progress = (
-                current_progress + max(current_speed, 0.0) * dt
-            ) % track_length
+            current_progress = (current_progress + max(current_speed, 0.0) * dt) % track_length
             current_time += dt
         query_progress.append(current_progress)
     return circular_interpolate(
@@ -668,11 +650,7 @@ def local_xz_to_world_xz(
         raise ValueError("local points must have shape (N, 2)")
     forward = np.asarray([math.cos(heading_rad), math.sin(heading_rad)])
     left = np.asarray([-math.sin(heading_rad), math.cos(heading_rad)])
-    return (
-        position[None, :]
-        + points[:, 0:1] * left[None, :]
-        + points[:, 1:2] * forward[None, :]
-    )
+    return position[None, :] + points[:, 0:1] * left[None, :] + points[:, 1:2] * forward[None, :]
 
 
 def local_xz_to_world_xy(
@@ -722,12 +700,8 @@ def _write_track_geometry(
             "track borders cannot be generated without inventing geometry"
         )
 
-    native_left_boundary_xz = (
-        native_position_xz + native_left_xz * side_left[:, None]
-    )
-    native_right_boundary_xz = (
-        native_position_xz + native_right_xz * side_right[:, None]
-    )
+    native_left_boundary_xz = native_position_xz + native_left_xz * side_left[:, None]
+    native_right_boundary_xz = native_position_xz + native_right_xz * side_right[:, None]
 
     # Canonical project world coordinates equal live telemetry positions_xy_m:
     # first coordinate AC z, second coordinate AC x.
@@ -740,9 +714,7 @@ def _write_track_geometry(
 
     speed = np.asarray(parsed.speed_mps, dtype=np.float64)
     if not np.isfinite(speed).all() or np.nanmax(speed) <= 0.0:
-        raise TrackAssetBuildError(
-            "fast_lane.ai does not contain a usable AI speed profile"
-        )
+        raise TrackAssetBuildError("fast_lane.ai does not contain a usable AI speed profile")
 
     metadata = {
         "asset_kind": "track_geometry",
@@ -759,6 +731,7 @@ def _write_track_geometry(
         "source_coordinate_frame": SOURCE_COORDINATE_FRAME,
         "coordinate_transform": "world_xy=[ac_z,ac_x]",
         "boundary_definition": "fast_lane.ai SideLeft/SideRight",
+        "boundary_orientation": "physical_left_right_v1",
     }
     _save_npz_atomically(
         destination,
@@ -816,8 +789,7 @@ def _write_reference(
             / "fixed_reference.npz"
         )
     if (
-        config.track_assets.reference_speed_source
-        == "human_if_available_else_ai"
+        config.track_assets.reference_speed_source == "human_if_available_else_ai"
         and human_path_text
     ):
         human_path = Path(human_path_text)
@@ -1055,9 +1027,7 @@ def _write_json_atomically(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _layout_from_source(source: Path, track_id: str) -> str:
     try:
-        track_index = [part.casefold() for part in source.parts].index(
-            track_id.casefold()
-        )
+        track_index = [part.casefold() for part in source.parts].index(track_id.casefold())
     except ValueError:
         return "default"
     between = source.parts[track_index + 1 : -2]

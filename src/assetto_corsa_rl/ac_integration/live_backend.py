@@ -191,6 +191,7 @@ class AssettoCorsaLiveBackend:
         self._sleep = sleep
         self._reference: ReferenceTrajectory | None = None
         self._last_physics_packet_id: int | None = None
+        self._last_graphics_packet_id: int | None = None
         self._episode_origin_monotonic_s = 0.0
         self._episode_start_completed_laps = 0
         self._step_count = 0
@@ -297,7 +298,10 @@ class AssettoCorsaLiveBackend:
             first = self.telemetry_reader.read()
             self._validate_session(first, reference)
             acknowledgement = self.reset_controller.request_reset(timeout_s=self.reset_timeout_s)
-            snapshot = self._wait_for_reset_state(first.physics.packet_id)
+            snapshot = self._wait_for_reset_state(
+                first.physics.packet_id,
+                first.graphics.packet_id,
+            )
             snapshot = self._wait_for_reset_collision_quiescence(snapshot)
             slip_packet = self.slip_reader.receive(timeout_s=self.frame_timeout_s)
             collision_state = self.collision_reader.synchronise(
@@ -306,6 +310,7 @@ class AssettoCorsaLiveBackend:
             )
             self._reference = reference
             self._last_physics_packet_id = snapshot.physics.packet_id
+            self._last_graphics_packet_id = snapshot.graphics.packet_id
             self._episode_origin_monotonic_s = snapshot.monotonic_time_s
             self._episode_start_completed_laps = snapshot.graphics.completed_laps
             self._step_count = 0
@@ -319,6 +324,7 @@ class AssettoCorsaLiveBackend:
         except BaseException:
             self._reference = None
             self._last_physics_packet_id = None
+            self._last_graphics_packet_id = None
             self.control_writer.neutral()
             raise
 
@@ -326,14 +332,19 @@ class AssettoCorsaLiveBackend:
         """Apply one action for a complete period and return one fresh live frame."""
 
         self._require_open()
-        if self._reference is None or self._last_physics_packet_id is None:
+        if (
+            self._reference is None
+            or self._last_physics_packet_id is None
+            or self._last_graphics_packet_id is None
+        ):
             raise RuntimeError("reset must be called before step")
         action = validate_backend_action(absolute_action)
         action_time = self._monotonic_clock()
         try:
             self.control_writer.apply(action)
             snapshot = self._wait_for_fresh_frame(
-                after_packet_id=self._last_physics_packet_id,
+                after_physics_packet_id=self._last_physics_packet_id,
+                after_graphics_packet_id=self._last_graphics_packet_id,
                 not_before_s=action_time + 1.0 / self.control_frequency_hz,
                 timeout_s=self.frame_timeout_s,
             )
@@ -348,6 +359,7 @@ class AssettoCorsaLiveBackend:
             self.control_writer.neutral()
             raise
         self._last_physics_packet_id = snapshot.physics.packet_id
+        self._last_graphics_packet_id = snapshot.graphics.packet_id
         self._last_collision_state = collision_state
         self._step_count += 1
         body_sideslip_angle_rad = assetto_corsa_body_sideslip_angle_rad(
@@ -400,17 +412,23 @@ class AssettoCorsaLiveBackend:
             diagnostics=diagnostics,
         )
 
-    def _wait_for_reset_state(self, after_packet_id: int) -> AssettoCorsaTelemetry:
+    def _wait_for_reset_state(
+        self,
+        after_physics_packet_id: int,
+        after_graphics_packet_id: int,
+    ) -> AssettoCorsaTelemetry:
         deadline = self._monotonic_clock() + self.reset_timeout_s
         stable = 0
-        packet_id = after_packet_id
+        physics_packet_id = after_physics_packet_id
+        graphics_packet_id = after_graphics_packet_id
         latest: AssettoCorsaTelemetry | None = None
         previous_position_m: tuple[float, float, float] | None = None
         while self._monotonic_clock() < deadline:
             remaining = deadline - self._monotonic_clock()
             try:
                 latest = self._wait_for_fresh_frame(
-                    after_packet_id=packet_id,
+                    after_physics_packet_id=physics_packet_id,
+                    after_graphics_packet_id=graphics_packet_id,
                     not_before_s=self._monotonic_clock(),
                     timeout_s=max(
                         min(remaining, self.frame_timeout_s),
@@ -421,7 +439,8 @@ class AssettoCorsaLiveBackend:
                 # CSP can pause physics frames briefly while ext_resetCar() moves
                 # the car. Keep polling within the larger reset timeout budget.
                 continue
-            packet_id = latest.physics.packet_id
+            physics_packet_id = latest.physics.packet_id
+            graphics_packet_id = latest.graphics.packet_id
             position_m = latest.graphics.car_coordinates_m
             position_stable = (
                 previous_position_m is None
@@ -449,7 +468,8 @@ class AssettoCorsaLiveBackend:
         if self.reset_collision_quiescence_s == 0:
             return snapshot
         return self._wait_for_fresh_frame(
-            after_packet_id=snapshot.physics.packet_id,
+            after_physics_packet_id=snapshot.physics.packet_id,
+            after_graphics_packet_id=snapshot.graphics.packet_id,
             not_before_s=self._monotonic_clock() + self.reset_collision_quiescence_s,
             timeout_s=self.reset_collision_quiescence_s + self.frame_timeout_s,
         )
@@ -457,29 +477,43 @@ class AssettoCorsaLiveBackend:
     def _wait_for_fresh_frame(
         self,
         *,
-        after_packet_id: int,
+        after_physics_packet_id: int,
+        after_graphics_packet_id: int,
         not_before_s: float,
         timeout_s: float,
     ) -> AssettoCorsaTelemetry:
+        """Wait for a live snapshot with fresh physics and graphics pages.
+
+        Assetto Corsa publishes both dynamic pages independently.  Accepting a
+        new physics packet together with an old graphics packet can repeat an
+        obsolete world pose for many control steps.  Requiring both packet IDs
+        to advance keeps position, lap phase, and tyre state temporally usable.
+        """
+
         deadline = self._monotonic_clock() + timeout_s
         last_status: int | None = None
-        last_packet = after_packet_id
+        last_physics_packet = after_physics_packet_id
+        last_graphics_packet = after_graphics_packet_id
         while True:
             snapshot = self.telemetry_reader.read()
             last_status = snapshot.graphics.status
-            last_packet = snapshot.physics.packet_id
+            last_physics_packet = snapshot.physics.packet_id
+            last_graphics_packet = snapshot.graphics.packet_id
             now = self._monotonic_clock()
             if (
                 now >= not_before_s
-                and snapshot.physics.packet_id != after_packet_id
+                and snapshot.physics.packet_id != after_physics_packet_id
+                and snapshot.graphics.packet_id != after_graphics_packet_id
                 and snapshot.graphics.status == ASSETTO_CORSA_LIVE_STATUS
             ):
                 return snapshot
             remaining = deadline - now
             if remaining <= 0:
                 raise LiveBackendTimeoutError(
-                    "no fresh live physics frame before timeout "
-                    f"(last_status={last_status}, last_packet={last_packet})"
+                    "no fresh synchronised live telemetry frame before timeout "
+                    f"(last_status={last_status}, "
+                    f"last_physics_packet={last_physics_packet}, "
+                    f"last_graphics_packet={last_graphics_packet})"
                 )
             self._sleep(min(self.poll_interval_s, remaining))
 

@@ -67,7 +67,7 @@ steering_lock_normalized = 0.7
 [track_assets]
 source = "assetto_corsa_fast_lane"
 auto_build = true
-cache_directory = "{(tmp_path / 'cache').as_posix()}"
+cache_directory = "{(tmp_path / "cache").as_posix()}"
 reference_speed_source = "ai"
 human_reference_artifact_path = ""
 minimum_reference_speed_mps = 5.0
@@ -125,12 +125,31 @@ def test_ensure_track_assets_builds_telemetry_aligned_geometry(
     )
     np.testing.assert_allclose(
         geometry["left_boundary_world_xy_m"][0],
-        [5.0, 0.0],
+        [-5.0, 0.0],
     )
     np.testing.assert_allclose(
         geometry["right_boundary_world_xy_m"][0],
-        [-6.0, 0.0],
+        [6.0, 0.0],
     )
+    forward = np.asarray(geometry["forward_vector_xy"], dtype=np.float64)
+    left_normal = np.column_stack((-forward[:, 1], forward[:, 0]))
+    centre = np.asarray(geometry["centerline_world_xy_m"], dtype=np.float64)
+    left_delta = (
+        np.asarray(
+            geometry["left_boundary_world_xy_m"],
+            dtype=np.float64,
+        )
+        - centre
+    )
+    right_delta = (
+        np.asarray(
+            geometry["right_boundary_world_xy_m"],
+            dtype=np.float64,
+        )
+        - centre
+    )
+    assert np.all(np.sum(left_delta * left_normal, axis=1) > 0.0)
+    assert np.all(np.sum(right_delta * left_normal, axis=1) < 0.0)
     np.testing.assert_allclose(
         geometry["heading_rad"],
         [np.pi / 2.0, 0.0, -np.pi / 2.0, np.pi],
@@ -142,9 +161,11 @@ def test_ensure_track_assets_builds_telemetry_aligned_geometry(
     )
     np.testing.assert_allclose(reference["speed_mps"], 20.0)
     metadata = json.loads(str(geometry["metadata_json"].reshape(-1)[0]))
-    assert metadata["asset_schema"] == 4
-    assert metadata["coordinate_frame"] == "assetto_corsa_gym_world_xy_v1"
-    assert metadata["coordinate_transform"] == "world_xy=[ac_z,ac_x]"
+
+    assert metadata["asset_schema"] == 5
+    assert metadata["coordinate_frame"] == ("assetto_corsa_gym_world_xy_v1")
+    assert metadata["coordinate_transform"] == ("world_xy=[ac_z,ac_x]")
+    assert metadata["boundary_orientation"] == ("physical_left_right_v1")
 
 
 def test_closed_path_projection_and_wrapped_delta() -> None:
@@ -168,7 +189,7 @@ def test_closed_path_projection_and_wrapped_delta() -> None:
     assert track_assets.wrapped_progress_delta(39.0, 1.0, 40.0) == -2.0
 
 
-def test_cached_schema_four_assets_are_reused(tmp_path: Path, monkeypatch) -> None:
+def test_cached_schema_five_assets_are_reused(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "fast_lane.ai"
     _write_fast_lane(source)
     config = _config(tmp_path)
@@ -210,7 +231,7 @@ steering_lock_normalized = 0.7
 [track_assets]
 source = "assetto_corsa_fast_lane"
 auto_build = true
-cache_directory = "{(tmp_path / 'cache_fixed').as_posix()}"
+cache_directory = "{(tmp_path / "cache_fixed").as_posix()}"
 reference_speed_source = "ai"
 human_reference_artifact_path = ""
 minimum_reference_speed_mps = 5.0
