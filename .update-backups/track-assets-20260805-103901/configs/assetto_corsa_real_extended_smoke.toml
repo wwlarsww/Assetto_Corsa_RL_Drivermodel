@@ -1,25 +1,36 @@
-# Named intermediate live-validation variant of bmw_z4_gt3_monza_baseline.toml.
-# It collects 10,240 live steps in ten PPO rollouts. This is intentionally
-# longer than the 512-step smoke test but is not the one-million-step thesis baseline.
+# Extended real-backend smoke run.
+# Target: validate several PPO updates, resets, checkpoints and MLflow on BMW Z4 GT3 / Monza.
 
 [experiment]
 seed = 769913
-max_episode_steps = 5000
-truncate_on_max_episode_steps = false
-output_directory = "runs/live-10k"
+max_episode_steps = 2400
+truncate_on_max_episode_steps = true
+output_directory = "runs"
+
+[monitoring]
+enabled = true
+backend = "mlflow"
+tracking_uri = "http://127.0.0.1:5000"
+experiment_name = "Assetto Corsa PPO"
+run_name = "assetto_corsa_monza_real_extended_smoke"
+log_interval_updates = 1
+fail_on_error = true
 
 [environment]
-control_frequency_hz = 25.0
+control_frequency_hz = 20.0
+# The following track values are used by the mock backend only, but remain
+# explicit so the same configuration can still be parsed consistently.
 mock_track_length_m = 1000.0
 mock_track_half_width_m = 5.0
 initial_speed_mps = 20.0
 termination_method_variant = "any_tyre_armed_stall_v1"
-# Arm after driving above 5 km/h; then debounce five low-speed frames.
 minimum_speed_mps = 1.3888888889
-stall_startup_grace_steps = 25
-stall_debounce_steps = 5
+# Give the real session five seconds to engage gear and drive away.
+stall_startup_grace_steps = 100
+# Require one continuous second below the minimum speed before termination.
+stall_debounce_steps = 20
 initial_combined_pedal = 1.0
-critical_body_sideslip_angle_deg = 20.0
+critical_body_sideslip_angle_deg = 30.0
 minimum_body_sideslip_termination_speed_mps = 5.0
 
 [actions]
@@ -51,7 +62,7 @@ steering_lock_normalized = 0.7119140625
 [behavioral_cloning]
 method_variant = "ai_spline_absolute_v1"
 dataset_artifact_path = "data/processed/bmw_z4_gt3_monza/bc_dataset.npz"
-epochs = 120
+epochs = 3
 batch_size = 512
 learning_rate = 0.0003
 weight_decay = 0.00001
@@ -62,10 +73,13 @@ minimum_speed_mps = 5.0
 
 [ppo]
 method_variant = "ai_spline_absolute_stabilized_v2"
-total_environment_steps = 10240
-rollout_steps = 1024
-update_epochs = 4
-minibatch_size = 256
+# Sixteen PPO updates provide a meaningful end-to-end stability test.
+# At 20 Hz, 4096 environment steps correspond to about 205 s of simulator time.
+total_environment_steps = 4096
+rollout_steps = 256
+checkpoint_interval_updates = 4
+update_epochs = 1
+minibatch_size = 128
 learning_rate = 0.0003
 gamma = 0.99
 gae_lambda = 0.95
@@ -81,30 +95,42 @@ kl_learning_rate_decrease_factor = 0.5
 kl_learning_rate_increase_factor = 1.1
 minimum_learning_rate = 0.00003
 max_gradient_norm = 0.5
-use_predicted_progress_reward = true
+# Keep predictor shaping disabled because the current BC predictor quality
+# is outside the configured ADE/FDE limits. The predictor loss is still logged.
+use_predicted_progress_reward = false
 initial_checkpoint_path = "data/processed/bmw_z4_gt3_monza/bc_checkpoint.pt"
-initial_checkpoint_metrics_path = "data/processed/bmw_z4_gt3_monza/bc_summary.json"
+initial_checkpoint_metrics_path = "data/processed/bmw_z4_gt3_monza/bc_metrics.json"
 maximum_initial_predictor_ade_m = 15.0
 maximum_initial_predictor_fde_m = 40.0
 
+[evaluation]
+# Run one deterministic real-backend evaluation after every fourth PPO update.
+enabled = true
+interval_updates = 4
+episodes = 1
+deterministic = true
+seed_offset = 10000
+record_trajectories = true
+evaluate_final_update = true
+
 [assetto_corsa]
-installation_directory = 'C:\Program Files (x86)\Steam\steamapps\common\assettocorsa'
+installation_directory = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\assettocorsa"
+# Empty means: Documents/Assetto Corsa/cfg/controls.ini
 controls_configuration_path = ""
 control_backend = "vgamepad"
 reset_backend = "csp_hotlap_spawn_v1"
 crash_termination = "csp_collision_latched_v1"
 telemetry_calibration = "assetto_corsa_gym_world_v1"
 automatic_shifting = true
-# Policy steering is positive-left; the X360 horizontal axis is positive-right.
 steering_output_sign = -1.0
-frame_timeout_s = 2.0
-reset_timeout_s = 10.0
-reset_position_tolerance = 0.05
+frame_timeout_s = 5.0
+reset_timeout_s = 20.0
+reset_position_tolerance = 0.25
 reset_speed_threshold_mps = 5.0
-reset_stable_frames = 3
-reset_collision_quiescence_s = 0.5
+reset_stable_frames = 5
+reset_collision_quiescence_s = 1.0
 poll_interval_s = 0.001
-launch_timeout_s = 120.0
+launch_timeout_s = 180.0
 launch_poll_interval_s = 0.25
 
 [reference]

@@ -19,6 +19,10 @@ import torch
 from torch import Tensor
 from torch.distributions import Independent, Normal
 
+from assetto_corsa_rl.ac_integration.track_assets import (
+    TrackAssetBundle,
+    ensure_track_assets,
+)
 from assetto_corsa_rl.config import (
     BASELINE_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
@@ -187,6 +191,7 @@ def train_ppo(
     tracker: ExperimentTracker | None = None,
     tracking_run_name: str | None = None,
     evaluation_environment_factory: EnvironmentFactory | None = None,
+    evaluation_uses_training_environment: bool = False,
 ) -> PPOTrainingResult:
     """Train the stabilized PPO variant with synchronous, versioned updates.
 
@@ -198,6 +203,7 @@ def train_ppo(
     _validate_training_configuration(
         config,
         evaluation_environment_factory=evaluation_environment_factory,
+        evaluation_uses_training_environment=evaluation_uses_training_environment,
     )
     target_device = torch.device(device)
     model, optimizer, initial_checkpoint = _initialise_training_model(
@@ -231,6 +237,9 @@ def train_ppo(
     policy_version = 0
     evaluations_completed = 0
     run_status = "FAILED"
+    track_asset_bundle = (
+        ensure_track_assets(config) if backend_name == "assetto-corsa" else None
+    )
 
     try:
         _start_tracking_run(
@@ -240,6 +249,7 @@ def train_ppo(
             config=config,
             backend_name=backend_name,
         )
+        _log_track_assets(tracker, track_asset_bundle)
 
         while environment_steps < config.ppo.total_environment_steps:
             iteration += 1
@@ -270,14 +280,21 @@ def train_ppo(
                 tracker=tracker,
             )
             if _should_run_evaluation(config, metrics):
-                if snapshot is None or evaluation_environment_factory is None:
-                    raise RuntimeError(
-                        "evaluation requires a versioned checkpoint and environment factory"
-                    )
+                if snapshot is None:
+                    raise RuntimeError("evaluation requires a versioned checkpoint")
                 evaluate_policy(
                     config=config,
                     model=model,
-                    environment_factory=evaluation_environment_factory,
+                    environment_factory=(
+                        None
+                        if evaluation_uses_training_environment
+                        else evaluation_environment_factory
+                    ),
+                    environment=(
+                        environment
+                        if evaluation_uses_training_environment
+                        else None
+                    ),
                     device=target_device,
                     training_run_directory=recorder.run_directory,
                     checkpoint_path=snapshot.checkpoint_path,
@@ -287,6 +304,17 @@ def train_ppo(
                     tracker=tracker,
                 )
                 evaluations_completed += 1
+
+                if evaluation_uses_training_environment:
+                    observation, info = environment.reset(
+                        seed=config.experiment.seed,
+                    )
+                    cursor = _CollectionCursor(
+                        observation=observation,
+                        info=info,
+                        trajectory_id=cursor.trajectory_id + 1,
+                        episodes_completed=cursor.episodes_completed,
+                    )
 
         run_status = "FINISHED"
 
@@ -320,6 +348,7 @@ def _validate_training_configuration(
     config: ProjectConfig,
     *,
     evaluation_environment_factory: EnvironmentFactory | None,
+    evaluation_uses_training_environment: bool,
 ) -> None:
     """Reject configurations that do not match the stabilized PPO contract."""
 
@@ -332,10 +361,52 @@ def _validate_training_configuration(
         raise ValueError(
             f"{STABILIZED_PPO_METHOD_VARIANT!r} requires reference.mode='fixed'"
         )
-    if config.evaluation.enabled and evaluation_environment_factory is None:
+    if (
+        config.evaluation.enabled
+        and evaluation_environment_factory is None
+        and not evaluation_uses_training_environment
+    ):
         raise ValueError(
-            "evaluation.enabled requires a separate evaluation environment factory"
+            "evaluation.enabled requires either a separate evaluation "
+            "environment factory or sequential reuse of the training environment"
         )
+    if (
+        evaluation_environment_factory is not None
+        and evaluation_uses_training_environment
+    ):
+        raise ValueError(
+            "evaluation cannot use both a separate environment factory and "
+            "the training environment"
+        )
+
+
+def _whole_step_count(name: str, value: object) -> int:
+    """Validate and normalize one discrete step count."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            f"{name} must be an integer step count, "
+            f"got {value!r} ({type(value).__name__})"
+        )
+    if not float(value).is_integer():
+        raise ValueError(f"{name} must contain a whole number, got {value!r}")
+    result = int(value)
+    if result < 0:
+        raise ValueError(f"{name} must be non-negative, got {result}")
+    return result
+
+
+def _log_track_assets(
+    tracker: ExperimentTracker | None,
+    bundle: TrackAssetBundle | None,
+) -> None:
+    """Log static geometry and reference once on the parent training run."""
+
+    if tracker is None or not tracker.active or bundle is None:
+        return
+    tracker.log_artifact(bundle.paths.geometry_path, artifact_path="track")
+    tracker.log_artifact(bundle.paths.metadata_path, artifact_path="track")
+    tracker.log_artifact(bundle.paths.reference_path, artifact_path="reference")
 
 
 def _initialise_training_model(
@@ -441,10 +512,24 @@ def _run_training_update(
 ) -> tuple[PPOIterationMetrics, _CollectionCursor]:
     """Collect, post-process and optimise one complete PPO update."""
 
-    rollout_step_count = min(
+    configured_rollout_steps = _whole_step_count(
+        "ppo.rollout_steps",
         config.ppo.rollout_steps,
-        config.ppo.total_environment_steps - environment_steps,
     )
+    total_environment_steps = _whole_step_count(
+        "ppo.total_environment_steps",
+        config.ppo.total_environment_steps,
+    )
+    completed_environment_steps = _whole_step_count(
+        "environment_steps",
+        environment_steps,
+    )
+    remaining_steps = total_environment_steps - completed_environment_steps
+    if remaining_steps <= 0:
+        raise RuntimeError(
+            "a PPO update was requested although no environment steps remain"
+        )
+    rollout_step_count = min(configured_rollout_steps, remaining_steps)
     batch, next_cursor = _collect_rollout(
         environment,
         model,

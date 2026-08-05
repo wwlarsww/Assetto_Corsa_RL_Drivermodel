@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Self, TypeVar
 
@@ -27,6 +27,15 @@ def _non_negative(name: str, value: float | int) -> None:
         raise ValueError(f"{name} must be non-negative, got {value!r}")
 
 
+def _positive_integer(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(
+            f"{name} must be an integer, got {value!r} ({type(value).__name__})"
+        )
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
     """Run-level settings that influence reproducibility and persistence."""
@@ -37,7 +46,9 @@ class ExperimentConfig:
     output_directory: str = "runs"
 
     def __post_init__(self) -> None:
-        _positive("experiment.max_episode_steps", self.max_episode_steps)
+        _positive_integer("experiment.max_episode_steps", self.max_episode_steps)
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise TypeError("experiment.seed must be an integer")
         if self.seed < 0:
             raise ValueError("experiment.seed must be non-negative")
 
@@ -75,8 +86,8 @@ class EnvironmentConfig:
             raise ValueError(
                 f"environment.termination_method_variant must be {TERMINATION_METHOD_VARIANT!r}"
             )
-        _positive("environment.stall_debounce_steps", self.stall_debounce_steps)
-        _positive(
+        _positive_integer("environment.stall_debounce_steps", self.stall_debounce_steps)
+        _positive_integer(
             "environment.stall_startup_grace_steps",
             self.stall_startup_grace_steps,
         )
@@ -155,6 +166,7 @@ class DatasetConfig:
     """Paths and stable identifiers for the initial public dataset subset."""
 
     track_id: str = "monza"
+    track_layout: str = ""
     car_id: str = "bmw_z4_gt3"
     root_directory: str = "data/external/assetto_corsa_gym"
     steering_lock_degrees: float = 320.0
@@ -181,6 +193,54 @@ class DatasetConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TrackAssetsConfig:
+    """Automatic Assetto Corsa track-asset generation and caching."""
+
+    source: str = "assetto_corsa_fast_lane"
+    auto_build: bool = True
+    cache_directory: str = "data/generated/assetto_corsa_tracks"
+    reference_speed_source: str = "human_if_available_else_ai"
+    human_reference_artifact_path: str = ""
+    minimum_reference_speed_mps: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.source != "assetto_corsa_fast_lane":
+            raise ValueError(
+                "track_assets.source must be 'assetto_corsa_fast_lane'"
+            )
+        if not self.cache_directory.strip():
+            raise ValueError("track_assets.cache_directory must not be empty")
+        if self.reference_speed_source not in {
+            "ai",
+            "human_if_available_else_ai",
+        }:
+            raise ValueError(
+                "track_assets.reference_speed_source must be 'ai' or "
+                "'human_if_available_else_ai'"
+            )
+        _positive(
+            "track_assets.minimum_reference_speed_mps",
+            self.minimum_reference_speed_mps,
+        )
+
+    def generated_directory(self, dataset: DatasetConfig) -> Path:
+        """Return the deterministic cache directory for a configured track."""
+
+        layout = dataset.track_layout.strip() or "default"
+        return Path(self.cache_directory) / dataset.track_id / layout
+
+    def generated_geometry_path(self, dataset: DatasetConfig) -> Path:
+        """Return the generated static geometry artefact path."""
+
+        return self.generated_directory(dataset) / "track_geometry.npz"
+
+    def generated_reference_path(self, dataset: DatasetConfig) -> Path:
+        """Return the generated reference artefact path."""
+
+        return self.generated_directory(dataset) / "reference.npz"
+
+
+@dataclass(frozen=True, slots=True)
 class BehavioralCloningConfig:
     """Explicit public defaults for the fixed-reference warm start."""
 
@@ -202,12 +262,12 @@ class BehavioralCloningConfig:
             )
         if not self.dataset_artifact_path.strip():
             raise ValueError("behavioral_cloning.dataset_artifact_path must not be empty")
-        for name in (
-            "epochs",
-            "batch_size",
-            "learning_rate",
-            "minimum_speed_mps",
-        ):
+        for name in ("epochs", "batch_size"):
+            _positive_integer(
+                f"behavioral_cloning.{name}",
+                getattr(self, name),
+            )
+        for name in ("learning_rate", "minimum_speed_mps"):
             _positive(f"behavioral_cloning.{name}", getattr(self, name))
         _non_negative("behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight)
         if self.weight_decay < 0:
@@ -260,6 +320,9 @@ class PPOConfig:
             "checkpoint_interval_updates",
             "update_epochs",
             "minibatch_size",
+        ):
+            _positive_integer(f"ppo.{name}", getattr(self, name))
+        for name in (
             "learning_rate",
             "value_loss_coefficient",
             "max_gradient_norm",
@@ -307,8 +370,10 @@ class EvaluationConfig:
     evaluate_final_update: bool = True
 
     def __post_init__(self) -> None:
-        _positive("evaluation.interval_updates", self.interval_updates)
-        _positive("evaluation.episodes", self.episodes)
+        _positive_integer("evaluation.interval_updates", self.interval_updates)
+        _positive_integer("evaluation.episodes", self.episodes)
+        if isinstance(self.seed_offset, bool) or not isinstance(self.seed_offset, int):
+            raise TypeError("evaluation.seed_offset must be an integer")
         if self.seed_offset < 0:
             raise ValueError("evaluation.seed_offset must be non-negative")
 
@@ -361,12 +426,15 @@ class AssettoCorsaRuntimeConfig:
             "reset_timeout_s",
             "reset_position_tolerance",
             "reset_speed_threshold_mps",
-            "reset_stable_frames",
             "poll_interval_s",
             "launch_timeout_s",
             "launch_poll_interval_s",
         ):
             _positive(f"assetto_corsa.{name}", getattr(self, name))
+        _positive_integer(
+            "assetto_corsa.reset_stable_frames",
+            self.reset_stable_frames,
+        )
         _non_negative(
             "assetto_corsa.reset_collision_quiescence_s",
             self.reset_collision_quiescence_s,
@@ -386,7 +454,7 @@ class ReferenceConfig:
     """Episode-level reference selection and its safe local artefact."""
 
     mode: str = "fixed"
-    artifact_path: str = "data/processed/bmw_z4_gt3_monza/fixed_reference.npz"
+    artifact_path: str = "auto"
 
     def __post_init__(self) -> None:
         if self.mode != "fixed":
@@ -405,6 +473,7 @@ class ProjectConfig:
     rewards: RewardConfig = field(default_factory=RewardConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    track_assets: TrackAssetsConfig = field(default_factory=TrackAssetsConfig)
     behavioral_cloning: BehavioralCloningConfig = field(default_factory=BehavioralCloningConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
@@ -427,6 +496,7 @@ class ProjectConfig:
             "rewards",
             "model",
             "dataset",
+            "track_assets",
             "behavioral_cloning",
             "ppo",
             "evaluation",
@@ -438,13 +508,26 @@ class ProjectConfig:
             names = ", ".join(sorted(unknown_sections))
             raise ValueError(f"Unknown configuration section(s): {names}")
 
+        dataset = _load_section(DatasetConfig, raw.get("dataset", {}))
+        track_assets = _load_section(
+            TrackAssetsConfig,
+            raw.get("track_assets", {}),
+        )
+        reference = _load_section(ReferenceConfig, raw.get("reference", {}))
+        if reference.artifact_path.strip().lower() == "auto":
+            reference = replace(
+                reference,
+                artifact_path=str(track_assets.generated_reference_path(dataset)),
+            )
+
         return cls(
             experiment=_load_section(ExperimentConfig, raw.get("experiment", {})),
             environment=_load_section(EnvironmentConfig, raw.get("environment", {})),
             actions=_load_section(ActionConfig, raw.get("actions", {})),
             rewards=_load_section(RewardConfig, raw.get("rewards", {})),
             model=_load_model_config(raw.get("model", {})),
-            dataset=_load_section(DatasetConfig, raw.get("dataset", {})),
+            dataset=dataset,
+            track_assets=track_assets,
             behavioral_cloning=_load_section(
                 BehavioralCloningConfig,
                 raw.get("behavioral_cloning", {}),
@@ -458,7 +541,7 @@ class ProjectConfig:
                 AssettoCorsaRuntimeConfig,
                 raw.get("assetto_corsa", {}),
             ),
-            reference=_load_section(ReferenceConfig, raw.get("reference", {})),
+            reference=reference,
         )
 
     def to_dict(self) -> dict[str, Any]:

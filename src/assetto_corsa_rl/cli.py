@@ -29,6 +29,10 @@ from assetto_corsa_rl.ac_integration.launcher import (
     AssettoCorsaSessionLauncher,
     configured_fast_lane_path,
 )
+from assetto_corsa_rl.ac_integration.track_assets import (
+    TrackAssetBuildError,
+    ensure_track_assets,
+)
 from assetto_corsa_rl.ac_integration.live_validation import (
     LiveValidationIssue,
     validate_live_environment,
@@ -150,6 +154,26 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CL
         type=Path,
         default=Path("configs/bmw_z4_gt3_monza_baseline.toml"),
         help="TOML configuration containing dataset and baseline-reference paths.",
+    )
+    build_track_assets = subparsers.add_parser(
+        "build-track-assets",
+        help="Build cached track geometry and reference from Assetto Corsa.",
+        description=(
+            "Read the configured track's ai/fast_lane.ai and generate reusable "
+            "centreline, boundaries and reference artefacts."
+        ),
+        formatter_class=formatter,
+    )
+    build_track_assets.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/bmw_z4_gt3_monza_baseline.toml"),
+        help="TOML configuration defining track, layout and cache settings.",
+    )
+    build_track_assets.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild even when the cached source SHA-256 still matches.",
     )
     build_bc = subparsers.add_parser(
         "build-bc-dataset",
@@ -744,6 +768,23 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             arguments.manifest,
         )
         return 0
+    if arguments.command == "build-track-assets":
+        config = ProjectConfig.from_toml(arguments.config)
+        try:
+            bundle = ensure_track_assets(config, force=arguments.force)
+        except (FileNotFoundError, TrackAssetBuildError, OSError, ValueError) as error:
+            LOGGER.error("track assets could not be built: %s", error)
+            return 2
+        LOGGER.info(
+            "Track assets ready: source=%s geometry=%s reference=%s "
+            "geometry_rebuilt=%s reference_rebuilt=%s",
+            bundle.source_fast_lane_path,
+            bundle.paths.geometry_path,
+            bundle.paths.reference_path,
+            bundle.rebuilt_geometry,
+            bundle.rebuilt_reference,
+        )
+        return 0
     if arguments.command == "build-reference":
         config = ProjectConfig.from_toml(arguments.config)
         if config.reference.mode != "fixed":
@@ -826,11 +867,29 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         return 0
     if arguments.command == "rl-ready":
         config = ProjectConfig.from_toml(arguments.config)
+        if arguments.backend == "assetto-corsa" and config.track_assets.auto_build:
+            try:
+                bundle = ensure_track_assets(config)
+                LOGGER.info(
+                    "track_assets: geometry=%s reference=%s source_sha256=%s",
+                    bundle.paths.geometry_path,
+                    bundle.paths.reference_path,
+                    bundle.source_sha256,
+                )
+            except (FileNotFoundError, TrackAssetBuildError, OSError, ValueError) as error:
+                LOGGER.error("track assets are not ready: %s", error)
+                return 4
         report = assess_training_readiness(config, backend=arguments.backend)
         _log_readiness(report)
         return 0 if report.is_ready else 4
     if arguments.command == "live-validate":
         config = ProjectConfig.from_toml(arguments.config)
+        if config.track_assets.auto_build:
+            try:
+                ensure_track_assets(config)
+            except (FileNotFoundError, TrackAssetBuildError, OSError, ValueError) as error:
+                LOGGER.error("track assets are not ready: %s", error)
+                return 4
         report = assess_training_readiness(config, backend="assetto-corsa")
         _log_readiness(report)
         if not report.is_ready:
@@ -965,6 +1024,18 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
     if arguments.command == "rl-train":
         config = ProjectConfig.from_toml(arguments.config)
         monitoring_config = MonitoringConfig.from_toml(arguments.config)
+        if arguments.backend == "assetto-corsa" and config.track_assets.auto_build:
+            try:
+                bundle = ensure_track_assets(config)
+                LOGGER.info(
+                    "track_assets: geometry=%s reference=%s source_sha256=%s",
+                    bundle.paths.geometry_path,
+                    bundle.paths.reference_path,
+                    bundle.source_sha256,
+                )
+            except (FileNotFoundError, TrackAssetBuildError, OSError, ValueError) as error:
+                LOGGER.error("track assets are not ready: %s", error)
+                return 4
         tracker = create_tracker(monitoring_config)
         if arguments.launch_game and arguments.backend != "assetto-corsa":
             LOGGER.error("--launch-game is supported only with --backend assetto-corsa")
@@ -974,15 +1045,13 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         if not report.is_ready:
             return 4
         command = ["ac-rl-driver", *(argv if argv is not None else sys.argv[1:])]
-        if config.evaluation.enabled and arguments.backend != "mock":
-            LOGGER.error(
-                "periodic evaluation is currently supported only with --backend mock"
-            )
-            return 2
         evaluation_environment_factory = (
             (lambda: create_mock_environment(config))
-            if config.evaluation.enabled
+            if config.evaluation.enabled and arguments.backend == "mock"
             else None
+        )
+        evaluation_uses_training_environment = (
+            config.evaluation.enabled and arguments.backend == "assetto-corsa"
         )
         launch_control_writer = (
             VGamepadControlWriter(
@@ -1026,6 +1095,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                         tracking_run_name=monitoring_config.run_name,
                         evaluation_environment_factory=(
                             evaluation_environment_factory
+                        ),
+                        evaluation_uses_training_environment=(
+                            evaluation_uses_training_environment
                         ),
                     )
                 finally:

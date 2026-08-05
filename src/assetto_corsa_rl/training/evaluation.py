@@ -13,6 +13,23 @@ import numpy as np
 import torch
 from torch.distributions import Independent, Normal
 
+from assetto_corsa_rl.ac_integration.track_assets import (
+    CANONICAL_COORDINATE_FRAME,
+    TrackAssetBundle,
+    TrackProjection,
+    boundary_preview_world,
+    ensure_track_assets,
+    geometry_centerline_world_xz,
+    load_npz_arrays,
+    local_xz_to_world_xz,
+    predictor_xz_to_vehicle_fl,
+    project_world_position,
+    reference_line_world_xz,
+    reference_preview_world,
+    sha256_file,
+    world_xz_to_local_xz,
+    wrapped_progress_delta,
+)
 from assetto_corsa_rl.config import ProjectConfig
 from assetto_corsa_rl.envs.environment import AssettoCorsaEnv
 from assetto_corsa_rl.models.bezier import decode_bezier_trajectory
@@ -21,6 +38,10 @@ from assetto_corsa_rl.training.tracking import ExperimentTracker, MetricValue
 from assetto_corsa_rl.types import REFERENCE_TIME_OFFSETS_S, FloatArray
 
 EnvironmentFactory = Callable[[], AssettoCorsaEnv]
+TRACK_BOUNDARY_PREVIEW_DISTANCES_M = np.asarray(
+    [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0],
+    dtype=np.float32,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,16 +71,40 @@ class EvaluationResult:
 
 @dataclass(slots=True)
 class _TrajectoryBuffer:
-    """Concatenated step-level data across variable-length episodes."""
+    """Concatenated, unnormalised transition data across evaluation episodes."""
 
     observations: list[FloatArray]
     actions: list[FloatArray]
     rewards: list[float]
     positions_xy_m: list[FloatArray]
+    next_positions_xy_m: list[FloatArray]
     vehicle_heading_rad: list[float]
     simulation_time_s: list[float]
+    environment_progress_m: list[float]
+    environment_progress_increment_m: list[float]
     reference_progress_m: list[float]
-    bezier_prediction_points: list[FloatArray]
+    reference_progress_increment_m: list[float]
+    reference_projection_world_xy_m: list[FloatArray]
+    reference_projection_distance_m: list[float]
+    track_progress_m: list[float]
+    track_progress_increment_m: list[float]
+    track_projection_world_xy_m: list[FloatArray]
+    track_projection_distance_m: list[float]
+    world_displacement_increment_m: list[float]
+    progress_reward: list[float]
+    bezier_prediction_local_xz_m: list[FloatArray]
+    bezier_prediction_vehicle_fl_m: list[FloatArray]
+    bezier_prediction_world_xz_m: list[FloatArray]
+    reference_preview_local_xz_m: list[FloatArray]
+    reference_preview_vehicle_fl_m: list[FloatArray]
+    reference_preview_world_xz_m: list[FloatArray]
+    left_boundary_preview_local_xz_m: list[FloatArray]
+    left_boundary_preview_vehicle_fl_m: list[FloatArray]
+    left_boundary_preview_world_xz_m: list[FloatArray]
+    right_boundary_preview_local_xz_m: list[FloatArray]
+    right_boundary_preview_vehicle_fl_m: list[FloatArray]
+    right_boundary_preview_world_xz_m: list[FloatArray]
+    frame_roundtrip_error_m: list[float]
     episode_ids: list[int]
     episode_steps: list[int]
 
@@ -67,14 +112,24 @@ class _TrajectoryBuffer:
     def create(cls) -> _TrajectoryBuffer:
         """Create an empty evaluation trajectory buffer."""
 
-        return cls([], [], [], [], [], [], [], [], [], [])
+        return cls(**{name: [] for name in cls.__dataclass_fields__})
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticEvaluationGeometry:
+    """Unnormalised geometry and the exact active reference used by evaluation."""
+
+    track_assets: TrackAssetBundle | None
+    geometry_arrays: dict[str, np.ndarray]
+    reference_arrays: dict[str, np.ndarray]
+    reference_path: Path | None
+    reference_sha256: str
 
 
 def evaluate_policy(
     *,
     config: ProjectConfig,
     model: DriverNetwork,
-    environment_factory: EnvironmentFactory,
     device: torch.device,
     training_run_directory: Path,
     checkpoint_path: Path,
@@ -82,13 +137,21 @@ def evaluate_policy(
     environment_steps: int,
     backend_name: str,
     tracker: ExperimentTracker | None,
+    environment_factory: EnvironmentFactory | None = None,
+    environment: AssettoCorsaEnv | None = None,
 ) -> EvaluationResult:
-    """Evaluate one checkpoint in a fresh environment and log a child run."""
+    """Evaluate one checkpoint and log a nested MLflow run.
+
+    Mock evaluation normally owns a fresh environment. The live Assetto Corsa
+    backend reuses the connected training environment sequentially because only
+    one simulator session and controller stream exist.
+    """
+
+    if (environment is None) == (environment_factory is None):
+        raise ValueError("provide exactly one of environment or environment_factory")
 
     output_directory = (
-        training_run_directory
-        / "evaluations"
-        / f"update_{checkpoint_update:06d}"
+        training_run_directory / "evaluations" / f"update_{checkpoint_update:06d}"
     )
     output_directory.mkdir(parents=True, exist_ok=True)
     parent_run_id = tracker.run_id if tracker is not None else None
@@ -102,14 +165,22 @@ def evaluate_policy(
         parent_run_id=parent_run_id,
     )
     run_status = "FAILED"
-    environment: AssettoCorsaEnv | None = None
+    owns_environment = environment is None
+    evaluation_environment = (
+        environment_factory() if environment_factory is not None else environment
+    )
+    if evaluation_environment is None:
+        raise RuntimeError("evaluation environment could not be created")
+
+    static_geometry = _load_static_evaluation_geometry(
+        config,
+        backend_name=backend_name,
+    )
 
     try:
-        environment = environment_factory()
-        device_index = device.index
         fork_devices = (
-            [device_index]
-            if device.type == "cuda" and device_index is not None
+            [device.index]
+            if device.type == "cuda" and device.index is not None
             else []
         )
         with torch.random.fork_rng(devices=fork_devices):
@@ -117,8 +188,9 @@ def evaluate_policy(
             episodes, trajectories = _run_episodes(
                 config=config,
                 model=model,
-                environment=environment,
+                environment=evaluation_environment,
                 device=device,
+                static_geometry=static_geometry,
             )
         metrics = _evaluation_metrics(episodes, checkpoint_update)
         result = _write_evaluation_artifacts(
@@ -131,6 +203,7 @@ def evaluate_policy(
             episodes=episodes,
             trajectories=trajectories,
             metrics=metrics,
+            static_geometry=static_geometry,
         )
         _log_evaluation_result(
             tracker,
@@ -144,10 +217,38 @@ def evaluate_policy(
         run_status = "KILLED"
         raise
     finally:
-        if environment is not None:
-            environment.close()
+        if owns_environment:
+            evaluation_environment.close()
         if child_run_started and tracker is not None:
             tracker.end_run(status=run_status)
+
+
+def _load_static_evaluation_geometry(
+    config: ProjectConfig,
+    *,
+    backend_name: str,
+) -> _StaticEvaluationGeometry:
+    if backend_name != "assetto-corsa":
+        return _StaticEvaluationGeometry(None, {}, {}, None, "")
+    bundle = ensure_track_assets(config)
+    configured_text = config.reference.artifact_path.strip()
+    configured_path = Path(configured_text) if configured_text else bundle.paths.reference_path
+    reference_path = (
+        bundle.paths.reference_path
+        if configured_text.casefold() == "auto"
+        else configured_path
+    )
+    if not reference_path.is_file():
+        raise FileNotFoundError(
+            f"configured active reference does not exist: {reference_path}"
+        )
+    return _StaticEvaluationGeometry(
+        track_assets=bundle,
+        geometry_arrays=load_npz_arrays(bundle.paths.geometry_path),
+        reference_arrays=load_npz_arrays(reference_path),
+        reference_path=reference_path,
+        reference_sha256=sha256_file(reference_path),
+    )
 
 
 def _start_evaluation_run(
@@ -172,9 +273,7 @@ def _start_evaluation_run(
             "evaluation.episodes": config.evaluation.episodes,
             "evaluation.deterministic": config.evaluation.deterministic,
             "evaluation.seed_offset": config.evaluation.seed_offset,
-            "evaluation.record_trajectories": (
-                config.evaluation.record_trajectories
-            ),
+            "evaluation.record_trajectories": config.evaluation.record_trajectories,
             "evaluation.checkpoint_local_path": str(checkpoint_path),
             "evaluation.checkpoint_artifact_path": (
                 f"checkpoints/update_{checkpoint_update:06d}/checkpoint.pt"
@@ -199,24 +298,27 @@ def _run_episodes(
     model: DriverNetwork,
     environment: AssettoCorsaEnv,
     device: torch.device,
+    static_geometry: _StaticEvaluationGeometry,
 ) -> tuple[tuple[EvaluationEpisode, ...], _TrajectoryBuffer]:
-    """Run the configured evaluation episodes without updating the model."""
+    """Run configured evaluation episodes without updating the model."""
 
     model.eval()
     episodes: list[EvaluationEpisode] = []
     trajectories = _TrajectoryBuffer.create()
     for episode_index in range(config.evaluation.episodes):
         seed = config.experiment.seed + config.evaluation.seed_offset + episode_index
-        episode = _run_episode(
-            config=config,
-            model=model,
-            environment=environment,
-            device=device,
-            episode_index=episode_index,
-            seed=seed,
-            trajectories=trajectories,
+        episodes.append(
+            _run_episode(
+                config=config,
+                model=model,
+                environment=environment,
+                device=device,
+                episode_index=episode_index,
+                seed=seed,
+                trajectories=trajectories,
+                static_geometry=static_geometry,
+            )
         )
-        episodes.append(episode)
     return tuple(episodes), trajectories
 
 
@@ -229,6 +331,7 @@ def _run_episode(
     episode_index: int,
     seed: int,
     trajectories: _TrajectoryBuffer,
+    static_geometry: _StaticEvaluationGeometry,
 ) -> EvaluationEpisode:
     """Execute and optionally record one bounded evaluation episode."""
 
@@ -240,10 +343,7 @@ def _run_episode(
     steps = 0
 
     for step_index in range(config.experiment.max_episode_steps):
-        observation_tensor = torch.as_tensor(
-            observation,
-            device=device,
-        ).unsqueeze(0)
+        observation_tensor = torch.as_tensor(observation, device=device).unsqueeze(0)
         with torch.no_grad():
             output = model(observation_tensor)
             action_tensor = _evaluation_action(
@@ -256,32 +356,30 @@ def _run_episode(
                 sample_count=REFERENCE_TIME_OFFSETS_S.size,
             )
 
-        action = np.asarray(
-            action_tensor.squeeze(0).cpu(),
-            dtype=np.float32,
+        action = np.asarray(action_tensor.squeeze(0).cpu(), dtype=np.float32)
+        next_observation, reward, terminated, truncated, next_info = environment.step(
+            action
         )
         if config.evaluation.record_trajectories:
-            _append_trajectory_step(
+            _append_trajectory_transition(
                 trajectories,
                 observation=observation,
                 action=action,
+                reward=float(reward),
                 info=info,
-                prediction=np.asarray(
+                next_info=next_info,
+                prediction_local_xz_m=np.asarray(
                     prediction.squeeze(0).cpu(),
                     dtype=np.float32,
                 ),
                 episode_index=episode_index,
                 step_index=step_index,
+                static_geometry=static_geometry,
             )
 
-        next_observation, reward, terminated, truncated, next_info = (
-            environment.step(action)
-        )
         total_reward += float(reward)
         steps = step_index + 1
         final_progress_m = _progress_from_info(next_info)
-        if config.evaluation.record_trajectories:
-            trajectories.rewards[-1] = float(reward)
         observation, info = next_observation, next_info
         if terminated or truncated:
             break
@@ -316,39 +414,277 @@ def _evaluation_action(
     return distribution.sample()
 
 
-def _append_trajectory_step(
+def _append_trajectory_transition(
     trajectories: _TrajectoryBuffer,
     *,
     observation: FloatArray,
     action: FloatArray,
+    reward: float,
     info: dict[str, Any],
-    prediction: FloatArray,
+    next_info: dict[str, Any],
+    prediction_local_xz_m: FloatArray,
     episode_index: int,
     step_index: int,
+    static_geometry: _StaticEvaluationGeometry,
 ) -> None:
-    """Append one policy decision and its simulator context."""
+    """Append one action transition with independent geometry projections."""
 
     telemetry = info["telemetry"]
+    next_telemetry = next_info["telemetry"]
+    position = np.asarray(info["position_xy_m"], dtype=np.float32)
+    next_position = np.asarray(next_info["position_xy_m"], dtype=np.float32)
+    heading = float(info["vehicle_heading_rad"])
+    environment_progress = float(telemetry["progress_m"])
+    next_environment_progress = float(next_telemetry["progress_m"])
+
+    reference_projection = _reference_projection(static_geometry, position)
+    next_reference_projection = _reference_projection(
+        static_geometry,
+        next_position,
+    )
+    track_projection = _track_projection(static_geometry, position)
+    next_track_projection = _track_projection(static_geometry, next_position)
+
+    reference_progress = (
+        reference_projection.progress_m
+        if reference_projection is not None
+        else environment_progress
+    )
+    next_reference_progress = (
+        next_reference_projection.progress_m
+        if next_reference_projection is not None
+        else next_environment_progress
+    )
+    reference_track_length = _track_length(
+        static_geometry.reference_arrays,
+        fallback=1.0,
+    )
+    geometry_track_length = _track_length(
+        static_geometry.geometry_arrays,
+        fallback=reference_track_length,
+    )
+
+    prediction_world_xz = local_xz_to_world_xz(
+        prediction_local_xz_m,
+        position,
+        heading,
+    )
+    reference_preview = _empty_points(REFERENCE_TIME_OFFSETS_S.size)
+    left_preview = _empty_points(TRACK_BOUNDARY_PREVIEW_DISTANCES_M.size)
+    right_preview = _empty_points(TRACK_BOUNDARY_PREVIEW_DISTANCES_M.size)
+    if static_geometry.reference_arrays:
+        reference_preview = reference_preview_world(
+            static_geometry.reference_arrays,
+            reference_progress,
+            np.asarray(REFERENCE_TIME_OFFSETS_S, dtype=np.float32),
+        )
+    if static_geometry.geometry_arrays:
+        boundary_progress = (
+            track_projection.progress_m
+            if track_projection is not None
+            else reference_progress
+        )
+        left_preview, right_preview = boundary_preview_world(
+            static_geometry.geometry_arrays,
+            boundary_progress,
+            TRACK_BOUNDARY_PREVIEW_DISTANCES_M,
+        )
+
+    reference_preview_local_xz = world_xz_to_local_xz(
+        reference_preview,
+        position,
+        heading,
+    )
+    left_preview_local_xz = world_xz_to_local_xz(
+        left_preview,
+        position,
+        heading,
+    )
+    right_preview_local_xz = world_xz_to_local_xz(
+        right_preview,
+        position,
+        heading,
+    )
+    reference_preview_vehicle_fl = predictor_xz_to_vehicle_fl(
+        reference_preview_local_xz
+    )
+    left_preview_vehicle_fl = predictor_xz_to_vehicle_fl(left_preview_local_xz)
+    right_preview_vehicle_fl = predictor_xz_to_vehicle_fl(right_preview_local_xz)
+    prediction_vehicle_fl = predictor_xz_to_vehicle_fl(prediction_local_xz_m)
+    roundtrip_world = local_xz_to_world_xz(
+        reference_preview_local_xz,
+        position,
+        heading,
+    )
+    finite_roundtrip = np.isfinite(reference_preview).all(axis=1)
+    frame_roundtrip_error = (
+        float(
+            np.max(
+                np.linalg.norm(
+                    roundtrip_world[finite_roundtrip] - reference_preview[finite_roundtrip],
+                    axis=1,
+                )
+            )
+        )
+        if np.any(finite_roundtrip)
+        else float("nan")
+    )
+
     trajectories.observations.append(observation.copy())
     trajectories.actions.append(action.copy())
-    trajectories.rewards.append(0.0)
-    trajectories.positions_xy_m.append(
-        np.asarray(info["position_xy_m"], dtype=np.float32)
+    trajectories.rewards.append(float(reward))
+    trajectories.positions_xy_m.append(position)
+    trajectories.next_positions_xy_m.append(next_position)
+    trajectories.vehicle_heading_rad.append(heading)
+    trajectories.simulation_time_s.append(float(telemetry["simulation_time_s"]))
+    trajectories.environment_progress_m.append(environment_progress)
+    trajectories.environment_progress_increment_m.append(
+        wrapped_progress_delta(
+            next_environment_progress,
+            environment_progress,
+            reference_track_length,
+        )
     )
-    trajectories.vehicle_heading_rad.append(
-        float(info["vehicle_heading_rad"])
+    trajectories.reference_progress_m.append(reference_progress)
+    trajectories.reference_progress_increment_m.append(
+        wrapped_progress_delta(
+            next_reference_progress,
+            reference_progress,
+            reference_track_length,
+        )
     )
-    trajectories.simulation_time_s.append(
-        float(telemetry["simulation_time_s"])
+    trajectories.reference_projection_world_xy_m.append(
+        _projection_point(reference_projection)
     )
-    trajectories.reference_progress_m.append(float(telemetry["progress_m"]))
-    trajectories.bezier_prediction_points.append(prediction.copy())
+    trajectories.reference_projection_distance_m.append(
+        _projection_distance(reference_projection)
+    )
+    track_progress = (
+        track_projection.progress_m
+        if track_projection is not None
+        else reference_progress
+    )
+    next_track_progress = (
+        next_track_projection.progress_m
+        if next_track_projection is not None
+        else next_reference_progress
+    )
+    trajectories.track_progress_m.append(track_progress)
+    trajectories.track_progress_increment_m.append(
+        wrapped_progress_delta(
+            next_track_progress,
+            track_progress,
+            geometry_track_length,
+        )
+    )
+    trajectories.track_projection_world_xy_m.append(
+        _projection_point(track_projection)
+    )
+    trajectories.track_projection_distance_m.append(
+        _projection_distance(track_projection)
+    )
+    trajectories.world_displacement_increment_m.append(
+        float(np.linalg.norm(next_position - position))
+    )
+    trajectories.progress_reward.append(_progress_reward_from_info(next_info))
+    trajectories.bezier_prediction_local_xz_m.append(
+        prediction_local_xz_m.copy()
+    )
+    trajectories.bezier_prediction_vehicle_fl_m.append(prediction_vehicle_fl)
+    trajectories.bezier_prediction_world_xz_m.append(prediction_world_xz)
+    trajectories.reference_preview_local_xz_m.append(reference_preview_local_xz)
+    trajectories.reference_preview_vehicle_fl_m.append(reference_preview_vehicle_fl)
+    trajectories.reference_preview_world_xz_m.append(reference_preview)
+    trajectories.left_boundary_preview_local_xz_m.append(left_preview_local_xz)
+    trajectories.left_boundary_preview_vehicle_fl_m.append(left_preview_vehicle_fl)
+    trajectories.left_boundary_preview_world_xz_m.append(left_preview)
+    trajectories.right_boundary_preview_local_xz_m.append(right_preview_local_xz)
+    trajectories.right_boundary_preview_vehicle_fl_m.append(right_preview_vehicle_fl)
+    trajectories.right_boundary_preview_world_xz_m.append(right_preview)
+    trajectories.frame_roundtrip_error_m.append(frame_roundtrip_error)
     trajectories.episode_ids.append(episode_index)
     trajectories.episode_steps.append(step_index)
 
 
+def _reference_projection(
+    static_geometry: _StaticEvaluationGeometry,
+    position_xy_m: np.ndarray,
+) -> TrackProjection | None:
+    arrays = static_geometry.reference_arrays
+    if not arrays:
+        return None
+    return project_world_position(
+        reference_line_world_xz(arrays),
+        arrays["track_distance_m"],
+        _track_length(arrays),
+        position_xy_m,
+    )
+
+
+def _track_projection(
+    static_geometry: _StaticEvaluationGeometry,
+    position_xy_m: np.ndarray,
+) -> TrackProjection | None:
+    arrays = static_geometry.geometry_arrays
+    if not arrays:
+        return None
+    return project_world_position(
+        geometry_centerline_world_xz(arrays),
+        arrays["track_distance_m"],
+        _track_length(arrays),
+        position_xy_m,
+    )
+
+
+def _track_length(
+    arrays: dict[str, np.ndarray],
+    *,
+    fallback: float | None = None,
+) -> float:
+    if arrays and "track_length_m" in arrays:
+        return float(np.asarray(arrays["track_length_m"]).reshape(-1)[0])
+    if fallback is not None:
+        return float(fallback)
+    raise KeyError("track_length_m is unavailable")
+
+
+def _projection_point(projection: TrackProjection | None) -> np.ndarray:
+    if projection is None:
+        return np.full(2, np.nan, dtype=np.float32)
+    return np.asarray(projection.point_xy_m, dtype=np.float32)
+
+
+def _projection_distance(projection: TrackProjection | None) -> float:
+    return float(projection.distance_m) if projection is not None else float("nan")
+
+
+def _progress_reward_from_info(info: dict[str, Any]) -> float:
+    reward_terms = info.get("reward_terms")
+    if not isinstance(reward_terms, dict):
+        return float("nan")
+    for name in (
+        "progress_reward",
+        "reward_progress",
+        "reference_progress_reward",
+        "progress",
+    ):
+        value = reward_terms.get(name)
+        if value is not None:
+            try:
+                result = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(result):
+                return result
+    return float("nan")
+
+
+def _empty_points(count: int) -> np.ndarray:
+    return np.full((count, 2), np.nan, dtype=np.float32)
+
+
 def _progress_from_info(info: dict[str, Any]) -> float:
-    """Read the current reference progress from environment info."""
+    """Read current reference progress from environment info."""
 
     return float(info["telemetry"]["progress_m"])
 
@@ -387,28 +723,49 @@ def _write_evaluation_artifacts(
     episodes: tuple[EvaluationEpisode, ...],
     trajectories: _TrajectoryBuffer,
     metrics: dict[str, MetricValue],
+    static_geometry: _StaticEvaluationGeometry,
 ) -> EvaluationResult:
-    """Write JSON, CSV, and optional NPZ artefacts for one evaluation."""
+    """Write JSON, CSV and optional NPZ artefacts for one evaluation."""
 
     episodes_path = output_directory / "episodes.csv"
     with episodes_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=list(asdict(episodes[0])),
-        )
+        writer = csv.DictWriter(handle, fieldnames=list(asdict(episodes[0])))
         writer.writeheader()
         writer.writerows(asdict(episode) for episode in episodes)
 
     trajectories_path: Path | None = None
     if config.evaluation.record_trajectories:
         trajectories_path = output_directory / "trajectories.npz"
+        asset_bundle = static_geometry.track_assets
         np.savez_compressed(
             trajectories_path,
+            evaluation_artifact_schema=np.asarray(4, dtype=np.int32),
             observations=np.asarray(trajectories.observations, dtype=np.float32),
+            observations_normalized=np.asarray(
+                trajectories.observations,
+                dtype=np.float32,
+            ),
             actions=np.asarray(trajectories.actions, dtype=np.float32),
             rewards=np.asarray(trajectories.rewards, dtype=np.float32),
-            positions_xy_m=np.asarray(
+            positions_xy_m=np.asarray(trajectories.positions_xy_m, dtype=np.float32),
+            vehicle_world_xy_m=np.asarray(
                 trajectories.positions_xy_m,
+                dtype=np.float32,
+            ),
+            vehicle_world_xz_m=np.asarray(
+                trajectories.positions_xy_m,
+                dtype=np.float32,
+            ),
+            next_positions_xy_m=np.asarray(
+                trajectories.next_positions_xy_m,
+                dtype=np.float32,
+            ),
+            next_vehicle_world_xy_m=np.asarray(
+                trajectories.next_positions_xy_m,
+                dtype=np.float32,
+            ),
+            next_vehicle_world_xz_m=np.asarray(
+                trajectories.next_positions_xy_m,
                 dtype=np.float32,
             ),
             vehicle_heading_rad=np.asarray(
@@ -419,18 +776,210 @@ def _write_evaluation_artifacts(
                 trajectories.simulation_time_s,
                 dtype=np.float32,
             ),
+            environment_progress_m=np.asarray(
+                trajectories.environment_progress_m,
+                dtype=np.float32,
+            ),
+            environment_progress_increment_m=np.asarray(
+                trajectories.environment_progress_increment_m,
+                dtype=np.float32,
+            ),
             reference_progress_m=np.asarray(
                 trajectories.reference_progress_m,
                 dtype=np.float32,
             ),
-            bezier_prediction_points=np.asarray(
-                trajectories.bezier_prediction_points,
+            reference_progress_increment_m=np.asarray(
+                trajectories.reference_progress_increment_m,
                 dtype=np.float32,
             ),
+            reference_projection_world_xy_m=np.asarray(
+                trajectories.reference_projection_world_xy_m,
+                dtype=np.float32,
+            ),
+            reference_projection_world_xz_m=np.asarray(
+                trajectories.reference_projection_world_xy_m,
+                dtype=np.float32,
+            ),
+            reference_projection_distance_m=np.asarray(
+                trajectories.reference_projection_distance_m,
+                dtype=np.float32,
+            ),
+            track_progress_m=np.asarray(
+                trajectories.track_progress_m,
+                dtype=np.float32,
+            ),
+            track_progress_increment_m=np.asarray(
+                trajectories.track_progress_increment_m,
+                dtype=np.float32,
+            ),
+            track_projection_world_xy_m=np.asarray(
+                trajectories.track_projection_world_xy_m,
+                dtype=np.float32,
+            ),
+            track_projection_world_xz_m=np.asarray(
+                trajectories.track_projection_world_xy_m,
+                dtype=np.float32,
+            ),
+            track_projection_distance_m=np.asarray(
+                trajectories.track_projection_distance_m,
+                dtype=np.float32,
+            ),
+            world_displacement_increment_m=np.asarray(
+                trajectories.world_displacement_increment_m,
+                dtype=np.float32,
+            ),
+            progress_reward=np.asarray(
+                trajectories.progress_reward,
+                dtype=np.float32,
+            ),
+            progress_reward_diagnostic=np.asarray(
+                trajectories.reference_progress_increment_m,
+                dtype=np.float32,
+            )
+            * float(config.rewards.progress_scale),
+            bezier_prediction_points=np.asarray(
+                trajectories.bezier_prediction_local_xz_m,
+                dtype=np.float32,
+            ),
+            bezier_prediction_local_xz_m=np.asarray(
+                trajectories.bezier_prediction_local_xz_m,
+                dtype=np.float32,
+            ),
+            bezier_prediction_vehicle_fl_m=np.asarray(
+                trajectories.bezier_prediction_vehicle_fl_m,
+                dtype=np.float32,
+            ),
+            bezier_prediction_world_xy_m=np.asarray(
+                trajectories.bezier_prediction_world_xz_m,
+                dtype=np.float32,
+            ),
+            bezier_prediction_world_xz_m=np.asarray(
+                trajectories.bezier_prediction_world_xz_m,
+                dtype=np.float32,
+            ),
+            reference_preview_local_xz_m=np.asarray(
+                trajectories.reference_preview_local_xz_m,
+                dtype=np.float32,
+            ),
+            reference_preview_vehicle_fl_m=np.asarray(
+                trajectories.reference_preview_vehicle_fl_m,
+                dtype=np.float32,
+            ),
+            reference_preview_world_xy_m=np.asarray(
+                trajectories.reference_preview_world_xz_m,
+                dtype=np.float32,
+            ),
+            reference_preview_world_xz_m=np.asarray(
+                trajectories.reference_preview_world_xz_m,
+                dtype=np.float32,
+            ),
+            left_boundary_preview_local_xz_m=np.asarray(
+                trajectories.left_boundary_preview_local_xz_m,
+                dtype=np.float32,
+            ),
+            left_boundary_preview_vehicle_fl_m=np.asarray(
+                trajectories.left_boundary_preview_vehicle_fl_m,
+                dtype=np.float32,
+            ),
+            left_boundary_preview_world_xy_m=np.asarray(
+                trajectories.left_boundary_preview_world_xz_m,
+                dtype=np.float32,
+            ),
+            left_boundary_preview_world_xz_m=np.asarray(
+                trajectories.left_boundary_preview_world_xz_m,
+                dtype=np.float32,
+            ),
+            right_boundary_preview_local_xz_m=np.asarray(
+                trajectories.right_boundary_preview_local_xz_m,
+                dtype=np.float32,
+            ),
+            right_boundary_preview_vehicle_fl_m=np.asarray(
+                trajectories.right_boundary_preview_vehicle_fl_m,
+                dtype=np.float32,
+            ),
+            right_boundary_preview_world_xy_m=np.asarray(
+                trajectories.right_boundary_preview_world_xz_m,
+                dtype=np.float32,
+            ),
+            right_boundary_preview_world_xz_m=np.asarray(
+                trajectories.right_boundary_preview_world_xz_m,
+                dtype=np.float32,
+            ),
+            frame_roundtrip_error_m=np.asarray(
+                trajectories.frame_roundtrip_error_m,
+                dtype=np.float32,
+            ),
+            reference_time_offsets_s=np.asarray(
+                REFERENCE_TIME_OFFSETS_S,
+                dtype=np.float32,
+            ),
+            boundary_preview_distances_m=TRACK_BOUNDARY_PREVIEW_DISTANCES_M,
             episode_ids=np.asarray(trajectories.episode_ids, dtype=np.int64),
             episode_steps=np.asarray(trajectories.episode_steps, dtype=np.int64),
+            coordinate_frame=np.asarray(CANONICAL_COORDINATE_FRAME),
+            coordinate_transform=np.asarray("world_xy=[ac_z,ac_x]"),
+            local_trajectory_axes=np.asarray("x=lateral_left,z=forward"),
+            observations_are_normalized=np.asarray(True),
+            active_reference_world_xy_m=reference_line_world_xz(
+                static_geometry.reference_arrays
+            ).astype(np.float32),
+            active_reference_track_distance_m=np.asarray(
+                static_geometry.reference_arrays.get("track_distance_m", []),
+                dtype=np.float32,
+            ),
+            active_reference_speed_mps=np.asarray(
+                static_geometry.reference_arrays.get("speed_mps", []),
+                dtype=np.float32,
+            ),
+            active_reference_heading_rad=np.asarray(
+                static_geometry.reference_arrays.get(
+                    "world_heading_rad",
+                    static_geometry.reference_arrays.get("heading_rad", []),
+                ),
+                dtype=np.float32,
+            ),
+            active_reference_track_length_m=np.asarray(
+                static_geometry.reference_arrays.get("track_length_m", np.nan),
+                dtype=np.float64,
+            ),
+            track_centerline_world_xy_m=geometry_centerline_world_xz(
+                static_geometry.geometry_arrays
+            ).astype(np.float32),
+            track_left_boundary_world_xy_m=np.asarray(
+                static_geometry.geometry_arrays.get(
+                    "left_boundary_world_xy_m",
+                    static_geometry.geometry_arrays.get("left_boundary_world_xz_m", []),
+                ),
+                dtype=np.float32,
+            ),
+            track_right_boundary_world_xy_m=np.asarray(
+                static_geometry.geometry_arrays.get(
+                    "right_boundary_world_xy_m",
+                    static_geometry.geometry_arrays.get("right_boundary_world_xz_m", []),
+                ),
+                dtype=np.float32,
+            ),
+            track_static_distance_m=np.asarray(
+                static_geometry.geometry_arrays.get("track_distance_m", []),
+                dtype=np.float32,
+            ),
+            track_static_length_m=np.asarray(
+                static_geometry.geometry_arrays.get("track_length_m", np.nan),
+                dtype=np.float64,
+            ),
+            active_reference_sha256=np.asarray(static_geometry.reference_sha256),
+            track_geometry_sha256=np.asarray(
+                asset_bundle.geometry_sha256 if asset_bundle is not None else ""
+            ),
+            reference_sha256=np.asarray(
+                static_geometry.reference_sha256
+            ),
+            source_fast_lane_sha256=np.asarray(
+                asset_bundle.source_sha256 if asset_bundle is not None else ""
+            ),
         )
 
+    asset_bundle = static_geometry.track_assets
     summary_path = output_directory / "summary.json"
     summary_path.write_text(
         json.dumps(
@@ -444,6 +993,27 @@ def _write_evaluation_artifacts(
                 "metrics": metrics,
                 "record_trajectories": config.evaluation.record_trajectories,
                 "seed_offset": config.evaluation.seed_offset,
+                "track_geometry_sha256": (
+                    asset_bundle.geometry_sha256 if asset_bundle is not None else None
+                ),
+                "reference_sha256": static_geometry.reference_sha256 or None,
+                "active_reference_path": (
+                    str(static_geometry.reference_path)
+                    if static_geometry.reference_path is not None
+                    else None
+                ),
+                "source_fast_lane_sha256": (
+                    asset_bundle.source_sha256 if asset_bundle is not None else None
+                ),
+                "evaluation_artifact_schema": 4,
+                "coordinate_frame": CANONICAL_COORDINATE_FRAME,
+                "coordinate_transform": "world_xy=[ac_z,ac_x]",
+                "progress_diagnostics": (
+                    "environment progress and independent reference/track projections"
+                ),
+                "observations_are_normalized": True,
+                "predictor_local_frame": "local_xz=[left,forward]",
+                "viewer_vehicle_frame": "vehicle_fl=[forward,left]",
             },
             indent=2,
             sort_keys=True,

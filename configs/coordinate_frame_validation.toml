@@ -1,0 +1,155 @@
+# Extended real-backend smoke run.
+# Target: validate several PPO updates, resets, checkpoints and MLflow on BMW Z4 GT3 / Monza.
+
+[experiment]
+seed = 769913
+max_episode_steps = 100
+truncate_on_max_episode_steps = true
+output_directory = "runs"
+
+[monitoring]
+enabled = true
+backend = "mlflow"
+tracking_uri = "http://127.0.0.1:5000"
+experiment_name = "Assetto Corsa PPO"
+run_name = "monza_coordinate_frame_validation_v2"
+log_interval_updates = 1
+fail_on_error = true
+
+[environment]
+control_frequency_hz = 20.0
+# The following track values are used by the mock backend only, but remain
+# explicit so the same configuration can still be parsed consistently.
+mock_track_length_m = 1000.0
+mock_track_half_width_m = 5.0
+initial_speed_mps = 20.0
+termination_method_variant = "any_tyre_armed_stall_v1"
+minimum_speed_mps = 1.3888888889
+# Give the real session five seconds to engage gear and drive away.
+stall_startup_grace_steps = 100
+# Require one continuous second below the minimum speed before termination.
+stall_debounce_steps = 10
+initial_combined_pedal = 0.0
+critical_body_sideslip_angle_deg = 30.0
+minimum_body_sideslip_termination_speed_mps = 5.0
+
+[actions]
+method_variant = "absolute_bounded_v1"
+
+[rewards]
+progress_scale = 1.0
+termination_penalty = -100.0
+prediction_method_variant = "discounted_progress_increments_v1"
+prediction_progress_scale = 0.01
+prediction_horizon_discount = 0.5
+
+[model]
+feature_hidden_sizes = [512, 512]
+policy_hidden_sizes = [128, 128]
+value_hidden_sizes = [512, 512]
+predictor_hidden_sizes = [128, 128]
+trajectory_output_size = 10
+trajectory_codec = "bezier-5x2"
+initial_log_std = -0.5
+
+[dataset]
+track_id = "monza"
+# Empty means the track root/default layout. For tracks with layouts, set e.g. "gp".
+track_layout = ""
+car_id = "bmw_z4_gt3"
+root_directory = "data/external/assetto_corsa_gym"
+steering_lock_degrees = 320.0
+steering_lock_normalized = 0.7119140625
+
+[track_assets]
+# All static geometry comes from the installed track's ai/fast_lane.ai.
+source = "assetto_corsa_fast_lane"
+auto_build = true
+cache_directory = "data/generated/assetto_corsa_tracks"
+# Reuse a compatible human speed profile when its source spline hash matches;
+# otherwise use the AI speed profile contained in fast_lane.ai.
+reference_speed_source = "human_if_available_else_ai"
+human_reference_artifact_path = "auto"
+minimum_reference_speed_mps = 5.0
+
+[behavioral_cloning]
+method_variant = "ai_spline_absolute_v1"
+dataset_artifact_path = "data/processed/bmw_z4_gt3_monza/bc_dataset.npz"
+epochs = 3
+batch_size = 512
+learning_rate = 0.0003
+weight_decay = 0.00001
+predictor_loss_weight = 0.01
+validation_fraction = 0.15
+test_fraction = 0.15
+minimum_speed_mps = 5.0
+
+[ppo]
+method_variant = "ai_spline_absolute_stabilized_v2"
+# Sixteen PPO updates provide a meaningful end-to-end stability test.
+# At 20 Hz, 4096 environment steps correspond to about 205 s of simulator time.
+total_environment_steps = 256
+rollout_steps = 256
+checkpoint_interval_updates = 1
+update_epochs = 1
+minibatch_size = 128
+learning_rate = 0.0003
+gamma = 0.99
+gae_lambda = 0.95
+clip_range = 0.2
+value_loss_coefficient = 0.5
+entropy_coefficient = 0.0
+
+predictor_loss_coefficient = 0.0
+initial_log_std_after_bc = -1.5
+
+kl_control_method_variant = "target_band_learning_rate_v1"
+kl_target = 0.01
+kl_tolerance = 0.003
+kl_learning_rate_decrease_factor = 0.5
+kl_learning_rate_increase_factor = 1.1
+minimum_learning_rate = 0.00003
+max_gradient_norm = 0.5
+
+# Keep predictor shaping disabled because the current BC predictor quality
+# is outside the configured ADE/FDE limits. The predictor loss is still logged.
+use_predicted_progress_reward = false
+
+initial_checkpoint_path = "data/processed/bmw_z4_gt3_monza/bc_checkpoint.pt"
+initial_checkpoint_metrics_path = "data/processed/bmw_z4_gt3_monza/bc_metrics.json"
+maximum_initial_predictor_ade_m = 15.0
+maximum_initial_predictor_fde_m = 40.0
+
+[evaluation]
+# Run one deterministic real-backend evaluation after every fourth PPO update.
+enabled = true
+interval_updates = 1
+episodes = 1
+deterministic = true
+seed_offset = 10000
+record_trajectories = true
+evaluate_final_update = true
+
+[assetto_corsa]
+installation_directory = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\assettocorsa"
+# Empty means: Documents/Assetto Corsa/cfg/controls.ini
+controls_configuration_path = ""
+control_backend = "vgamepad"
+reset_backend = "csp_hotlap_spawn_v1"
+crash_termination = "csp_collision_latched_v1"
+telemetry_calibration = "assetto_corsa_gym_world_v1"
+automatic_shifting = true
+steering_output_sign = -1.0
+frame_timeout_s = 5.0
+reset_timeout_s = 20.0
+reset_position_tolerance = 0.25
+reset_speed_threshold_mps = 5.0
+reset_stable_frames = 5
+reset_collision_quiescence_s = 1.0
+poll_interval_s = 0.001
+launch_timeout_s = 180.0
+launch_poll_interval_s = 0.25
+
+[reference]
+mode = "fixed"
+artifact_path = "data/processed/bmw_z4_gt3_monza/fixed_reference.npz"
