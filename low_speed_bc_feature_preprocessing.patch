@@ -1,0 +1,382 @@
+diff --git a/configs/assetto_corsa_real_extended_smoke.toml b/configs/assetto_corsa_real_extended_smoke.toml
+index 50a7bfe..917de48 100644
+--- a/configs/assetto_corsa_real_extended_smoke.toml
++++ b/configs/assetto_corsa_real_extended_smoke.toml
+@@ -82,7 +82,7 @@ weight_decay = 0.00001
+ predictor_loss_weight = 0.01
+ validation_fraction = 0.15
+ test_fraction = 0.15
+-minimum_speed_mps = 5.0
++minimum_speed_mps = 0.1
+ 
+ [ppo]
+ method_variant = "ai_spline_absolute_stabilized_v2"
+diff --git a/configs/bmw_z4_gt3_monza_baseline.toml b/configs/bmw_z4_gt3_monza_baseline.toml
+index 96e063a..3b52dc8 100644
+--- a/configs/bmw_z4_gt3_monza_baseline.toml
++++ b/configs/bmw_z4_gt3_monza_baseline.toml
+@@ -53,7 +53,7 @@ weight_decay = 0.00001
+ predictor_loss_weight = 0.01
+ validation_fraction = 0.15
+ test_fraction = 0.15
+-minimum_speed_mps = 5.0
++minimum_speed_mps = 0.1
+ 
+ [ppo]
+ method_variant = "ai_spline_absolute_stabilized_v2"
+diff --git a/configs/bmw_z4_gt3_monza_live_smoke.toml b/configs/bmw_z4_gt3_monza_live_smoke.toml
+index 24acd81..295e34d 100644
+--- a/configs/bmw_z4_gt3_monza_live_smoke.toml
++++ b/configs/bmw_z4_gt3_monza_live_smoke.toml
+@@ -57,7 +57,7 @@ weight_decay = 0.00001
+ predictor_loss_weight = 0.01
+ validation_fraction = 0.15
+ test_fraction = 0.15
+-minimum_speed_mps = 5.0
++minimum_speed_mps = 0.1
+ 
+ [ppo]
+ method_variant = "ai_spline_absolute_stabilized_v2"
+diff --git a/src/assetto_corsa_rl/ac_integration/live_backend.py b/src/assetto_corsa_rl/ac_integration/live_backend.py
+index 426800f..bdc9502 100644
+--- a/src/assetto_corsa_rl/ac_integration/live_backend.py
++++ b/src/assetto_corsa_rl/ac_integration/live_backend.py
+@@ -34,6 +34,7 @@ from assetto_corsa_rl.ac_integration.slip_features import (
+ )
+ from assetto_corsa_rl.control.vgamepad import VGamepadControlWriter
+ from assetto_corsa_rl.envs.backend import validate_backend_action
++from assetto_corsa_rl.features.preprocessing import stabilise_low_speed_slip
+ from assetto_corsa_rl.features.track_geometry import TrackGeometry
+ from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
+ from assetto_corsa_rl.types import (
+@@ -538,20 +539,33 @@ class AssettoCorsaLiveBackend:
+             position_xy_m,
+             vehicle_heading_rad,
+         )
+-        slip = vanilla_ac_slip_features(slip_packet)
++        speed_mps = physics.speed_kmh / 3.6
++        raw_slip = vanilla_ac_slip_features(slip_packet)
++        slip = stabilise_low_speed_slip(
++            speed_mps,
++            np.asarray(
++                [
++                    raw_slip.front_slip_ratio,
++                    raw_slip.rear_slip_ratio,
++                    raw_slip.front_sideslip_angle_rad,
++                    raw_slip.rear_sideslip_angle_rad,
++                ],
++                dtype=np.float32,
++            ),
++        )
+         simulation_time_s = max(
+             0.0,
+             snapshot.monotonic_time_s - self._episode_origin_monotonic_s,
+         )
+         return TelemetryFrame(
+             vehicle_state=VehicleState(
+-                speed_mps=physics.speed_kmh / 3.6,
++                speed_mps=speed_mps,
+                 acceleration_x_mps2=physics.acceleration_g[0] * STANDARD_GRAVITY_MPS2,
+                 acceleration_z_mps2=physics.acceleration_g[2] * STANDARD_GRAVITY_MPS2,
+-                front_slip_ratio=slip.front_slip_ratio,
+-                rear_slip_ratio=slip.rear_slip_ratio,
+-                front_sideslip_angle_rad=slip.front_sideslip_angle_rad,
+-                rear_sideslip_angle_rad=slip.rear_sideslip_angle_rad,
++                front_slip_ratio=float(slip[0]),
++                rear_slip_ratio=float(slip[1]),
++                front_sideslip_angle_rad=float(slip[2]),
++                rear_sideslip_angle_rad=float(slip[3]),
+             ),
+             track_preview=TrackPreview(left_boundary_xz_m=left, right_boundary_xz_m=right),
+             reference_line_preview=ReferenceLinePreview(
+diff --git a/src/assetto_corsa_rl/config.py b/src/assetto_corsa_rl/config.py
+index aee93de..a1ce971 100644
+--- a/src/assetto_corsa_rl/config.py
++++ b/src/assetto_corsa_rl/config.py
+@@ -253,7 +253,7 @@ class BehavioralCloningConfig:
+     predictor_loss_weight: float = 0.0
+     validation_fraction: float = 0.15
+     test_fraction: float = 0.15
+-    minimum_speed_mps: float = 5.0
++    minimum_speed_mps: float = 0.1
+ 
+     def __post_init__(self) -> None:
+         if self.method_variant != BASELINE_METHOD_VARIANT:
+@@ -267,8 +267,11 @@ class BehavioralCloningConfig:
+                 f"behavioral_cloning.{name}",
+                 getattr(self, name),
+             )
+-        for name in ("learning_rate", "minimum_speed_mps"):
+-            _positive(f"behavioral_cloning.{name}", getattr(self, name))
++        _positive("behavioral_cloning.learning_rate", self.learning_rate)
++        _non_negative(
++            "behavioral_cloning.minimum_speed_mps",
++            self.minimum_speed_mps,
++        )
+         _non_negative("behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight)
+         if self.weight_decay < 0:
+             raise ValueError("behavioral_cloning.weight_decay must be non-negative")
+diff --git a/src/assetto_corsa_rl/data/bc_dataset.py b/src/assetto_corsa_rl/data/bc_dataset.py
+index ec31246..f932ce1 100644
+--- a/src/assetto_corsa_rl/data/bc_dataset.py
++++ b/src/assetto_corsa_rl/data/bc_dataset.py
+@@ -17,6 +17,12 @@ from assetto_corsa_rl.ac_integration.launcher import configured_fast_lane_path
+ from assetto_corsa_rl.config import ProjectConfig
+ from assetto_corsa_rl.data.motec import read_motec_channels
+ from assetto_corsa_rl.features.normalizer import StaticZScoreNormalizer
++from assetto_corsa_rl.features.preprocessing import (
++    LOW_SPEED_SLIP_PREPROCESSING_NAME,
++    PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
++    PREVIOUS_ACTION_NORMALIZATION_NAME,
++    stabilise_low_speed_slip,
++)
+ from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
+ from assetto_corsa_rl.features.track_geometry import (
+     TrackGeometry,
+@@ -346,6 +352,7 @@ def build_bc_dataset(
+     normalizer = StaticZScoreNormalizer.fit(
+         raw_splits["train"].observations,
+         feature_names=OBSERVATION_FEATURE_NAMES,
++        identity_feature_names=PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
+     )
+ 
+     def normalise(raw: _RawSessionSamples) -> BCSplit:
+@@ -368,6 +375,9 @@ def build_bc_dataset(
+             "action_method_variant": config.actions.method_variant,
+             "fast_lane_sha256": spline.source_sha256,
+             "calibration": ACTI_MOTEC_CALIBRATION_NAME,
++            "slip_preprocessing": LOW_SPEED_SLIP_PREPROCESSING_NAME,
++            "previous_action_normalization": PREVIOUS_ACTION_NORMALIZATION_NAME,
++            "minimum_speed_mps": config.behavioral_cloning.minimum_speed_mps,
+             "track_id": config.dataset.track_id,
+             "car_id": config.dataset.car_id,
+             "control_frequency_hz": config.environment.control_frequency_hz,
+@@ -486,15 +496,23 @@ def _resample_lap(
+     rear_angle = degree_to_radian_axle_mean * (
+         interpolate("Tire Slip Angle RL") + interpolate("Tire Slip Angle RR")
+     )
++    slip_features = stabilise_low_speed_slip(
++        speed_mps,
++        np.column_stack(
++            (
++                front_ratio,
++                rear_ratio,
++                front_angle,
++                rear_angle,
++            )
++        ),
++    )
+     vehicle_features = np.column_stack(
+         (
+             speed_mps,
+             interpolate("CG Accel Lateral") * STANDARD_GRAVITY_MPS2,
+             interpolate("CG Accel Longitudinal") * STANDARD_GRAVITY_MPS2,
+-            front_ratio,
+-            rear_ratio,
+-            front_angle,
+-            rear_angle,
++            slip_features,
+         )
+     ).astype(np.float32)
+ 
+diff --git a/src/assetto_corsa_rl/features/normalizer.py b/src/assetto_corsa_rl/features/normalizer.py
+index 1b1dbd1..2ed50e3 100644
+--- a/src/assetto_corsa_rl/features/normalizer.py
++++ b/src/assetto_corsa_rl/features/normalizer.py
+@@ -72,18 +72,42 @@ class StaticZScoreNormalizer:
+         demonstrations: npt.ArrayLike,
+         *,
+         feature_names: tuple[str, ...] | None = None,
++        identity_feature_names: tuple[str, ...] = (),
+     ) -> Self:
+-        """Fit once to demonstration observations, never to RL rollouts."""
++        """Fit once to demonstrations with optional identity-scaled features."""
+ 
+         values = np.asarray(demonstrations, dtype=np.float32)
+         if values.ndim != 2 or values.shape[0] < 1:
+             raise ValueError("demonstrations must have shape (samples, features)")
+         if not np.all(np.isfinite(values)):
+             raise ValueError("demonstrations contain non-finite values")
++
++        names = None if feature_names is None else tuple(feature_names)
++        identity_names = tuple(identity_feature_names)
++        if identity_names and names is None:
++            raise ValueError("identity_feature_names require feature_names")
++        if len(set(identity_names)) != len(identity_names):
++            raise ValueError("identity_feature_names must be unique")
++        if names is not None:
++            unknown = set(identity_names) - set(names)
++            if unknown:
++                raise ValueError(
++                    "identity feature names are absent from feature_names: "
++                    + ", ".join(sorted(unknown))
++                )
++
++        mean = values.mean(axis=0, dtype=np.float64).astype(np.float32)
++        standard_deviation = values.std(axis=0, dtype=np.float64).astype(np.float32)
++        if names is not None:
++            for feature_name in identity_names:
++                feature_index = names.index(feature_name)
++                mean[feature_index] = 0.0
++                standard_deviation[feature_index] = 1.0
++
+         return cls(
+-            mean=values.mean(axis=0, dtype=np.float64).astype(np.float32),
+-            standard_deviation=values.std(axis=0, dtype=np.float64).astype(np.float32),
+-            feature_names=feature_names,
++            mean=mean,
++            standard_deviation=standard_deviation,
++            feature_names=names,
+         )
+ 
+     @classmethod
+diff --git a/src/assetto_corsa_rl/features/preprocessing.py b/src/assetto_corsa_rl/features/preprocessing.py
+new file mode 100644
+index 0000000..7b4323d
+--- /dev/null
++++ b/src/assetto_corsa_rl/features/preprocessing.py
+@@ -0,0 +1,63 @@
++"""Shared preprocessing rules for BC demonstrations and live observations."""
++
++from __future__ import annotations
++
++import numpy as np
++import numpy.typing as npt
++
++from assetto_corsa_rl.types import FloatArray
++
++LOW_SPEED_SLIP_ZERO_MPS = 1.0
++LOW_SPEED_SLIP_FULL_MPS = 5.0
++LOW_SPEED_SLIP_PREPROCESSING_NAME = "linear_speed_weight_1_to_5_mps_v1"
++PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES = (
++    "action.previous_combined_pedal",
++    "action.previous_steering",
++)
++PREVIOUS_ACTION_NORMALIZATION_NAME = "identity_previous_actions_v1"
++
++
++def low_speed_slip_weight(speed_mps: npt.ArrayLike) -> FloatArray:
++    """Return a linear slip reliability weight for absolute vehicle speed.
++
++    Tyre slip ratios are poorly conditioned close to standstill because the
++    vehicle speed in their denominator approaches zero. The weight is zero at
++    and below 1 m/s, rises linearly, and reaches one at 5 m/s.
++    """
++
++    speed = np.asarray(speed_mps, dtype=np.float32)
++    if not np.all(np.isfinite(speed)):
++        raise ValueError("speed_mps must contain only finite values")
++    if np.any(speed < 0.0):
++        raise ValueError("speed_mps must be non-negative")
++
++    scale = LOW_SPEED_SLIP_FULL_MPS - LOW_SPEED_SLIP_ZERO_MPS
++    return np.asarray(
++        np.clip((speed - LOW_SPEED_SLIP_ZERO_MPS) / scale, 0.0, 1.0),
++        dtype=np.float32,
++    )
++
++
++def stabilise_low_speed_slip(
++    speed_mps: npt.ArrayLike,
++    slip_features: npt.ArrayLike,
++) -> FloatArray:
++    """Apply the same low-speed slip preprocessing to BC and live features.
++
++    ``slip_features`` must use the final-axis order
++    ``front_ratio, rear_ratio, front_angle_rad, rear_angle_rad``.
++    """
++
++    values = np.asarray(slip_features, dtype=np.float32)
++    speed = np.asarray(speed_mps, dtype=np.float32)
++    if values.ndim < 1 or values.shape[-1] != 4:
++        raise ValueError("slip_features must have final dimension 4")
++    if values.shape[:-1] != speed.shape:
++        raise ValueError(
++            "speed_mps shape must match slip_features without its final dimension"
++        )
++    if not np.all(np.isfinite(values)):
++        raise ValueError("slip_features must contain only finite values")
++
++    weight = low_speed_slip_weight(speed)
++    return np.asarray(values * weight[..., None], dtype=np.float32)
+diff --git a/tests/test_feature_preprocessing.py b/tests/test_feature_preprocessing.py
+new file mode 100644
+index 0000000..24e0c0a
+--- /dev/null
++++ b/tests/test_feature_preprocessing.py
+@@ -0,0 +1,75 @@
++from __future__ import annotations
++
++import numpy as np
++import pytest
++
++from assetto_corsa_rl.features.normalizer import StaticZScoreNormalizer
++from assetto_corsa_rl.features.preprocessing import (
++    PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
++    low_speed_slip_weight,
++    stabilise_low_speed_slip,
++)
++
++
++def test_low_speed_slip_weight_is_zero_then_linear_then_full() -> None:
++    speed_mps = np.asarray([0.0, 1.0, 3.0, 5.0, 10.0], dtype=np.float32)
++
++    np.testing.assert_allclose(
++        low_speed_slip_weight(speed_mps),
++        [0.0, 0.0, 0.5, 1.0, 1.0],
++    )
++
++
++def test_low_speed_slip_preprocessing_scales_all_four_features_equally() -> None:
++    speed_mps = np.asarray([1.0, 3.0, 5.0], dtype=np.float32)
++    slip_features = np.asarray(
++        [
++            [2.0, 4.0, 0.2, 0.4],
++            [2.0, 4.0, 0.2, 0.4],
++            [2.0, 4.0, 0.2, 0.4],
++        ],
++        dtype=np.float32,
++    )
++
++    np.testing.assert_allclose(
++        stabilise_low_speed_slip(speed_mps, slip_features),
++        [
++            [0.0, 0.0, 0.0, 0.0],
++            [1.0, 2.0, 0.1, 0.2],
++            [2.0, 4.0, 0.2, 0.4],
++        ],
++    )
++
++
++def test_normalizer_keeps_previous_actions_on_identity_scale() -> None:
++    feature_names = (
++        "vehicle.speed_mps",
++        *PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
++    )
++    demonstrations = np.asarray(
++        [
++            [10.0, 0.8, -0.1],
++            [20.0, 1.0, 0.0],
++            [30.0, 0.9, 0.1],
++        ],
++        dtype=np.float32,
++    )
++
++    normalizer = StaticZScoreNormalizer.fit(
++        demonstrations,
++        feature_names=feature_names,
++        identity_feature_names=PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
++    )
++
++    np.testing.assert_allclose(normalizer.mean[1:], [0.0, 0.0])
++    np.testing.assert_allclose(normalizer.standard_deviation[1:], [1.0, 1.0])
++    transformed = normalizer.transform(demonstrations[0])
++    np.testing.assert_allclose(transformed[1:], demonstrations[0, 1:])
++
++
++def test_low_speed_slip_preprocessing_rejects_negative_speed() -> None:
++    with pytest.raises(ValueError, match="non-negative"):
++        stabilise_low_speed_slip(
++            -0.1,
++            np.zeros(4, dtype=np.float32),
++        )

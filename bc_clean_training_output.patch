@@ -1,0 +1,779 @@
+diff --git a/src/assetto_corsa_rl/training/behavioral_cloning.py b/src/assetto_corsa_rl/training/behavioral_cloning.py
+index 4c376ab..050733a 100644
+--- a/src/assetto_corsa_rl/training/behavioral_cloning.py
++++ b/src/assetto_corsa_rl/training/behavioral_cloning.py
+@@ -69,15 +69,96 @@ def train_behavioral_cloning(
+ ) -> BCTrainingResult:
+     """Optimise the shared backbone, action head and predictor head."""
+ 
++    _validate_training_inputs(config, dataset)
++    _seed_training(config.experiment.seed)
++    runtime = _create_training_runtime(
++        config,
++        command,
++        torch.device(device),
++    )
++    epoch_history: list[dict[str, float | int]] = []
++    best = _BestCheckpoint()
++
++    _log_training_header(config, dataset, runtime.device)
++    for epoch in range(1, config.behavioral_cloning.epochs + 1):
++        _train_one_epoch(config, dataset.train, runtime)
++        metrics = _evaluate_epoch(config, dataset, runtime)
++        epoch_record = _build_epoch_record(epoch, metrics)
++        epoch_history.append(epoch_record)
++        runtime.recorder.record_step(epoch_record)
++
++        is_best = metrics.validation_joint_loss < best.validation_joint_loss
++        if is_best:
++            best = _BestCheckpoint(
++                epoch=epoch,
++                validation_joint_loss=metrics.validation_joint_loss,
++                validation_action_mse=metrics.validation.action_mse,
++            )
++            _save_best_checkpoint(config, runtime, epoch)
++        _log_epoch_row(
++            epoch,
++            config.behavioral_cloning.epochs,
++            metrics,
++            is_best=is_best,
++        )
++
++    result = _evaluate_best_checkpoint(config, dataset, runtime, best)
++    runtime.recorder.write_summary(
++        _build_training_summary(config, dataset, result, epoch_history)
++    )
++    _log_training_result(result)
++    runtime.recorder.close()
++    return result
++
++
++@dataclass(frozen=True, slots=True)
++class _EpochMetrics:
++    train: BCEvaluationMetrics
++    validation: BCEvaluationMetrics
++    train_joint_loss: float
++    validation_joint_loss: float
++    learning_rate: float
++
++
++@dataclass(frozen=True, slots=True)
++class _BestCheckpoint:
++    epoch: int = 0
++    validation_joint_loss: float = float("inf")
++    validation_action_mse: float = float("inf")
++
++
++@dataclass(slots=True)
++class _TrainingRuntime:
++    model: DriverNetwork
++    optimizer: torch.optim.AdamW
++    recorder: ExperimentRecorder
++    checkpoint_path: Path
++    random: np.random.Generator
++    device: torch.device
++
++
++def _validate_training_inputs(
++    config: ProjectConfig,
++    dataset: BehavioralCloningDataset,
++) -> None:
+     _validate_dataset_contract(config, dataset)
+     if not dataset.train.predictor_valid_mask.any():
+         raise ValueError("training split contains no valid predictor targets")
+     if not dataset.validation.predictor_valid_mask.any():
+         raise ValueError("validation split contains no valid predictor targets")
+-    torch.manual_seed(config.experiment.seed)  # pyright: ignore[reportUnknownMemberType]
+-    np.random.seed(config.experiment.seed)
++
++
++def _seed_training(seed: int) -> None:
++    torch.manual_seed(seed)  # pyright: ignore[reportUnknownMemberType]
++    np.random.seed(seed)
+     torch.use_deterministic_algorithms(True)
+-    target_device = torch.device(device)
++
++
++def _create_training_runtime(
++    config: ProjectConfig,
++    command: list[str],
++    device: torch.device,
++) -> _TrainingRuntime:
+     model = DriverNetwork(
+         observation_size=OBSERVATION_SIZE,
+         feature_hidden_sizes=config.model.feature_hidden_sizes,
+@@ -86,7 +167,7 @@ def train_behavioral_cloning(
+         predictor_hidden_sizes=config.model.predictor_hidden_sizes,
+         trajectory_output_size=config.model.trajectory_output_size,
+         initial_log_std=config.model.initial_log_std,
+-    ).to(target_device)
++    ).to(device)
+     optimizer = torch.optim.AdamW(
+         model.parameters(),
+         lr=config.behavioral_cloning.learning_rate,
+@@ -97,169 +178,259 @@ def train_behavioral_cloning(
+         config=config,
+         command=command,
+     )
+-    checkpoint_path = recorder.run_directory / "checkpoint.pt"
+-    best_epoch = 0
+-    best_validation_joint_loss = float("inf")
+-    best_validation_action_mse = float("inf")
+-    epoch_history: list[dict[str, float | int]] = []
+-    random = np.random.default_rng(config.experiment.seed)
+-    for epoch in range(1, config.behavioral_cloning.epochs + 1):
+-        model.train()
+-        permutation = random.permutation(dataset.train.sample_count)
+-        for start in range(0, permutation.size, config.behavioral_cloning.batch_size):
+-            indices = permutation[start : start + config.behavioral_cloning.batch_size]
+-            observation, action, target, valid = _batch_tensors(
+-                dataset.train,
+-                indices,
+-                target_device,
+-            )
+-            output = model(observation)
+-            action_loss = behavioural_cloning_loss(output.action_mean, action)
+-            predictor_loss = _masked_predictor_loss(
+-                output.trajectory_parameters,
+-                target,
+-                valid,
+-            )
+-            total_loss = (
+-                action_loss + config.behavioral_cloning.predictor_loss_weight * predictor_loss
+-            )
+-            optimizer.zero_grad(set_to_none=True)
+-            total_loss.backward()  # type: ignore[no-untyped-call]
+-            optimizer.step()  # pyright: ignore[reportUnknownMemberType]
+-
+-        train_metrics = evaluate_behavioral_cloning(
+-            model,
+-            dataset.train,
+-            batch_size=config.behavioral_cloning.batch_size,
+-            device=target_device,
+-        )
+-        validation_metrics = evaluate_behavioral_cloning(
+-            model,
+-            dataset.validation,
+-            batch_size=config.behavioral_cloning.batch_size,
+-            device=target_device,
+-        )
+-        predictor_loss_weight = config.behavioral_cloning.predictor_loss_weight
+-        train_joint_loss = _joint_loss(train_metrics, predictor_loss_weight)
+-        validation_joint_loss = _joint_loss(
+-            validation_metrics,
+-            predictor_loss_weight,
++    return _TrainingRuntime(
++        model=model,
++        optimizer=optimizer,
++        recorder=recorder,
++        checkpoint_path=recorder.run_directory / "checkpoint.pt",
++        random=np.random.default_rng(config.experiment.seed),
++        device=device,
++    )
++
++
++def _train_one_epoch(
++    config: ProjectConfig,
++    split: BCSplit,
++    runtime: _TrainingRuntime,
++) -> None:
++    runtime.model.train()
++    permutation = runtime.random.permutation(split.sample_count)
++    batch_size = config.behavioral_cloning.batch_size
++    predictor_weight = config.behavioral_cloning.predictor_loss_weight
++    for start in range(0, permutation.size, batch_size):
++        indices = permutation[start : start + batch_size]
++        observation, action, target, valid = _batch_tensors(
++            split,
++            indices,
++            runtime.device,
+         )
+-        learning_rate = float(optimizer.param_groups[0]["lr"])
+-        epoch_record: dict[str, float | int] = {
+-            "epoch": epoch,
+-            "learning_rate": learning_rate,
+-            "train_joint_loss": train_joint_loss,
+-            "validation_joint_loss": validation_joint_loss,
+-            **{
+-                f"train_{name}": value
+-                for name, value in asdict(train_metrics).items()
+-            },
+-            **{
+-                f"validation_{name}": value
+-                for name, value in asdict(validation_metrics).items()
+-            },
+-        }
+-        epoch_history.append(epoch_record)
+-        recorder.record_step(epoch_record)
+-        _log_epoch_metrics(
+-            epoch=epoch,
+-            total_epochs=config.behavioral_cloning.epochs,
+-            train=train_metrics,
+-            validation=validation_metrics,
+-            train_joint_loss=train_joint_loss,
+-            validation_joint_loss=validation_joint_loss,
+-            learning_rate=learning_rate,
++        output = runtime.model(observation)
++        action_loss = behavioural_cloning_loss(output.action_mean, action)
++        predictor_loss = _masked_predictor_loss(
++            output.trajectory_parameters,
++            target,
++            valid,
+         )
+-        if validation_joint_loss < best_validation_joint_loss:
+-            best_epoch = epoch
+-            best_validation_joint_loss = validation_joint_loss
+-            best_validation_action_mse = validation_metrics.action_mse
+-            LOGGER.info(
+-                "BC best_checkpoint epoch=%d validation_joint=%.6f "
+-                "validation_action=%.6f validation_predictor=%.6f "
+-                "validation_ADE=%.3fm validation_FDE=%.3fm",
+-                epoch,
+-                validation_joint_loss,
+-                validation_metrics.action_mse,
+-                validation_metrics.predictor_smooth_l1,
+-                validation_metrics.predictor_ade_m,
+-                validation_metrics.predictor_fde_m,
+-            )
+-            save_checkpoint(
+-                checkpoint_path,
+-                model=model,
+-                optimizer=optimizer,
+-                training_state=TrainingState(
+-                    iteration=epoch,
+-                    environment_steps=0,
+-                    policy_version=0,
+-                ),
+-                configuration={
+-                    "training_stage": "behavioral_cloning",
+-                    "method_variant": config.behavioral_cloning.method_variant,
+-                    "action_method_variant": config.actions.method_variant,
+-                    "project": config.to_dict(),
+-                    "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
+-                    "predictor_trained_with_bc": (
+-                        config.behavioral_cloning.predictor_loss_weight > 0.0
+-                    ),
+-                    "predictor_loss_weight": (
+-                        config.behavioral_cloning.predictor_loss_weight
+-                    ),
+-                    "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
+-                    "predictor_coordinate_scale_m": (
+-                        PREDICTOR_COORDINATE_SCALE_M
+-                    ),
+-                },
+-            )
++        total_loss = action_loss + predictor_weight * predictor_loss
++        runtime.optimizer.zero_grad(set_to_none=True)
++        total_loss.backward()  # type: ignore[no-untyped-call]
++        runtime.optimizer.step()  # pyright: ignore[reportUnknownMemberType]
++
++
++def _evaluate_epoch(
++    config: ProjectConfig,
++    dataset: BehavioralCloningDataset,
++    runtime: _TrainingRuntime,
++) -> _EpochMetrics:
++    batch_size = config.behavioral_cloning.batch_size
++    predictor_weight = config.behavioral_cloning.predictor_loss_weight
++    train = evaluate_behavioral_cloning(
++        runtime.model,
++        dataset.train,
++        batch_size=batch_size,
++        device=runtime.device,
++    )
++    validation = evaluate_behavioral_cloning(
++        runtime.model,
++        dataset.validation,
++        batch_size=batch_size,
++        device=runtime.device,
++    )
++    return _EpochMetrics(
++        train=train,
++        validation=validation,
++        train_joint_loss=_joint_loss(train, predictor_weight),
++        validation_joint_loss=_joint_loss(validation, predictor_weight),
++        learning_rate=float(runtime.optimizer.param_groups[0]["lr"]),
++    )
++
++
++def _build_epoch_record(
++    epoch: int,
++    metrics: _EpochMetrics,
++) -> dict[str, float | int]:
++    return {
++        "epoch": epoch,
++        "learning_rate": metrics.learning_rate,
++        "train_joint_loss": metrics.train_joint_loss,
++        "validation_joint_loss": metrics.validation_joint_loss,
++        **{
++            f"train_{name}": value
++            for name, value in asdict(metrics.train).items()
++        },
++        **{
++            f"validation_{name}": value
++            for name, value in asdict(metrics.validation).items()
++        },
++    }
++
++
++def _save_best_checkpoint(
++    config: ProjectConfig,
++    runtime: _TrainingRuntime,
++    epoch: int,
++) -> None:
++    save_checkpoint(
++        runtime.checkpoint_path,
++        model=runtime.model,
++        optimizer=runtime.optimizer,
++        training_state=TrainingState(
++            iteration=epoch,
++            environment_steps=0,
++            policy_version=0,
++        ),
++        configuration={
++            "training_stage": "behavioral_cloning",
++            "method_variant": config.behavioral_cloning.method_variant,
++            "action_method_variant": config.actions.method_variant,
++            "project": config.to_dict(),
++            "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
++            "predictor_trained_with_bc": (
++                config.behavioral_cloning.predictor_loss_weight > 0.0
++            ),
++            "predictor_loss_weight": (
++                config.behavioral_cloning.predictor_loss_weight
++            ),
++            "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
++            "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
++        },
++    )
+ 
+-    load_checkpoint(checkpoint_path, model=model, map_location=target_device)
++
++def _evaluate_best_checkpoint(
++    config: ProjectConfig,
++    dataset: BehavioralCloningDataset,
++    runtime: _TrainingRuntime,
++    best: _BestCheckpoint,
++) -> BCTrainingResult:
++    load_checkpoint(
++        runtime.checkpoint_path,
++        model=runtime.model,
++        map_location=runtime.device,
++    )
++    batch_size = config.behavioral_cloning.batch_size
+     validation = evaluate_behavioral_cloning(
+-        model,
++        runtime.model,
+         dataset.validation,
+-        batch_size=config.behavioral_cloning.batch_size,
+-        device=target_device,
++        batch_size=batch_size,
++        device=runtime.device,
+     )
+     test = evaluate_behavioral_cloning(
+-        model,
++        runtime.model,
+         dataset.test,
+-        batch_size=config.behavioral_cloning.batch_size,
+-        device=target_device,
++        batch_size=batch_size,
++        device=runtime.device,
+     )
+-    result = BCTrainingResult(
+-        run_directory=recorder.run_directory,
+-        checkpoint_path=checkpoint_path,
++    return BCTrainingResult(
++        run_directory=runtime.recorder.run_directory,
++        checkpoint_path=runtime.checkpoint_path,
+         epochs=config.behavioral_cloning.epochs,
+-        best_epoch=best_epoch,
+-        best_validation_joint_loss=best_validation_joint_loss,
+-        best_validation_action_mse=best_validation_action_mse,
++        best_epoch=best.epoch,
++        best_validation_joint_loss=best.validation_joint_loss,
++        best_validation_action_mse=best.validation_action_mse,
+         validation=validation,
+         test=test,
+     )
+-    recorder.write_summary(
+-        {
+-            "method_variant": config.behavioral_cloning.method_variant,
+-            "action_method_variant": config.actions.method_variant,
+-            "dataset_metadata": dataset.metadata,
+-            "train_samples": dataset.train.sample_count,
+-            "validation_samples": dataset.validation.sample_count,
+-            "test_samples": dataset.test.sample_count,
+-            "best_epoch": best_epoch,
+-            "best_validation_joint_loss": best_validation_joint_loss,
+-            "best_validation_action_mse": best_validation_action_mse,
+-            "predictor_trained_with_bc": (config.behavioral_cloning.predictor_loss_weight > 0.0),
+-            "predictor_loss_weight": config.behavioral_cloning.predictor_loss_weight,
+-            "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
+-            "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
+-            "epoch_history": epoch_history,
+-            "final_validation": asdict(validation),
+-            "final_test": asdict(test),
+-            "checkpoint": checkpoint_path.name,
+-        }
++
++
++def _build_training_summary(
++    config: ProjectConfig,
++    dataset: BehavioralCloningDataset,
++    result: BCTrainingResult,
++    epoch_history: list[dict[str, float | int]],
++) -> dict[str, object]:
++    return {
++        "method_variant": config.behavioral_cloning.method_variant,
++        "action_method_variant": config.actions.method_variant,
++        "dataset_metadata": dataset.metadata,
++        "train_samples": dataset.train.sample_count,
++        "validation_samples": dataset.validation.sample_count,
++        "test_samples": dataset.test.sample_count,
++        "best_epoch": result.best_epoch,
++        "best_validation_joint_loss": result.best_validation_joint_loss,
++        "best_validation_action_mse": result.best_validation_action_mse,
++        "predictor_trained_with_bc": (
++            config.behavioral_cloning.predictor_loss_weight > 0.0
++        ),
++        "predictor_loss_weight": config.behavioral_cloning.predictor_loss_weight,
++        "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
++        "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
++        "epoch_history": epoch_history,
++        "final_validation": asdict(result.validation),
++        "final_test": asdict(result.test),
++        "checkpoint": result.checkpoint_path.name,
++    }
++
++
++def _log_training_header(
++    config: ProjectConfig,
++    dataset: BehavioralCloningDataset,
++    device: torch.device,
++) -> None:
++    LOGGER.info(
++        "BC training epochs=%d train=%d validation=%d batch=%d device=%s",
++        config.behavioral_cloning.epochs,
++        dataset.train.sample_count,
++        dataset.validation.sample_count,
++        config.behavioral_cloning.batch_size,
++        device,
++    )
++    LOGGER.info(
++        "BC columns: epoch | action MSE train/val | predictor L1 train/val | "
++        "ADE m train/val | FDE m train/val | joint train/val | best"
++    )
++
++
++def _log_epoch_row(
++    epoch: int,
++    total_epochs: int,
++    metrics: _EpochMetrics,
++    *,
++    is_best: bool,
++) -> None:
++    LOGGER.info(
++        "BC %02d/%02d | %.6f/%.6f | %.6f/%.6f | %.3f/%.3f | "
++        "%.3f/%.3f | %.6f/%.6f | %s",
++        epoch,
++        total_epochs,
++        metrics.train.action_mse,
++        metrics.validation.action_mse,
++        metrics.train.predictor_smooth_l1,
++        metrics.validation.predictor_smooth_l1,
++        metrics.train.predictor_ade_m,
++        metrics.validation.predictor_ade_m,
++        metrics.train.predictor_fde_m,
++        metrics.validation.predictor_fde_m,
++        metrics.train_joint_loss,
++        metrics.validation_joint_loss,
++        "*" if is_best else "",
++    )
++
++
++def _log_training_result(result: BCTrainingResult) -> None:
++    validation = result.validation
++    test = result.test
++    LOGGER.info(
++        "BC best: epoch=%d/%d validation[action=%.6f predictor=%.6f "
++        "ADE=%.3fm FDE=%.3fm joint=%.6f]",
++        result.best_epoch,
++        result.epochs,
++        validation.action_mse,
++        validation.predictor_smooth_l1,
++        validation.predictor_ade_m,
++        validation.predictor_fde_m,
++        result.best_validation_joint_loss,
++    )
++    LOGGER.info(
++        "BC test: action=%.6f pedal=%.6f steering=%.6f predictor=%.6f "
++        "ADE=%.3fm FDE=%.3fm",
++        test.action_mse,
++        test.action_combined_pedal_mse,
++        test.action_steering_mse,
++        test.predictor_smooth_l1,
++        test.predictor_ade_m,
++        test.predictor_fde_m,
+     )
+-    recorder.close()
+-    return result
+ 
+ 
+ def _validate_dataset_contract(
+@@ -358,43 +529,6 @@ def _joint_loss(
+         + predictor_loss_weight * metrics.predictor_smooth_l1
+     )
+ 
+-
+-def _log_epoch_metrics(
+-    *,
+-    epoch: int,
+-    total_epochs: int,
+-    train: BCEvaluationMetrics,
+-    validation: BCEvaluationMetrics,
+-    train_joint_loss: float,
+-    validation_joint_loss: float,
+-    learning_rate: float,
+-) -> None:
+-    LOGGER.info(
+-        "BC epoch=%d/%d "
+-        "train[action=%.6f pedal=%.6f steering=%.6f predictor=%.6f "
+-        "joint=%.6f ADE=%.3fm FDE=%.3fm] "
+-        "validation[action=%.6f pedal=%.6f steering=%.6f "
+-        "predictor=%.6f joint=%.6f ADE=%.3fm FDE=%.3fm] lr=%.3e",
+-        epoch,
+-        total_epochs,
+-        train.action_mse,
+-        train.action_combined_pedal_mse,
+-        train.action_steering_mse,
+-        train.predictor_smooth_l1,
+-        train_joint_loss,
+-        train.predictor_ade_m,
+-        train.predictor_fde_m,
+-        validation.action_mse,
+-        validation.action_combined_pedal_mse,
+-        validation.action_steering_mse,
+-        validation.predictor_smooth_l1,
+-        validation_joint_loss,
+-        validation.predictor_ade_m,
+-        validation.predictor_fde_m,
+-        learning_rate,
+-    )
+-
+-
+ def _masked_predictor_loss(
+     flat_prediction: Tensor,
+     target_xz_m: Tensor,
+diff --git a/tests/test_bc_pipeline.py b/tests/test_bc_pipeline.py
+index c773f91..19e3909 100644
+--- a/tests/test_bc_pipeline.py
++++ b/tests/test_bc_pipeline.py
+@@ -21,13 +21,17 @@ from assetto_corsa_rl.config import (
+ )
+ from assetto_corsa_rl.data import bc_dataset
+ from assetto_corsa_rl.data.bc_dataset import (
++    BCDatasetBuildReport,
+     BehavioralCloningDataset,
+     build_bc_dataset,
+     split_session_ids,
+ )
+ from assetto_corsa_rl.data.motec import MotecHeader
+ from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
+-from assetto_corsa_rl.training.behavioral_cloning import train_behavioral_cloning
++from assetto_corsa_rl.training.behavioral_cloning import (
++    BCTrainingResult,
++    train_behavioral_cloning,
++)
+ 
+ 
+ def _fake_motec_channels() -> dict[str, np.ndarray]:
+@@ -151,14 +155,18 @@ def test_session_split_keeps_the_dominant_session_in_training() -> None:
+     }
+ 
+ 
+-def test_fixed_reference_bc_export_and_joint_training(
+-    tmp_path: Path,
++def _install_fake_motec_reader(
+     monkeypatch: pytest.MonkeyPatch,
+-    fast_lane_factory: FastLaneFactory,
+-    caplog: pytest.LogCaptureFixture,
+ ) -> None:
+     channels = _fake_motec_channels()
+-    header = MotecHeader("driver", "car", "track", "date", "time", len(channels))
++    header = MotecHeader(
++        "driver",
++        "car",
++        "track",
++        "date",
++        "time",
++        len(channels),
++    )
+ 
+     def fake_read(
+         _path: Path,
+@@ -167,20 +175,20 @@ def test_fixed_reference_bc_export_and_joint_training(
+         return header, {name: channels[name] for name in names}
+ 
+     monkeypatch.setattr(bc_dataset, "read_motec_channels", fake_read)
+-    config = _project_config(tmp_path, fast_lane_factory)
+-    dataset, report = build_bc_dataset(config)
+ 
++
++def _assert_dataset_build(
++    dataset: BehavioralCloningDataset,
++    report: BCDatasetBuildReport,
++) -> None:
+     assert report.recordings == 3
+     assert report.complete_laps == 3
+     assert report.sessions == 3
+-    assert (
+-        min(
+-            dataset.train.sample_count,
+-            dataset.validation.sample_count,
+-            dataset.test.sample_count,
+-        )
+-        > 0
+-    )
++    assert min(
++        dataset.train.sample_count,
++        dataset.validation.sample_count,
++        dataset.test.sample_count,
++    ) > 0
+     assert dataset.train.observations.shape[1] == 77
+     assert dataset.train.predictor_valid_mask.any()
+     assert dataset.metadata["schema_version"] == 3
+@@ -200,7 +208,11 @@ def test_fixed_reference_bc_export_and_joint_training(
+         100.0
+     )
+ 
+-    raw_observation = dataset.normalizer.inverse_transform(dataset.train.observations[0])
++
++def _assert_raw_training_sample(dataset: BehavioralCloningDataset) -> None:
++    raw_observation = dataset.normalizer.inverse_transform(
++        dataset.train.observations[0]
++    )
+     assert raw_observation[0] == pytest.approx(12.5)
+     assert raw_observation[1] == pytest.approx(0.1 * 9.80665)
+     assert raw_observation[2] == pytest.approx(0.2 * 9.80665)
+@@ -210,48 +222,94 @@ def test_fixed_reference_bc_export_and_joint_training(
+     assert np.linalg.norm(reference_points_xz[-1]) > 0.0
+     assert 0.4 < float(dataset.train.expert_action[0, 0]) < 0.6
+ 
++
++def _reload_dataset(
++    dataset: BehavioralCloningDataset,
++    report: BCDatasetBuildReport,
++) -> BehavioralCloningDataset:
+     loaded = BehavioralCloningDataset.from_npz(report.destination)
+-    np.testing.assert_allclose(loaded.train.observations, dataset.train.observations)
++    np.testing.assert_allclose(
++        loaded.train.observations,
++        dataset.train.observations,
++    )
+     assert loaded.normalizer.feature_names == dataset.normalizer.feature_names
++    return loaded
+ 
+-    caplog.set_level(
+-        logging.INFO,
+-        logger="assetto_corsa_rl.training.behavioral_cloning",
+-    )
+-    result = train_behavioral_cloning(
+-        config,
+-        loaded,
+-        command=["test", "bc-train"],
+-    )
+-    assert result.best_epoch == 1
+-    assert result.checkpoint_path.is_file()
++
++def _assert_metrics_file(
++    result: BCTrainingResult,
++    config: ProjectConfig,
++) -> None:
+     metrics_path = result.run_directory / "metrics.csv"
+     assert metrics_path.is_file()
+-    assert (result.run_directory / "summary.json").is_file()
+     with metrics_path.open(newline="", encoding="utf-8") as handle:
+         rows = list(csv.DictReader(handle))
+     assert len(rows) == 1
+-    assert float(rows[0]["train_action_mse"]) >= 0.0
+-    assert float(rows[0]["train_action_combined_pedal_mse"]) >= 0.0
+-    assert float(rows[0]["train_action_steering_mse"]) >= 0.0
+-    assert float(rows[0]["train_predictor_smooth_l1"]) >= 0.0
+-    assert float(rows[0]["train_joint_loss"]) >= 0.0
+-    assert float(rows[0]["validation_action_mse"]) >= 0.0
+-    assert float(rows[0]["validation_predictor_smooth_l1"]) >= 0.0
+-    assert float(rows[0]["validation_joint_loss"]) >= 0.0
++    nonnegative_fields = (
++        "train_action_mse",
++        "train_action_combined_pedal_mse",
++        "train_action_steering_mse",
++        "train_predictor_smooth_l1",
++        "train_joint_loss",
++        "validation_action_mse",
++        "validation_predictor_smooth_l1",
++        "validation_joint_loss",
++    )
++    assert all(float(rows[0][field]) >= 0.0 for field in nonnegative_fields)
+     assert float(rows[0]["learning_rate"]) == pytest.approx(
+         config.behavioral_cloning.learning_rate
+     )
+-    assert "BC epoch=1/1" in caplog.text
+-    assert "train[action=" in caplog.text
+-    assert "validation[action=" in caplog.text
+-    assert np.isfinite(result.test.action_mse)
+-    assert np.isfinite(result.test.predictor_ade_m)
+-    summary = json.loads((result.run_directory / "summary.json").read_text("utf-8"))
++
++
++def _assert_training_summary(result: BCTrainingResult) -> None:
++    summary_path = result.run_directory / "summary.json"
++    assert summary_path.is_file()
++    summary = json.loads(summary_path.read_text("utf-8"))
+     assert summary["predictor_trained_with_bc"] is True
+     assert summary["predictor_loss_weight"] == pytest.approx(0.01)
+     assert len(summary["epoch_history"]) == 1
+     assert summary["epoch_history"][0]["epoch"] == 1
+     assert summary["epoch_history"][0]["train_joint_loss"] >= 0.0
+     assert summary["epoch_history"][0]["validation_joint_loss"] >= 0.0
++
++
++def _assert_training_log(caplog: pytest.LogCaptureFixture) -> None:
++    assert "BC training epochs=1" in caplog.text
++    assert "BC columns: epoch" in caplog.text
++    assert "BC 01/01" in caplog.text
++    assert "| *" in caplog.text
++    assert "BC best: epoch=1/1" in caplog.text
++    assert "BC test:" in caplog.text
++
++
++def test_fixed_reference_bc_export_and_joint_training(
++    tmp_path: Path,
++    monkeypatch: pytest.MonkeyPatch,
++    fast_lane_factory: FastLaneFactory,
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    _install_fake_motec_reader(monkeypatch)
++    config = _project_config(tmp_path, fast_lane_factory)
++    dataset, report = build_bc_dataset(config)
++    _assert_dataset_build(dataset, report)
++    _assert_raw_training_sample(dataset)
++    loaded = _reload_dataset(dataset, report)
++
++    caplog.set_level(
++        logging.INFO,
++        logger="assetto_corsa_rl.training.behavioral_cloning",
++    )
++    result = train_behavioral_cloning(
++        config,
++        loaded,
++        command=["test", "bc-train"],
++    )
++
++    assert result.best_epoch == 1
++    assert result.checkpoint_path.is_file()
++    assert np.isfinite(result.test.action_mse)
++    assert np.isfinite(result.test.predictor_ade_m)
+     assert result.best_validation_joint_loss >= result.best_validation_action_mse
++    _assert_metrics_file(result, config)
++    _assert_training_summary(result)
++    _assert_training_log(caplog)

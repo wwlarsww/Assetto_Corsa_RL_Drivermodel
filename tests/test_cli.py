@@ -37,8 +37,6 @@ def test_cli_help_explains_the_local_training_boundary(
     assert "(default: mock)" in command_help
     arguments = parser.parse_args(["rl-train", "--backend", "assetto-corsa", "--launch-game"])
     assert arguments.launch_game is True
-    assert arguments.monitor_ui is True
-    assert parser.parse_args(["rl-train", "--no-monitor-ui"]).monitor_ui is False
 
     live_arguments = parser.parse_args(
         [
@@ -166,6 +164,22 @@ def test_live_rl_training_selects_live_environment(
 
     monkeypatch.setattr(cli, "VGamepadControlWriter", create_writer)
     monkeypatch.setattr(cli, "AssettoCorsaSessionLauncher", _Launcher)
+    monitoring_config = SimpleNamespace(run_name="live-test")
+    expected_tracker = object()
+    monkeypatch.setattr(
+        cli,
+        "MonitoringConfig",
+        SimpleNamespace(from_toml=lambda _path: monitoring_config),
+    )
+    monkeypatch.setattr(
+        cli,
+        "create_tracker",
+        lambda selected_config: (
+            expected_tracker
+            if selected_config is monitoring_config
+            else pytest.fail("wrong monitoring config")
+        ),
+    )
     observed_backends: list[str] = []
 
     def train_stub(
@@ -175,19 +189,24 @@ def test_live_rl_training_selects_live_environment(
         command: list[str],
         backend_name: str,
         device: str,
-        monitor_ui: bool,
-        monitor_backend: str,
+        tracker: object,
+        tracking_run_name: str | None,
+        evaluation_environment_factory: object,
+        evaluation_uses_training_environment: bool,
     ) -> SimpleNamespace:
         assert selected_environment is environment
         assert command[0] == "ac-rl-driver"
         assert device == "cpu"
-        assert monitor_ui is True
-        assert monitor_backend == "aim"
+        assert tracker is expected_tracker
+        assert tracking_run_name == "live-test"
+        assert evaluation_environment_factory is None or callable(evaluation_environment_factory)
+        assert isinstance(evaluation_uses_training_environment, bool)
         observed_backends.append(backend_name)
         return SimpleNamespace(
             environment_steps=1,
             iterations=1,
             policy_version=1,
+            evaluations_completed=0,
             run_directory=Path("runs/test"),
         )
 
@@ -210,46 +229,6 @@ def test_live_rl_training_selects_live_environment(
     assert device_events == ["gamepad", "launcher"]
     assert environment.closed
     assert writer.closed
-
-
-def test_standalone_training_monitor_cli_selects_and_opens_run(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    run_directory = tmp_path / "ppo-mock" / "run"
-    opened: list[tuple[Path, float, int | None]] = []
-    monkeypatch.setattr(
-        cli,
-        "resolve_training_run_directory",
-        lambda run, *, runs_root: (
-            run_directory
-            if run is None and runs_root == Path("custom-runs")
-            else pytest.fail("wrong monitor selection")
-        ),
-    )
-    monkeypatch.setattr(
-        cli,
-        "monitor_training_run",
-        lambda run, *, poll_interval_s, parent_pid, start_ui: (
-            opened.append((run, poll_interval_s, parent_pid))
-            if start_ui
-            else pytest.fail("Aim UI should start by default")
-        ),
-    )
-
-    assert (
-        main(
-            [
-                "training-monitor",
-                "--runs-root",
-                "custom-runs",
-                "--poll-interval",
-                "0.5",
-            ]
-        )
-        == 0
-    )
-    assert opened == [(run_directory, 0.5, None)]
 
 
 def test_telemetry_cli_reports_unavailable_game(monkeypatch: pytest.MonkeyPatch) -> None:

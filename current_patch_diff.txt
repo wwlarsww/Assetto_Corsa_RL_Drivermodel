@@ -1,0 +1,212 @@
+diff --git a/configs/assetto_corsa_real_extended_smoke.toml b/configs/assetto_corsa_real_extended_smoke.toml
+index 50a7bfe..917de48 100644
+--- a/configs/assetto_corsa_real_extended_smoke.toml
++++ b/configs/assetto_corsa_real_extended_smoke.toml
+@@ -82,7 +82,7 @@ weight_decay = 0.00001
+ predictor_loss_weight = 0.01
+ validation_fraction = 0.15
+ test_fraction = 0.15
+-minimum_speed_mps = 5.0
++minimum_speed_mps = 0.1
+ 
+ [ppo]
+ method_variant = "ai_spline_absolute_stabilized_v2"
+diff --git a/configs/bmw_z4_gt3_monza_baseline.toml b/configs/bmw_z4_gt3_monza_baseline.toml
+index 96e063a..3b52dc8 100644
+--- a/configs/bmw_z4_gt3_monza_baseline.toml
++++ b/configs/bmw_z4_gt3_monza_baseline.toml
+@@ -53,7 +53,7 @@ weight_decay = 0.00001
+ predictor_loss_weight = 0.01
+ validation_fraction = 0.15
+ test_fraction = 0.15
+-minimum_speed_mps = 5.0
++minimum_speed_mps = 0.1
+ 
+ [ppo]
+ method_variant = "ai_spline_absolute_stabilized_v2"
+diff --git a/configs/bmw_z4_gt3_monza_live_smoke.toml b/configs/bmw_z4_gt3_monza_live_smoke.toml
+index 24acd81..295e34d 100644
+--- a/configs/bmw_z4_gt3_monza_live_smoke.toml
++++ b/configs/bmw_z4_gt3_monza_live_smoke.toml
+@@ -57,7 +57,7 @@ weight_decay = 0.00001
+ predictor_loss_weight = 0.01
+ validation_fraction = 0.15
+ test_fraction = 0.15
+-minimum_speed_mps = 5.0
++minimum_speed_mps = 0.1
+ 
+ [ppo]
+ method_variant = "ai_spline_absolute_stabilized_v2"
+diff --git a/src/assetto_corsa_rl/config.py b/src/assetto_corsa_rl/config.py
+index aee93de..e06c1ce 100644
+--- a/src/assetto_corsa_rl/config.py
++++ b/src/assetto_corsa_rl/config.py
+@@ -29,9 +29,7 @@ def _non_negative(name: str, value: float | int) -> None:
+ 
+ def _positive_integer(name: str, value: object) -> None:
+     if isinstance(value, bool) or not isinstance(value, int):
+-        raise TypeError(
+-            f"{name} must be an integer, got {value!r} ({type(value).__name__})"
+-        )
++        raise TypeError(f"{name} must be an integer, got {value!r} ({type(value).__name__})")
+     if value <= 0:
+         raise ValueError(f"{name} must be positive, got {value!r}")
+ 
+@@ -205,9 +203,7 @@ class TrackAssetsConfig:
+ 
+     def __post_init__(self) -> None:
+         if self.source != "assetto_corsa_fast_lane":
+-            raise ValueError(
+-                "track_assets.source must be 'assetto_corsa_fast_lane'"
+-            )
++            raise ValueError("track_assets.source must be 'assetto_corsa_fast_lane'")
+         if not self.cache_directory.strip():
+             raise ValueError("track_assets.cache_directory must not be empty")
+         if self.reference_speed_source not in {
+@@ -215,8 +211,7 @@ class TrackAssetsConfig:
+             "human_if_available_else_ai",
+         }:
+             raise ValueError(
+-                "track_assets.reference_speed_source must be 'ai' or "
+-                "'human_if_available_else_ai'"
++                "track_assets.reference_speed_source must be 'ai' or 'human_if_available_else_ai'"
+             )
+         _positive(
+             "track_assets.minimum_reference_speed_mps",
+@@ -253,7 +248,7 @@ class BehavioralCloningConfig:
+     predictor_loss_weight: float = 0.0
+     validation_fraction: float = 0.15
+     test_fraction: float = 0.15
+-    minimum_speed_mps: float = 5.0
++    minimum_speed_mps: float = 0.1
+ 
+     def __post_init__(self) -> None:
+         if self.method_variant != BASELINE_METHOD_VARIANT:
+@@ -267,8 +262,11 @@ class BehavioralCloningConfig:
+                 f"behavioral_cloning.{name}",
+                 getattr(self, name),
+             )
+-        for name in ("learning_rate", "minimum_speed_mps"):
+-            _positive(f"behavioral_cloning.{name}", getattr(self, name))
++        _positive("behavioral_cloning.learning_rate", self.learning_rate)
++        _non_negative(
++            "behavioral_cloning.minimum_speed_mps",
++            self.minimum_speed_mps,
++        )
+         _non_negative("behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight)
+         if self.weight_decay < 0:
+             raise ValueError("behavioral_cloning.weight_decay must be non-negative")
+diff --git a/src/assetto_corsa_rl/data/bc_dataset.py b/src/assetto_corsa_rl/data/bc_dataset.py
+index ec31246..f932ce1 100644
+--- a/src/assetto_corsa_rl/data/bc_dataset.py
++++ b/src/assetto_corsa_rl/data/bc_dataset.py
+@@ -17,6 +17,12 @@ from assetto_corsa_rl.ac_integration.launcher import configured_fast_lane_path
+ from assetto_corsa_rl.config import ProjectConfig
+ from assetto_corsa_rl.data.motec import read_motec_channels
+ from assetto_corsa_rl.features.normalizer import StaticZScoreNormalizer
++from assetto_corsa_rl.features.preprocessing import (
++    LOW_SPEED_SLIP_PREPROCESSING_NAME,
++    PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
++    PREVIOUS_ACTION_NORMALIZATION_NAME,
++    stabilise_low_speed_slip,
++)
+ from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
+ from assetto_corsa_rl.features.track_geometry import (
+     TrackGeometry,
+@@ -346,6 +352,7 @@ def build_bc_dataset(
+     normalizer = StaticZScoreNormalizer.fit(
+         raw_splits["train"].observations,
+         feature_names=OBSERVATION_FEATURE_NAMES,
++        identity_feature_names=PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
+     )
+ 
+     def normalise(raw: _RawSessionSamples) -> BCSplit:
+@@ -368,6 +375,9 @@ def build_bc_dataset(
+             "action_method_variant": config.actions.method_variant,
+             "fast_lane_sha256": spline.source_sha256,
+             "calibration": ACTI_MOTEC_CALIBRATION_NAME,
++            "slip_preprocessing": LOW_SPEED_SLIP_PREPROCESSING_NAME,
++            "previous_action_normalization": PREVIOUS_ACTION_NORMALIZATION_NAME,
++            "minimum_speed_mps": config.behavioral_cloning.minimum_speed_mps,
+             "track_id": config.dataset.track_id,
+             "car_id": config.dataset.car_id,
+             "control_frequency_hz": config.environment.control_frequency_hz,
+@@ -486,15 +496,23 @@ def _resample_lap(
+     rear_angle = degree_to_radian_axle_mean * (
+         interpolate("Tire Slip Angle RL") + interpolate("Tire Slip Angle RR")
+     )
++    slip_features = stabilise_low_speed_slip(
++        speed_mps,
++        np.column_stack(
++            (
++                front_ratio,
++                rear_ratio,
++                front_angle,
++                rear_angle,
++            )
++        ),
++    )
+     vehicle_features = np.column_stack(
+         (
+             speed_mps,
+             interpolate("CG Accel Lateral") * STANDARD_GRAVITY_MPS2,
+             interpolate("CG Accel Longitudinal") * STANDARD_GRAVITY_MPS2,
+-            front_ratio,
+-            rear_ratio,
+-            front_angle,
+-            rear_angle,
++            slip_features,
+         )
+     ).astype(np.float32)
+ 
+diff --git a/src/assetto_corsa_rl/features/normalizer.py b/src/assetto_corsa_rl/features/normalizer.py
+index 1b1dbd1..2ed50e3 100644
+--- a/src/assetto_corsa_rl/features/normalizer.py
++++ b/src/assetto_corsa_rl/features/normalizer.py
+@@ -72,18 +72,42 @@ class StaticZScoreNormalizer:
+         demonstrations: npt.ArrayLike,
+         *,
+         feature_names: tuple[str, ...] | None = None,
++        identity_feature_names: tuple[str, ...] = (),
+     ) -> Self:
+-        """Fit once to demonstration observations, never to RL rollouts."""
++        """Fit once to demonstrations with optional identity-scaled features."""
+ 
+         values = np.asarray(demonstrations, dtype=np.float32)
+         if values.ndim != 2 or values.shape[0] < 1:
+             raise ValueError("demonstrations must have shape (samples, features)")
+         if not np.all(np.isfinite(values)):
+             raise ValueError("demonstrations contain non-finite values")
++
++        names = None if feature_names is None else tuple(feature_names)
++        identity_names = tuple(identity_feature_names)
++        if identity_names and names is None:
++            raise ValueError("identity_feature_names require feature_names")
++        if len(set(identity_names)) != len(identity_names):
++            raise ValueError("identity_feature_names must be unique")
++        if names is not None:
++            unknown = set(identity_names) - set(names)
++            if unknown:
++                raise ValueError(
++                    "identity feature names are absent from feature_names: "
++                    + ", ".join(sorted(unknown))
++                )
++
++        mean = values.mean(axis=0, dtype=np.float64).astype(np.float32)
++        standard_deviation = values.std(axis=0, dtype=np.float64).astype(np.float32)
++        if names is not None:
++            for feature_name in identity_names:
++                feature_index = names.index(feature_name)
++                mean[feature_index] = 0.0
++                standard_deviation[feature_index] = 1.0
++
+         return cls(
+-            mean=values.mean(axis=0, dtype=np.float64).astype(np.float32),
+-            standard_deviation=values.std(axis=0, dtype=np.float64).astype(np.float32),
+-            feature_names=feature_names,
++            mean=mean,
++            standard_deviation=standard_deviation,
++            feature_names=names,
+         )
+ 
+     @classmethod

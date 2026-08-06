@@ -15,16 +15,31 @@ import numpy.typing as npt
 from assetto_corsa_rl.ac_integration.ai_spline import AssettoCorsaAISpline
 from assetto_corsa_rl.ac_integration.launcher import configured_fast_lane_path
 from assetto_corsa_rl.config import ProjectConfig
+from assetto_corsa_rl.data.augmentation import (
+    BC_MIRROR_AUGMENTATION_NAME,
+    mirror_bc_samples,
+)
 from assetto_corsa_rl.data.motec import read_motec_channels
 from assetto_corsa_rl.features.normalizer import StaticZScoreNormalizer
+from assetto_corsa_rl.features.preprocessing import (
+    LOW_SPEED_SLIP_PREPROCESSING_NAME,
+    PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
+    PREVIOUS_ACTION_NORMALIZATION_NAME,
+    stabilise_low_speed_slip,
+)
 from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
 from assetto_corsa_rl.features.track_geometry import (
     TrackGeometry,
     periodic_interpolate,
     world_to_ego,
 )
+from assetto_corsa_rl.models.trajectory_contract import (
+    BEZIER_TRAJECTORY_CODEC,
+    PREDICTOR_COORDINATE_SCALE_M,
+)
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
 from assetto_corsa_rl.types import (
+    PREDICTOR_TIME_OFFSETS_S,
     REFERENCE_TIME_OFFSETS_S,
     FloatArray,
 )
@@ -76,8 +91,11 @@ class BCSplit:
             raise ValueError(f"observations must have shape (samples, {OBSERVATION_SIZE})")
         if actions.shape != (sample_count, 2):
             raise ValueError("expert_action must have shape (samples, 2)")
-        if targets.shape != (sample_count, REFERENCE_TIME_OFFSETS_S.size, 2):
-            raise ValueError("predictor_target_xz_m must have shape (samples, 20, 2)")
+        if targets.shape != (sample_count, PREDICTOR_TIME_OFFSETS_S.size, 2):
+            raise ValueError(
+                "predictor_target_xz_m must have shape "
+                f"(samples, {PREDICTOR_TIME_OFFSETS_S.size}, 2)"
+            )
         if valid.shape != (sample_count,):
             raise ValueError("predictor_valid_mask must have shape (samples,)")
         if not all(np.all(np.isfinite(array)) for array in (observations, actions, targets)):
@@ -343,9 +361,25 @@ def build_bc_dataset(
         name: _concatenate_raw([session_samples[session_id] for session_id in ids])
         for name, ids in split_ids.items()
     }
+    unaugmented_train_samples = int(raw_splits["train"].observations.shape[0])
+    if config.behavioral_cloning.mirror_augmentation:
+        mirrored_observations, mirrored_actions, mirrored_targets = mirror_bc_samples(
+            raw_splits["train"].observations,
+            raw_splits["train"].expert_action,
+            raw_splits["train"].predictor_target_xz_m,
+        )
+        mirrored_train = _RawSessionSamples(
+            observations=mirrored_observations,
+            expert_action=mirrored_actions,
+            predictor_target_xz_m=mirrored_targets,
+            predictor_valid_mask=raw_splits["train"].predictor_valid_mask.copy(),
+            complete_laps=0,
+        )
+        raw_splits["train"] = _concatenate_raw([raw_splits["train"], mirrored_train])
     normalizer = StaticZScoreNormalizer.fit(
         raw_splits["train"].observations,
         feature_names=OBSERVATION_FEATURE_NAMES,
+        identity_feature_names=PREVIOUS_ACTION_IDENTITY_FEATURE_NAMES,
     )
 
     def normalise(raw: _RawSessionSamples) -> BCSplit:
@@ -363,16 +397,30 @@ def build_bc_dataset(
         test=normalise(raw_splits["test"]),
         normalizer=normalizer,
         metadata={
-            "schema_version": 2,
+            "schema_version": 4,
             "method_variant": config.behavioral_cloning.method_variant,
             "action_method_variant": config.actions.method_variant,
             "fast_lane_sha256": spline.source_sha256,
             "calibration": ACTI_MOTEC_CALIBRATION_NAME,
+            "slip_preprocessing": LOW_SPEED_SLIP_PREPROCESSING_NAME,
+            "previous_action_normalization": PREVIOUS_ACTION_NORMALIZATION_NAME,
+            "minimum_speed_mps": config.behavioral_cloning.minimum_speed_mps,
+            "training_augmentation": (
+                BC_MIRROR_AUGMENTATION_NAME
+                if config.behavioral_cloning.mirror_augmentation
+                else "none"
+            ),
+            "unaugmented_train_samples": unaugmented_train_samples,
+            "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
+            "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
             "track_id": config.dataset.track_id,
             "car_id": config.dataset.car_id,
             "control_frequency_hz": config.environment.control_frequency_hz,
             "feature_count": OBSERVATION_SIZE,
             "reference_point_count": int(REFERENCE_TIME_OFFSETS_S.size),
+            "predictor_point_count": int(PREDICTOR_TIME_OFFSETS_S.size),
+            "predictor_horizon_s": float(PREDICTOR_TIME_OFFSETS_S[-1]),
+            "predictor_time_offsets_s": PREDICTOR_TIME_OFFSETS_S.tolist(),
             "split_sessions": {name: list(ids) for name, ids in split_ids.items()},
             "session_sample_counts": {
                 session_id: samples.observations.shape[0]
@@ -448,7 +496,7 @@ def _resample_lap(
         return _empty_raw()
     sample_period = 1.0 / config.environment.control_frequency_hz
     query_time = np.arange(0.0, raw_time[-1], sample_period, dtype=np.float64)
-    if query_time.size < math.ceil(float(REFERENCE_TIME_OFFSETS_S[-1]) / sample_period) + 2:
+    if query_time.size < math.ceil(float(PREDICTOR_TIME_OFFSETS_S[-1]) / sample_period) + 2:
         return _empty_raw()
 
     def interpolate(name: str) -> FloatArray:
@@ -486,15 +534,23 @@ def _resample_lap(
     rear_angle = degree_to_radian_axle_mean * (
         interpolate("Tire Slip Angle RL") + interpolate("Tire Slip Angle RR")
     )
+    slip_features = stabilise_low_speed_slip(
+        speed_mps,
+        np.column_stack(
+            (
+                front_ratio,
+                rear_ratio,
+                front_angle,
+                rear_angle,
+            )
+        ),
+    )
     vehicle_features = np.column_stack(
         (
             speed_mps,
             interpolate("CG Accel Lateral") * STANDARD_GRAVITY_MPS2,
             interpolate("CG Accel Longitudinal") * STANDARD_GRAVITY_MPS2,
-            front_ratio,
-            rear_ratio,
-            front_angle,
-            rear_angle,
+            slip_features,
         )
     ).astype(np.float32)
 
@@ -570,7 +626,7 @@ def _future_trajectory_targets(
     sample_time_s: npt.NDArray[np.float64],
     valid_samples: npt.NDArray[np.bool_],
 ) -> tuple[FloatArray, npt.NDArray[np.bool_]]:
-    query = sample_time_s[:, None] + REFERENCE_TIME_OFFSETS_S[None, :]
+    query = sample_time_s[:, None] + PREDICTOR_TIME_OFFSETS_S[None, :]
     future_world = np.stack(
         (
             np.interp(
@@ -592,7 +648,7 @@ def _future_trajectory_targets(
     )
     predictor_valid = np.all(np.isfinite(future_world), axis=(1, 2))
     window_size = (
-        math.ceil(float(REFERENCE_TIME_OFFSETS_S[-1]) / float(np.median(np.diff(sample_time_s))))
+        math.ceil(float(PREDICTOR_TIME_OFFSETS_S[-1]) / float(np.median(np.diff(sample_time_s))))
         + 1
     )
     full_valid_window = np.zeros(sample_time_s.size, dtype=np.bool_)
@@ -650,7 +706,7 @@ def _empty_raw() -> _RawSessionSamples:
         observations=np.empty((0, OBSERVATION_SIZE), dtype=np.float32),
         expert_action=np.empty((0, 2), dtype=np.float32),
         predictor_target_xz_m=np.empty(
-            (0, REFERENCE_TIME_OFFSETS_S.size, 2),
+            (0, PREDICTOR_TIME_OFFSETS_S.size, 2),
             dtype=np.float32,
         ),
         predictor_valid_mask=np.empty(0, dtype=np.bool_),

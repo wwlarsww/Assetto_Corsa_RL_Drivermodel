@@ -67,9 +67,9 @@ For a guarded real-time smoke test, `rl-train` with
 all live prerequisites pass. See [docs/training.md](docs/training.md) before
 enabling control. When training finishes or fails, it gracefully closes only
 the AC process it launched itself; an attached pre-existing session is left running.
-With the optional `monitoring` extra on Python 3.11/3.12, the independent Aim
-dashboard opens automatically. Pass `--no-monitor-ui` to suppress it or run
-`ac-rl-driver training-monitor` to reopen the newest PPO run manually.
+When the optional `[monitoring]` configuration enables MLflow, `rl-train` logs
+parameters, metrics and artefacts to the configured tracking server. The MLflow
+server is started separately from the learner; see [docs/training.md](docs/training.md).
 
 With Assetto Corsa running in an on-track session, validate its direct,
 read-only telemetry transport with:

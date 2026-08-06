@@ -34,6 +34,7 @@ from assetto_corsa_rl.ac_integration.slip_features import (
 )
 from assetto_corsa_rl.control.vgamepad import VGamepadControlWriter
 from assetto_corsa_rl.envs.backend import validate_backend_action
+from assetto_corsa_rl.features.preprocessing import stabilise_low_speed_slip
 from assetto_corsa_rl.features.track_geometry import TrackGeometry
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
 from assetto_corsa_rl.types import (
@@ -572,20 +573,33 @@ class AssettoCorsaLiveBackend:
             position_xy_m,
             vehicle_heading_rad,
         )
-        slip = vanilla_ac_slip_features(slip_packet)
+        speed_mps = physics.speed_kmh / 3.6
+        raw_slip = vanilla_ac_slip_features(slip_packet)
+        slip = stabilise_low_speed_slip(
+            speed_mps,
+            np.asarray(
+                [
+                    raw_slip.front_slip_ratio,
+                    raw_slip.rear_slip_ratio,
+                    raw_slip.front_sideslip_angle_rad,
+                    raw_slip.rear_sideslip_angle_rad,
+                ],
+                dtype=np.float32,
+            ),
+        )
         simulation_time_s = max(
             0.0,
             snapshot.monotonic_time_s - self._episode_origin_monotonic_s,
         )
         return TelemetryFrame(
             vehicle_state=VehicleState(
-                speed_mps=physics.speed_kmh / 3.6,
+                speed_mps=speed_mps,
                 acceleration_x_mps2=physics.acceleration_g[0] * STANDARD_GRAVITY_MPS2,
                 acceleration_z_mps2=physics.acceleration_g[2] * STANDARD_GRAVITY_MPS2,
-                front_slip_ratio=slip.front_slip_ratio,
-                rear_slip_ratio=slip.rear_slip_ratio,
-                front_sideslip_angle_rad=slip.front_sideslip_angle_rad,
-                rear_sideslip_angle_rad=slip.rear_sideslip_angle_rad,
+                front_slip_ratio=float(slip[0]),
+                rear_slip_ratio=float(slip[1]),
+                front_sideslip_angle_rad=float(slip[2]),
+                rear_sideslip_angle_rad=float(slip[3]),
             ),
             track_preview=TrackPreview(left_boundary_xz_m=left, right_boundary_xz_m=right),
             reference_line_preview=ReferenceLinePreview(

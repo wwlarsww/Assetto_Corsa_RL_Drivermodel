@@ -1,0 +1,2 @@
+episode,seed,reward,steps,terminated,truncated,final_progress_m
+0,779913,9.67333984375,111,True,False,5041.583984375

@@ -72,18 +72,42 @@ class StaticZScoreNormalizer:
         demonstrations: npt.ArrayLike,
         *,
         feature_names: tuple[str, ...] | None = None,
+        identity_feature_names: tuple[str, ...] = (),
     ) -> Self:
-        """Fit once to demonstration observations, never to RL rollouts."""
+        """Fit once to demonstrations with optional identity-scaled features."""
 
         values = np.asarray(demonstrations, dtype=np.float32)
         if values.ndim != 2 or values.shape[0] < 1:
             raise ValueError("demonstrations must have shape (samples, features)")
         if not np.all(np.isfinite(values)):
             raise ValueError("demonstrations contain non-finite values")
+
+        names = None if feature_names is None else tuple(feature_names)
+        identity_names = tuple(identity_feature_names)
+        if identity_names and names is None:
+            raise ValueError("identity_feature_names require feature_names")
+        if len(set(identity_names)) != len(identity_names):
+            raise ValueError("identity_feature_names must be unique")
+        if names is not None:
+            unknown = set(identity_names) - set(names)
+            if unknown:
+                raise ValueError(
+                    "identity feature names are absent from feature_names: "
+                    + ", ".join(sorted(unknown))
+                )
+
+        mean = values.mean(axis=0, dtype=np.float64).astype(np.float32)
+        standard_deviation = values.std(axis=0, dtype=np.float64).astype(np.float32)
+        if names is not None:
+            for feature_name in identity_names:
+                feature_index = names.index(feature_name)
+                mean[feature_index] = 0.0
+                standard_deviation[feature_index] = 1.0
+
         return cls(
-            mean=values.mean(axis=0, dtype=np.float64).astype(np.float32),
-            standard_deviation=values.std(axis=0, dtype=np.float64).astype(np.float32),
-            feature_names=feature_names,
+            mean=mean,
+            standard_deviation=standard_deviation,
+            feature_names=names,
         )
 
     @classmethod

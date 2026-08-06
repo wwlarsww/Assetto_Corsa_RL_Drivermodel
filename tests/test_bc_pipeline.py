@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -149,10 +151,139 @@ def test_session_split_keeps_the_dominant_session_in_training() -> None:
     }
 
 
+def _assert_built_bc_dataset(
+    config: ProjectConfig,
+    dataset: BehavioralCloningDataset,
+    report,
+) -> None:
+    assert report.recordings == 3
+    assert report.complete_laps == 3
+    assert report.sessions == 3
+    assert (
+        min(
+            dataset.train.sample_count,
+            dataset.validation.sample_count,
+            dataset.test.sample_count,
+        )
+        > 0
+    )
+    assert dataset.train.observations.shape[1] == 77
+    assert dataset.train.predictor_valid_mask.any()
+    assert dataset.metadata["schema_version"] == 4
+    assert dataset.metadata["method_variant"] == "ai_spline_absolute_v1"
+    assert dataset.metadata["action_method_variant"] == "absolute_bounded_v1"
+    assert dataset.metadata["reference_point_count"] == 20
+    assert dataset.metadata["predictor_point_count"] == 10
+    assert dataset.metadata["predictor_horizon_s"] == pytest.approx(1.0)
+    np.testing.assert_allclose(
+        dataset.metadata["predictor_time_offsets_s"],
+        np.arange(1, 11, dtype=np.float32) * 0.1,
+    )
+    assert dataset.train.predictor_target_xz_m.shape[1:] == (10, 2)
+    assert dataset.metadata["training_augmentation"] == ("ego_left_right_mirror_v1")
+    assert dataset.train.sample_count == (2 * dataset.metadata["unaugmented_train_samples"])
+    assert dataset.metadata["trajectory_codec"] == ("bezier-origin-5x2-10x0p1s-normalized-v1")
+    assert dataset.metadata["predictor_coordinate_scale_m"] == pytest.approx(100.0)
+
+    raw_observation = dataset.normalizer.inverse_transform(dataset.train.observations[0])
+    assert raw_observation[0] == pytest.approx(12.5)
+    assert raw_observation[1] == pytest.approx(0.1 * 9.80665)
+    assert raw_observation[2] == pytest.approx(0.2 * 9.80665)
+    assert raw_observation[3] == pytest.approx(0.12)
+    reference_points_xz = raw_observation[35:75].reshape(20, 2)
+    assert np.all(np.isfinite(reference_points_xz))
+    assert np.linalg.norm(reference_points_xz[-1]) > 0.0
+    assert 0.4 < float(dataset.train.expert_action[0, 0]) < 0.6
+
+
+def _assert_epoch_metrics_csv(
+    metrics_path: Path,
+    config: ProjectConfig,
+) -> None:
+    with metrics_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    row = rows[0]
+    nonnegative_fields = (
+        "train_action_mse",
+        "train_action_combined_pedal_mse",
+        "train_action_steering_mse",
+        "train_predictor_smooth_l1",
+        "train_predictor_ade_m",
+        "train_predictor_rmse_m",
+        "train_predictor_lateral_mae_m",
+        "train_predictor_longitudinal_mae_m",
+        "train_predictor_error_at_0p1s_m",
+        "train_predictor_error_at_0p5s_m",
+        "train_predictor_error_at_1p0s_m",
+        "train_joint_loss",
+        "validation_action_mse",
+        "validation_predictor_smooth_l1",
+        "validation_predictor_ade_m",
+        "validation_predictor_rmse_m",
+        "validation_predictor_lateral_mae_m",
+        "validation_predictor_longitudinal_mae_m",
+        "validation_predictor_error_at_0p1s_m",
+        "validation_predictor_error_at_0p5s_m",
+        "validation_predictor_error_at_1p0s_m",
+        "validation_joint_loss",
+    )
+    assert all(float(row[name]) >= 0.0 for name in nonnegative_fields)
+    assert float(row["learning_rate"]) == pytest.approx(config.behavioral_cloning.learning_rate)
+
+
+def _assert_bc_log_output(caplog: pytest.LogCaptureFixture) -> None:
+    expected_fragments = (
+        "BC training | epochs=1",
+        "BC epoch 01/01 *",
+        "losses     | action MSE T/V",
+        "actions    | pedal MSE T/V",
+        "trajectory | ADE T/V",
+        "components | lateral MAE T/V",
+        "horizons   | 0.1 s T/V",
+        "BC test horizons",
+    )
+    assert all(fragment in caplog.text for fragment in expected_fragments)
+
+
+def _assert_bc_summary(result) -> None:
+    assert np.isfinite(result.test.action_mse)
+    assert np.isfinite(result.test.predictor_ade_m)
+    assert np.isfinite(result.test.predictor_rmse_m)
+    assert np.isfinite(result.test.predictor_lateral_mae_m)
+    assert np.isfinite(result.test.predictor_longitudinal_mae_m)
+    assert result.test.predictor_rmse_m >= result.test.predictor_ade_m
+    assert result.test.predictor_error_at_1p0s_m == pytest.approx(result.test.predictor_fde_m)
+    summary = json.loads((result.run_directory / "summary.json").read_text("utf-8"))
+    assert summary["predictor_trained_with_bc"] is True
+    assert summary["predictor_loss_weight"] == pytest.approx(0.01)
+    assert len(summary["epoch_history"]) == 1
+    assert summary["epoch_history"][0]["epoch"] == 1
+    assert summary["epoch_history"][0]["train_joint_loss"] >= 0.0
+    assert summary["epoch_history"][0]["validation_joint_loss"] >= 0.0
+    assert result.best_validation_joint_loss >= result.best_validation_action_mse
+
+
+def _assert_train_behavioral_cloning_result(
+    result,
+    config: ProjectConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    assert result.best_epoch == 1
+    assert result.checkpoint_path.is_file()
+    metrics_path = result.run_directory / "metrics.csv"
+    assert metrics_path.is_file()
+    assert (result.run_directory / "summary.json").is_file()
+    _assert_epoch_metrics_csv(metrics_path, config)
+    _assert_bc_log_output(caplog)
+    _assert_bc_summary(result)
+
+
 def test_fixed_reference_bc_export_and_joint_training(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     fast_lane_factory: FastLaneFactory,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     channels = _fake_motec_channels()
     header = MotecHeader("driver", "car", "track", "date", "time", len(channels))
@@ -167,50 +298,19 @@ def test_fixed_reference_bc_export_and_joint_training(
     config = _project_config(tmp_path, fast_lane_factory)
     dataset, report = build_bc_dataset(config)
 
-    assert report.recordings == 3
-    assert report.complete_laps == 3
-    assert report.sessions == 3
-    assert (
-        min(
-            dataset.train.sample_count,
-            dataset.validation.sample_count,
-            dataset.test.sample_count,
-        )
-        > 0
-    )
-    assert dataset.train.observations.shape[1] == 77
-    assert dataset.train.predictor_valid_mask.any()
-    assert dataset.metadata["schema_version"] == 2
-    assert dataset.metadata["method_variant"] == "ai_spline_absolute_v1"
-    assert dataset.metadata["action_method_variant"] == "absolute_bounded_v1"
-    assert dataset.metadata["reference_point_count"] == 20
-
-    raw_observation = dataset.normalizer.inverse_transform(dataset.train.observations[0])
-    assert raw_observation[0] == pytest.approx(12.5)
-    assert raw_observation[1] == pytest.approx(0.1 * 9.80665)
-    assert raw_observation[2] == pytest.approx(0.2 * 9.80665)
-    assert raw_observation[3] == pytest.approx(0.12)
-    reference_points_xz = raw_observation[35:75].reshape(20, 2)
-    assert np.all(np.isfinite(reference_points_xz))
-    assert np.linalg.norm(reference_points_xz[-1]) > 0.0
-    assert 0.4 < float(dataset.train.expert_action[0, 0]) < 0.6
+    _assert_built_bc_dataset(config, dataset, report)
 
     loaded = BehavioralCloningDataset.from_npz(report.destination)
     np.testing.assert_allclose(loaded.train.observations, dataset.train.observations)
     assert loaded.normalizer.feature_names == dataset.normalizer.feature_names
 
+    caplog.set_level(
+        logging.INFO,
+        logger="assetto_corsa_rl.training.behavioral_cloning",
+    )
     result = train_behavioral_cloning(
         config,
         loaded,
         command=["test", "bc-train"],
     )
-    assert result.best_epoch == 1
-    assert result.checkpoint_path.is_file()
-    assert (result.run_directory / "metrics.csv").is_file()
-    assert (result.run_directory / "summary.json").is_file()
-    assert np.isfinite(result.test.action_mse)
-    assert np.isfinite(result.test.predictor_ade_m)
-    summary = json.loads((result.run_directory / "summary.json").read_text("utf-8"))
-    assert summary["predictor_trained_with_bc"] is True
-    assert summary["predictor_loss_weight"] == pytest.approx(0.01)
-    assert result.best_validation_joint_loss >= result.best_validation_action_mse
+    _assert_train_behavioral_cloning_result(result, config, caplog)

@@ -25,7 +25,7 @@ def test_load_project_config() -> None:
     config = ProjectConfig.from_toml(Path("configs/mock.toml"))
     assert config.experiment.seed == 769913
     assert config.model.feature_hidden_sizes == (512, 512)
-    assert config.model.trajectory_codec == "bezier-5x2"
+    assert config.model.trajectory_codec == "bezier-origin-5x2-10x0p1s-normalized-v1"
     assert config.model.trajectory_output_size == 10
     assert config.to_dict()["environment"]["control_frequency_hz"] == 20.0
 
@@ -34,6 +34,7 @@ def test_load_project_config() -> None:
     assert fixed.dataset.track_id == "monza"
     assert fixed.reference.mode == "fixed"
     assert fixed.behavioral_cloning.method_variant == "ai_spline_absolute_v1"
+    assert fixed.behavioral_cloning.mirror_augmentation is True
     assert fixed.actions.method_variant == "absolute_bounded_v1"
     assert fixed.environment.termination_method_variant == TERMINATION_METHOD_VARIANT
     assert fixed.rewards.prediction_method_variant == PREDICTION_REWARD_METHOD_VARIANT

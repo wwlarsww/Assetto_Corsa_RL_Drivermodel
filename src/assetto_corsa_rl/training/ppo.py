@@ -24,6 +24,7 @@ from assetto_corsa_rl.ac_integration.track_assets import (
     ensure_track_assets,
 )
 from assetto_corsa_rl.config import (
+    ACTION_METHOD_VARIANT,
     BASELINE_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
     ProjectConfig,
@@ -31,8 +32,15 @@ from assetto_corsa_rl.config import (
 from assetto_corsa_rl.envs.environment import AssettoCorsaEnv
 from assetto_corsa_rl.experiment import ExperimentRecorder
 from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
-from assetto_corsa_rl.models.bezier import decode_bezier_trajectory
+from assetto_corsa_rl.models.bezier import (
+    decode_bezier_trajectory,
+    decode_bezier_trajectory_normalized,
+)
 from assetto_corsa_rl.models.driver_network import DriverNetwork
+from assetto_corsa_rl.models.trajectory_contract import (
+    BEZIER_TRAJECTORY_CODEC,
+    PREDICTOR_COORDINATE_SCALE_M,
+)
 from assetto_corsa_rl.rewards.components import PredictedProgressReward
 from assetto_corsa_rl.training.checkpoints import (
     TrainingState,
@@ -44,7 +52,6 @@ from assetto_corsa_rl.training.evaluation import (
     evaluate_policy,
 )
 from assetto_corsa_rl.training.gae import AdvantageBatch, compute_gae
-from assetto_corsa_rl.training.losses import bezier_trajectory_prediction_loss
 from assetto_corsa_rl.training.rollout import (
     OnPolicyCollector,
     RolloutBatch,
@@ -61,7 +68,7 @@ from assetto_corsa_rl.training.tracking import (
     MetricValue,
     flatten_parameters,
 )
-from assetto_corsa_rl.types import REFERENCE_TIME_OFFSETS_S, FloatArray
+from assetto_corsa_rl.types import PREDICTOR_TIME_OFFSETS_S, FloatArray
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,9 +105,7 @@ def _tracking_metrics(
         "train/progress/episodes_completed": metrics.episodes_completed,
         "train/reward/environment_mean": metrics.environment_reward_mean,
         "train/reward/shaped_mean": metrics.shaped_reward_mean,
-        "train/predictor/predicted_progress_mean_m": (
-            metrics.predicted_progress_mean_m
-        ),
+        "train/predictor/predicted_progress_mean_m": (metrics.predicted_progress_mean_m),
         "train/predictor/valid_samples": metrics.predictor_valid_samples,
         "train/predictor/loss": metrics.predictor_loss,
         "train/ppo/policy_loss": metrics.policy_loss,
@@ -237,9 +242,7 @@ def train_ppo(
     policy_version = 0
     evaluations_completed = 0
     run_status = "FAILED"
-    track_asset_bundle = (
-        ensure_track_assets(config) if backend_name == "assetto-corsa" else None
-    )
+    track_asset_bundle = ensure_track_assets(config) if backend_name == "assetto-corsa" else None
 
     try:
         _start_tracking_run(
@@ -290,11 +293,7 @@ def train_ppo(
                         if evaluation_uses_training_environment
                         else evaluation_environment_factory
                     ),
-                    environment=(
-                        environment
-                        if evaluation_uses_training_environment
-                        else None
-                    ),
+                    environment=(environment if evaluation_uses_training_environment else None),
                     device=target_device,
                     training_run_directory=recorder.run_directory,
                     checkpoint_path=snapshot.checkpoint_path,
@@ -353,14 +352,9 @@ def _validate_training_configuration(
     """Reject configurations that do not match the stabilized PPO contract."""
 
     if config.ppo.method_variant != STABILIZED_PPO_METHOD_VARIANT:
-        raise ValueError(
-            "train_ppo only supports "
-            f"{STABILIZED_PPO_METHOD_VARIANT!r}"
-        )
+        raise ValueError(f"train_ppo only supports {STABILIZED_PPO_METHOD_VARIANT!r}")
     if config.reference.mode != "fixed":
-        raise ValueError(
-            f"{STABILIZED_PPO_METHOD_VARIANT!r} requires reference.mode='fixed'"
-        )
+        raise ValueError(f"{STABILIZED_PPO_METHOD_VARIANT!r} requires reference.mode='fixed'")
     if (
         config.evaluation.enabled
         and evaluation_environment_factory is None
@@ -370,13 +364,9 @@ def _validate_training_configuration(
             "evaluation.enabled requires either a separate evaluation "
             "environment factory or sequential reuse of the training environment"
         )
-    if (
-        evaluation_environment_factory is not None
-        and evaluation_uses_training_environment
-    ):
+    if evaluation_environment_factory is not None and evaluation_uses_training_environment:
         raise ValueError(
-            "evaluation cannot use both a separate environment factory and "
-            "the training environment"
+            "evaluation cannot use both a separate environment factory and the training environment"
         )
 
 
@@ -385,8 +375,7 @@ def _whole_step_count(name: str, value: object) -> int:
 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(
-            f"{name} must be an integer step count, "
-            f"got {value!r} ({type(value).__name__})"
+            f"{name} must be an integer step count, got {value!r} ({type(value).__name__})"
         )
     if not float(value).is_integer():
         raise ValueError(f"{name} must contain a whole number, got {value!r}")
@@ -424,9 +413,7 @@ def _initialise_training_model(
     if initial_checkpoint:
         source = Path(initial_checkpoint)
         if not source.is_file():
-            raise FileNotFoundError(
-                f"initial PPO checkpoint does not exist: {source}"
-            )
+            raise FileNotFoundError(f"initial PPO checkpoint does not exist: {source}")
         _, checkpoint_configuration = load_checkpoint(
             source,
             model=model,
@@ -526,9 +513,7 @@ def _run_training_update(
     )
     remaining_steps = total_environment_steps - completed_environment_steps
     if remaining_steps <= 0:
-        raise RuntimeError(
-            "a PPO update was requested although no environment steps remain"
-        )
+        raise RuntimeError("a PPO update was requested although no environment steps remain")
     rollout_step_count = min(configured_rollout_steps, remaining_steps)
     batch, next_cursor = _collect_rollout(
         environment,
@@ -564,9 +549,7 @@ def _run_training_update(
         environment_reward_mean=float(batch.rewards.mean()),
         predicted_progress_mean_m=float(processed.predicted_progress_m.mean()),
         shaped_reward_mean=float(processed.rewards.mean()),
-        predictor_valid_samples=int(
-            np.count_nonzero(processed.predictor_targets.valid_mask)
-        ),
+        predictor_valid_samples=int(np.count_nonzero(processed.predictor_targets.valid_mask)),
         **asdict(optimisation),
     )
     return metrics, next_cursor
@@ -611,6 +594,7 @@ def _save_training_checkpoint(
         ),
         configuration={
             "method_variant": config.ppo.method_variant,
+            "action_method_variant": config.actions.method_variant,
             "project": config.to_dict(),
             "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
             "initial_checkpoint": initial_checkpoint or None,
@@ -621,11 +605,7 @@ def _save_training_checkpoint(
     if not _should_save_versioned_checkpoint(config, metrics):
         return None
 
-    snapshot_directory = (
-        checkpoint_path.parent
-        / "checkpoints"
-        / f"update_{metrics.iteration:06d}"
-    )
+    snapshot_directory = checkpoint_path.parent / "checkpoints" / f"update_{metrics.iteration:06d}"
     snapshot_directory.mkdir(parents=True, exist_ok=True)
     snapshot_path = snapshot_directory / "checkpoint.pt"
     shutil.copy2(checkpoint_path, snapshot_path)
@@ -636,11 +616,10 @@ def _save_training_checkpoint(
             {
                 "backend": backend_name,
                 "environment_steps": metrics.environment_steps,
-                "final_update": (
-                    metrics.environment_steps >= config.ppo.total_environment_steps
-                ),
+                "final_update": (metrics.environment_steps >= config.ppo.total_environment_steps),
                 "iteration": metrics.iteration,
                 "method_variant": config.ppo.method_variant,
+                "action_method_variant": config.actions.method_variant,
                 "policy_version": metrics.policy_version,
             },
             indent=2,
@@ -669,9 +648,7 @@ def _should_save_versioned_checkpoint(
 ) -> bool:
     """Return whether this update requires an immutable checkpoint snapshot."""
 
-    is_interval = (
-        metrics.iteration % config.ppo.checkpoint_interval_updates == 0
-    )
+    is_interval = metrics.iteration % config.ppo.checkpoint_interval_updates == 0
     is_evaluation = _should_run_evaluation(config, metrics)
     is_final = metrics.environment_steps >= config.ppo.total_environment_steps
     return is_interval or is_evaluation or is_final
@@ -738,13 +715,9 @@ def _write_training_summary(
             "environment_steps": result.environment_steps,
             "policy_version": result.policy_version,
             "episodes_completed": result.episodes_completed,
-            "predicted_progress_reward_enabled": (
-                config.ppo.use_predicted_progress_reward
-            ),
+            "predicted_progress_reward_enabled": (config.ppo.use_predicted_progress_reward),
             "checkpoint": result.checkpoint_path.name,
-            "checkpoint_interval_updates": (
-                config.ppo.checkpoint_interval_updates
-            ),
+            "checkpoint_interval_updates": (config.ppo.checkpoint_interval_updates),
             "versioned_checkpoints_directory": "checkpoints",
             "evaluations_completed": result.evaluations_completed,
             "evaluations_directory": "evaluations",
@@ -896,7 +869,7 @@ def _postprocess_rollout(
         with torch.no_grad():
             prediction = decode_bezier_trajectory(
                 model(torch.as_tensor(batch.observations, device=device)).trajectory_parameters,
-                sample_count=REFERENCE_TIME_OFFSETS_S.size,
+                sample_count=PREDICTOR_TIME_OFFSETS_S.size,
             )
         reward_mask = np.ones(batch.step_count, dtype=np.bool_)
         reference_paths = build_reference_projection_paths(
@@ -905,6 +878,7 @@ def _postprocess_rollout(
             positions_xy_m=context.positions_xy_m,
             heading_rad=context.vehicle_heading_rad,
             valid_mask=reward_mask,
+            time_offsets_s=PREDICTOR_TIME_OFFSETS_S,
         )
         prediction_terms = PredictedProgressReward().compute(
             np.asarray(prediction.cpu(), dtype=np.float32),
@@ -1045,10 +1019,13 @@ def _masked_predictor_loss(
     """Evaluate auxiliary trajectory loss only where a full future exists."""
 
     if bool(valid_mask.any()):
-        return bezier_trajectory_prediction_loss(
-            flat_prediction,
-            target_xz_m,
-            valid_mask,
+        prediction_normalized = decode_bezier_trajectory_normalized(
+            flat_prediction[valid_mask],
+            sample_count=target_xz_m.shape[1],
+        )
+        return torch.nn.functional.smooth_l1_loss(
+            prediction_normalized,
+            target_xz_m[valid_mask] / PREDICTOR_COORDINATE_SCALE_M,
         )
     return flat_prediction.sum() * 0.0
 
@@ -1059,9 +1036,29 @@ def _validate_initial_checkpoint(configuration: dict[str, Any]) -> None:
     method = configuration.get("method_variant")
     if method != BASELINE_METHOD_VARIANT:
         raise ValueError(
-            "initial checkpoint was not produced by "
-            f"{BASELINE_METHOD_VARIANT!r}"
+            "initial checkpoint is not compatible: "
+            f"expected method variant {BASELINE_METHOD_VARIANT!r}, got {method!r}"
+        )
+    action_method = configuration.get("action_method_variant")
+    if action_method != ACTION_METHOD_VARIANT:
+        raise ValueError(
+            "initial checkpoint is not compatible: "
+            f"expected action method {ACTION_METHOD_VARIANT!r}, "
+            f"got {action_method!r}"
         )
     feature_names = configuration.get("observation_feature_names")
     if feature_names != list(OBSERVATION_FEATURE_NAMES):
         raise ValueError("initial checkpoint observation feature schema does not match")
+    project = configuration.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("initial checkpoint has no project configuration")
+    model_configuration = project.get("model")
+    if not isinstance(model_configuration, dict):
+        raise ValueError("initial checkpoint has no model configuration")
+    trajectory_codec = model_configuration.get("trajectory_codec")
+    if trajectory_codec != BEZIER_TRAJECTORY_CODEC:
+        raise ValueError(
+            "initial checkpoint trajectory codec does not match: "
+            f"expected {BEZIER_TRAJECTORY_CODEC!r}, "
+            f"got {trajectory_codec!r}"
+        )

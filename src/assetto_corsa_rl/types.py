@@ -16,6 +16,7 @@ TRACK_PREVIEW_DISTANCES_M = np.asarray(
     dtype=np.float32,
 )
 REFERENCE_TIME_OFFSETS_S = np.arange(0.25, 5.01, 0.25, dtype=np.float32)
+PREDICTOR_TIME_OFFSETS_S = np.arange(1, 11, dtype=np.float32) * np.float32(0.1)
 
 
 def _as_float_array(value: npt.ArrayLike, expected_shape: tuple[int, ...], name: str) -> FloatArray:

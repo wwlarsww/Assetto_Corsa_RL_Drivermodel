@@ -49,7 +49,7 @@ policy_hidden_sizes = [128, 128]
 value_hidden_sizes = [512, 512]
 predictor_hidden_sizes = [128, 128]
 trajectory_output_size = 10
-trajectory_codec = "bezier-5x2"
+trajectory_codec = "bezier-origin-5x2-normalized-v1"
 initial_log_std = -0.5
 
 [dataset]

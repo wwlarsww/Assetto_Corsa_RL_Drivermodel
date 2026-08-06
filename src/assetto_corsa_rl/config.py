@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Self, TypeVar
 
+from assetto_corsa_rl.models.trajectory_contract import BEZIER_TRAJECTORY_CODEC
+
 ConfigSection = TypeVar("ConfigSection")
 BASELINE_METHOD_VARIANT = "ai_spline_absolute_v1"
 STABILIZED_PPO_METHOD_VARIANT = "ai_spline_absolute_stabilized_v2"
@@ -29,9 +31,7 @@ def _non_negative(name: str, value: float | int) -> None:
 
 def _positive_integer(name: str, value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(
-            f"{name} must be an integer, got {value!r} ({type(value).__name__})"
-        )
+        raise TypeError(f"{name} must be an integer, got {value!r} ({type(value).__name__})")
     if value <= 0:
         raise ValueError(f"{name} must be positive, got {value!r}")
 
@@ -141,7 +141,7 @@ class ModelConfig:
     value_hidden_sizes: tuple[int, ...] = (512, 512)
     predictor_hidden_sizes: tuple[int, ...] = (128, 128)
     trajectory_output_size: int = 10
-    trajectory_codec: str = "bezier-5x2"
+    trajectory_codec: str = BEZIER_TRAJECTORY_CODEC
     initial_log_std: float = -0.5
 
     def __post_init__(self) -> None:
@@ -155,10 +155,12 @@ class ModelConfig:
             if not sizes or any(size <= 0 for size in sizes):
                 raise ValueError(f"model.{name} must contain positive layer sizes")
         _positive("model.trajectory_output_size", self.trajectory_output_size)
-        if self.trajectory_codec != "bezier-5x2":
-            raise ValueError("model.trajectory_codec must be 'bezier-5x2'")
+        if self.trajectory_codec != BEZIER_TRAJECTORY_CODEC:
+            raise ValueError(f"model.trajectory_codec must be {BEZIER_TRAJECTORY_CODEC!r}")
         if self.trajectory_output_size != 10:
-            raise ValueError("the bezier-5x2 codec requires trajectory_output_size = 10")
+            raise ValueError(
+                f"the {BEZIER_TRAJECTORY_CODEC} codec requires trajectory_output_size = 10"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,9 +207,7 @@ class TrackAssetsConfig:
 
     def __post_init__(self) -> None:
         if self.source != "assetto_corsa_fast_lane":
-            raise ValueError(
-                "track_assets.source must be 'assetto_corsa_fast_lane'"
-            )
+            raise ValueError("track_assets.source must be 'assetto_corsa_fast_lane'")
         if not self.cache_directory.strip():
             raise ValueError("track_assets.cache_directory must not be empty")
         if self.reference_speed_source not in {
@@ -215,8 +215,7 @@ class TrackAssetsConfig:
             "human_if_available_else_ai",
         }:
             raise ValueError(
-                "track_assets.reference_speed_source must be 'ai' or "
-                "'human_if_available_else_ai'"
+                "track_assets.reference_speed_source must be 'ai' or 'human_if_available_else_ai'"
             )
         _positive(
             "track_assets.minimum_reference_speed_mps",
@@ -253,7 +252,8 @@ class BehavioralCloningConfig:
     predictor_loss_weight: float = 0.0
     validation_fraction: float = 0.15
     test_fraction: float = 0.15
-    minimum_speed_mps: float = 5.0
+    minimum_speed_mps: float = 0.1
+    mirror_augmentation: bool = True
 
     def __post_init__(self) -> None:
         if self.method_variant != BASELINE_METHOD_VARIANT:
@@ -267,8 +267,11 @@ class BehavioralCloningConfig:
                 f"behavioral_cloning.{name}",
                 getattr(self, name),
             )
-        for name in ("learning_rate", "minimum_speed_mps"):
-            _positive(f"behavioral_cloning.{name}", getattr(self, name))
+        _positive("behavioral_cloning.learning_rate", self.learning_rate)
+        _non_negative(
+            "behavioral_cloning.minimum_speed_mps",
+            self.minimum_speed_mps,
+        )
         _non_negative("behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight)
         if self.weight_decay < 0:
             raise ValueError("behavioral_cloning.weight_decay must be non-negative")
@@ -312,49 +315,61 @@ class PPOConfig:
     maximum_initial_predictor_fde_m: float = 40.0
 
     def __post_init__(self) -> None:
-        if self.method_variant != STABILIZED_PPO_METHOD_VARIANT:
-            raise ValueError(f"ppo.method_variant must be {STABILIZED_PPO_METHOD_VARIANT!r}")
-        for name in (
-            "total_environment_steps",
-            "rollout_steps",
-            "checkpoint_interval_updates",
-            "update_epochs",
-            "minibatch_size",
-        ):
-            _positive_integer(f"ppo.{name}", getattr(self, name))
-        for name in (
-            "learning_rate",
-            "value_loss_coefficient",
-            "max_gradient_norm",
-            "maximum_initial_predictor_ade_m",
-            "maximum_initial_predictor_fde_m",
-        ):
-            _positive(f"ppo.{name}", getattr(self, name))
-        if self.minibatch_size > self.rollout_steps:
-            raise ValueError("ppo.minibatch_size may not exceed rollout_steps")
-        for name in ("gamma", "gae_lambda"):
-            value = getattr(self, name)
-            if not 0 < value <= 1:
-                raise ValueError(f"ppo.{name} must lie in (0, 1]")
-        if not 0 < self.clip_range < 1:
-            raise ValueError("ppo.clip_range must lie in (0, 1)")
-        _non_negative("ppo.entropy_coefficient", self.entropy_coefficient)
-        _non_negative("ppo.predictor_loss_coefficient", self.predictor_loss_coefficient)
-        if not math.isfinite(self.initial_log_std_after_bc):
-            raise ValueError("ppo.initial_log_std_after_bc must be finite")
-        if self.kl_control_method_variant != KL_CONTROL_METHOD_VARIANT:
-            raise ValueError(f"ppo.kl_control_method_variant must be {KL_CONTROL_METHOD_VARIANT!r}")
-        _positive("ppo.kl_target", self.kl_target)
-        _positive("ppo.kl_tolerance", self.kl_tolerance)
-        if self.kl_tolerance >= self.kl_target:
-            raise ValueError("ppo.kl_tolerance must be lower than kl_target")
-        if not 0.0 < self.kl_learning_rate_decrease_factor < 1.0:
-            raise ValueError("ppo.kl_learning_rate_decrease_factor must lie in (0, 1)")
-        if self.kl_learning_rate_increase_factor <= 1.0:
-            raise ValueError("ppo.kl_learning_rate_increase_factor must exceed one")
-        _positive("ppo.minimum_learning_rate", self.minimum_learning_rate)
-        if self.minimum_learning_rate > self.learning_rate:
-            raise ValueError("ppo.minimum_learning_rate may not exceed learning_rate")
+        _validate_ppo_identity_and_sizes(self)
+        _validate_ppo_objective_ranges(self)
+        _validate_ppo_kl_control(self)
+
+
+def _validate_ppo_identity_and_sizes(config: PPOConfig) -> None:
+    if config.method_variant != STABILIZED_PPO_METHOD_VARIANT:
+        raise ValueError(f"ppo.method_variant must be {STABILIZED_PPO_METHOD_VARIANT!r}")
+    for name in (
+        "total_environment_steps",
+        "rollout_steps",
+        "checkpoint_interval_updates",
+        "update_epochs",
+        "minibatch_size",
+    ):
+        _positive_integer(f"ppo.{name}", getattr(config, name))
+    for name in (
+        "learning_rate",
+        "value_loss_coefficient",
+        "max_gradient_norm",
+        "maximum_initial_predictor_ade_m",
+        "maximum_initial_predictor_fde_m",
+    ):
+        _positive(f"ppo.{name}", getattr(config, name))
+    if config.minibatch_size > config.rollout_steps:
+        raise ValueError("ppo.minibatch_size may not exceed rollout_steps")
+
+
+def _validate_ppo_objective_ranges(config: PPOConfig) -> None:
+    for name in ("gamma", "gae_lambda"):
+        value = getattr(config, name)
+        if not 0 < value <= 1:
+            raise ValueError(f"ppo.{name} must lie in (0, 1]")
+    if not 0 < config.clip_range < 1:
+        raise ValueError("ppo.clip_range must lie in (0, 1)")
+    _non_negative("ppo.entropy_coefficient", config.entropy_coefficient)
+    _non_negative("ppo.predictor_loss_coefficient", config.predictor_loss_coefficient)
+    if not math.isfinite(config.initial_log_std_after_bc):
+        raise ValueError("ppo.initial_log_std_after_bc must be finite")
+
+
+def _validate_ppo_kl_control(config: PPOConfig) -> None:
+    if config.kl_control_method_variant != KL_CONTROL_METHOD_VARIANT:
+        raise ValueError(f"ppo.kl_control_method_variant must be {KL_CONTROL_METHOD_VARIANT!r}")
+    _positive("ppo.kl_target", config.kl_target)
+    _positive("ppo.kl_tolerance", config.kl_tolerance)
+    if config.kl_tolerance >= config.kl_target:
+        raise ValueError("ppo.kl_tolerance must be lower than kl_target")
+    if not 0.0 < config.kl_learning_rate_decrease_factor < 1.0:
+        raise ValueError("ppo.kl_learning_rate_decrease_factor must lie in (0, 1)")
+    if config.kl_learning_rate_increase_factor <= 1.0:
+        raise ValueError("ppo.kl_learning_rate_increase_factor must exceed one")
+    _positive("ppo.minimum_learning_rate", config.minimum_learning_rate)
+    if config.minimum_learning_rate > config.learning_rate:
+        raise ValueError("ppo.minimum_learning_rate may not exceed learning_rate")
 
 
 @dataclass(frozen=True, slots=True)

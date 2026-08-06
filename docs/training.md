@@ -57,8 +57,8 @@ the adaptive learning rate and completed episode count. The append-only
 `metrics.csv` additionally records pedal quantiles and throttle/brake/coast
 fractions, direct gas-to-brake switches, speed range, progress without the
 termination penalty, predictor share, per-iteration termination deltas, tyres
-outside and the KL target band. Aim streams the same schema without becoming
-the source of record.
+outside and the KL target band. MLflow receives the configured training metrics
+without replacing the local CSV files as the source of record.
 
 Metrics and the full configuration are stored below `runs/ppo-<backend>/`.
 Time-limit truncations bootstrap from their final observation but stop the GAE
@@ -152,57 +152,43 @@ only as the explicitly named legacy variant `python_ext_reset_car_v1`.
   --device cpu
 ```
 
-When the `monitoring` extra is installed, PPO starts an independent CSV follower
-and `aim up` web server automatically. The server uses the run directory as its
-repository and remains available at `http://127.0.0.1:43800` after training
-finishes. Monitoring never blocks or controls the learner. Disable it explicitly
-with `--no-monitor-ui`:
+## MLflow experiment tracking
 
-```powershell
-.\.venv\Scripts\python.exe -m assetto_corsa_rl rl-train `
-   --config configs\bmw_z4_gt3_monza_baseline.toml `
-   --backend assetto-corsa `
-   --device cpu `
-   --no-monitor-ui
-```
-
-## Aim (Aimstack) integration
-
-Aim 3.29.1 is the supported monitoring backend and no separate plotting package
-is a project dependency. Upstream Aim wheels currently support CPython through 3.12, so use
-Python 3.11 or 3.12 for an environment that needs the automatic web UI:
+MLflow is the only supported optional monitoring backend. Tracking is decoupled
+from the learner: `rl-train` writes metrics through the configured tracker, but it
+does not start or manage a web server. Install the optional dependency and start
+the local server in a separate terminal:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install `
   -c requirements\tested.txt `
   -e ".[dev,monitoring]"
+
+.\.venv\Scripts\python.exe -m mlflow server `
+  --host 127.0.0.1 `
+  --port 5000 `
+  --backend-store-uri sqlite:///mlflow.db `
+  --default-artifact-root .\mlartifacts
 ```
 
-`rl-train` then creates the Aim run and starts the UI automatically. Reopen or
-follow the newest run manually with:
+Enable tracking in the experiment TOML:
 
-```powershell
-.\.venv\Scripts\ac-rl-driver.exe training-monitor
+```toml
+[monitoring]
+enabled = true
+backend = "mlflow"
+tracking_uri = "http://127.0.0.1:5000"
+experiment_name = "Assetto Corsa PPO"
+run_name = "bmw-z4-gt3-monza"
+log_interval_updates = 1
+fail_on_error = false
 ```
 
-Select a particular run with `--run`, or import an already completed CSV once:
-
-```powershell
-.\.venv\Scripts\ac-rl-driver.exe aim-migrate `
-  --run runs\smoke\ppo-assetto-corsa\<run-id>
-```
-
-Python 3.13/3.14 remains supported for the simulator-independent code and test
-suite, but Aim itself is unavailable there until upstream publishes compatible
-wheels. Use `--no-monitor-ui` in such an environment. A supported Python 3.12
-environment can still inspect the recorded CSV later.
-
-Or select any running or completed run explicitly:
-
-```powershell
-.\.venv\Scripts\ac-rl-driver.exe training-monitor `
-  --run runs\smoke\ppo-assetto-corsa\<run-id>
-```
+Open `http://127.0.0.1:5000` in a browser to inspect runs. With
+`enabled = false` or `backend = "none"`, the no-operation tracker is used and
+MLflow is not imported. `fail_on_error = false` keeps training alive when the
+tracking service is unavailable; use `true` when a missing tracking record should
+abort the run.
 
 Without `--launch-game`, the command connects to an already running matching
 session. To prepare `race.ini`, launch `acs.exe`, and wait for the configured

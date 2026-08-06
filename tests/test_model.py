@@ -5,6 +5,7 @@ import torch
 
 from assetto_corsa_rl.features.schema import OBSERVATION_SIZE
 from assetto_corsa_rl.models.bezier import (
+    decode_bezier_curve_with_origin,
     decode_bezier_trajectory,
     decode_control_points,
     sample_bezier,
@@ -36,14 +37,20 @@ def test_thesis_network_shapes_and_distribution() -> None:
     assert torch.isfinite(network.action_distribution(observation).log_prob(sampled)).all()
 
 
-def test_bezier_decoder_preserves_endpoints() -> None:
-    flat = torch.tensor([[0.0, 0.0, 1.0, 2.0, 3.0, 4.0]])
+def test_bezier_decoder_preserves_origin_and_endpoint() -> None:
+    flat = torch.tensor([[0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]])
     control_points = decode_control_points(flat)
-    curve = sample_bezier(control_points, sample_count=5)
+    generic_curve = sample_bezier(control_points, sample_count=5)
+    trajectory = decode_bezier_trajectory(flat)
+    curve_with_origin = decode_bezier_curve_with_origin(flat)
 
-    torch.testing.assert_close(curve[:, 0], control_points[:, 0])
-    torch.testing.assert_close(curve[:, -1], control_points[:, -1])
-    assert decode_bezier_trajectory(flat, sample_count=5).shape == (1, 5, 2)
+    torch.testing.assert_close(generic_curve[:, 0], control_points[:, 0])
+    torch.testing.assert_close(generic_curve[:, -1], control_points[:, -1])
+    torch.testing.assert_close(curve_with_origin[:, 0], torch.zeros((1, 2)))
+    torch.testing.assert_close(trajectory, curve_with_origin[:, 1:])
+    assert control_points.shape == (1, 5, 2)
+    assert trajectory.shape == (1, 10, 2)
+    assert curve_with_origin.shape == (1, 11, 2)
 
 
 def test_supervised_losses_and_shape_validation() -> None:
@@ -55,7 +62,7 @@ def test_supervised_losses_and_shape_validation() -> None:
         behavioural_cloning_loss(predicted, torch.ones(1))
 
     flat_path = torch.zeros((2, 10), requires_grad=True)
-    target_path = torch.zeros((2, 20, 2))
+    target_path = torch.zeros((2, 10, 2))
     valid = torch.tensor([True, False])
     assert bezier_trajectory_prediction_loss(flat_path, target_path, valid).item() == 0.0
     with pytest.raises(ValueError, match="boolean"):

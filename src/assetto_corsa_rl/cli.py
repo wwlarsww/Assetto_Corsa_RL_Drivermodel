@@ -29,10 +29,6 @@ from assetto_corsa_rl.ac_integration.launcher import (
     AssettoCorsaSessionLauncher,
     configured_fast_lane_path,
 )
-from assetto_corsa_rl.ac_integration.track_assets import (
-    TrackAssetBuildError,
-    ensure_track_assets,
-)
 from assetto_corsa_rl.ac_integration.live_validation import (
     LiveValidationIssue,
     validate_live_environment,
@@ -54,6 +50,10 @@ from assetto_corsa_rl.ac_integration.slip_diagnostics import (
     capture_slip_telemetry,
     summarise_slip_capture,
     write_slip_diagnostic_artifacts,
+)
+from assetto_corsa_rl.ac_integration.track_assets import (
+    TrackAssetBuildError,
+    ensure_track_assets,
 )
 from assetto_corsa_rl.config import ProjectConfig
 from assetto_corsa_rl.control.vgamepad import (
@@ -1093,12 +1093,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                         device=arguments.device,
                         tracker=tracker,
                         tracking_run_name=monitoring_config.run_name,
-                        evaluation_environment_factory=(
-                            evaluation_environment_factory
-                        ),
-                        evaluation_uses_training_environment=(
-                            evaluation_uses_training_environment
-                        ),
+                        evaluation_environment_factory=(evaluation_environment_factory),
+                        evaluation_uses_training_environment=(evaluation_uses_training_environment),
                     )
                 finally:
                     try:
@@ -1114,8 +1110,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
             if launch_control_writer is not None:
                 launch_control_writer.close()
         LOGGER.info(
-            "PPO complete: steps=%s iterations=%s policy_version=%s "
-            "evaluations=%s artefacts=%s",
+            "PPO complete: steps=%s iterations=%s policy_version=%s evaluations=%s artefacts=%s",
             ppo_result.environment_steps,
             ppo_result.iterations,
             ppo_result.policy_version,

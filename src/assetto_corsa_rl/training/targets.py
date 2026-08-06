@@ -8,7 +8,10 @@ import numpy as np
 import numpy.typing as npt
 
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
-from assetto_corsa_rl.types import REFERENCE_TIME_OFFSETS_S, FloatArray
+from assetto_corsa_rl.types import (
+    PREDICTOR_TIME_OFFSETS_S,
+    FloatArray,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +84,7 @@ def build_observed_trajectory_targets(
     heading_rad: npt.ArrayLike,
     simulation_time_s: npt.ArrayLike,
     trajectory_id: npt.ArrayLike,
-    time_offsets_s: npt.ArrayLike = REFERENCE_TIME_OFFSETS_S,
+    time_offsets_s: npt.ArrayLike = PREDICTOR_TIME_OFFSETS_S,
 ) -> FutureTrajectoryTargets:
     """Interpolate actually observed future positions without crossing episodes."""
 
@@ -157,7 +160,7 @@ def build_reference_trajectory_targets(
     positions_xy_m: npt.ArrayLike,
     heading_rad: npt.ArrayLike,
     valid_mask: npt.ArrayLike,
-    time_offsets_s: npt.ArrayLike = REFERENCE_TIME_OFFSETS_S,
+    time_offsets_s: npt.ArrayLike = PREDICTOR_TIME_OFFSETS_S,
 ) -> FutureTrajectoryTargets:
     """Build reference paths in exactly the same ego frames as observed targets."""
 
@@ -183,7 +186,7 @@ def build_reference_projection_paths(
     positions_xy_m: npt.ArrayLike,
     heading_rad: npt.ArrayLike,
     valid_mask: npt.ArrayLike,
-    time_offsets_s: npt.ArrayLike = REFERENCE_TIME_OFFSETS_S,
+    time_offsets_s: npt.ArrayLike = PREDICTOR_TIME_OFFSETS_S,
 ) -> ReferenceProjectionPaths:
     """Build current-plus-future reference polylines for progress projection."""
 

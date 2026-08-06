@@ -22,6 +22,8 @@ venv/
 .vscode/*
 !.vscode/settings.json
 .openai/
+*_context/
+*_context.zip
 
 # Runtime artefacts
 runs/

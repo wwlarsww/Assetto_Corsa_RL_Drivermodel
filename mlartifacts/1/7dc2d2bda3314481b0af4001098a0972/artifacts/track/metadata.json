@@ -1,0 +1,13 @@
+{
+  "asset_schema": 5,
+  "geometry_path": "data\\generated\\assetto_corsa_tracks\\monza\\default\\track_geometry.npz",
+  "geometry_sha256": "7b4d3a3fbbb5d46db6060346edcf2596720b0424e23283d82b4b722d1849ff57",
+  "reference_path": "data\\generated\\assetto_corsa_tracks\\monza\\default\\reference.npz",
+  "reference_sha256": "c609f51a5192466e980ed332f70384d1ae7ad78654641b8bf0d5fbaf720c9541",
+  "reference_speed_source": "human_if_available_else_ai",
+  "source": "assetto_corsa_fast_lane",
+  "source_fast_lane_path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\assettocorsa\\content\\tracks\\monza\\ai\\fast_lane.ai",
+  "source_fast_lane_sha256": "56704d910b4ab39540bd431f7007ff90bee8583651ee8629c6bdfe33aae2e55d",
+  "track_id": "monza",
+  "track_layout": "default"
+}

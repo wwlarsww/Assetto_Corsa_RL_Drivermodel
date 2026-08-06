@@ -1,0 +1,30 @@
+{
+  "active_reference_path": "data\\generated\\assetto_corsa_tracks\\monza\\default\\reference.npz",
+  "backend": "assetto-corsa",
+  "checkpoint_local_path": "runs\\ppo-assetto-corsa\\20260805T221544Z-seed-769913\\checkpoints\\update_000004\\checkpoint.pt",
+  "checkpoint_update": 4,
+  "coordinate_frame": "assetto_corsa_gym_world_xy_v1",
+  "coordinate_transform": "world_xy=[ac_z,ac_x]",
+  "deterministic": true,
+  "environment_steps": 1024,
+  "episodes": 1,
+  "evaluation_artifact_schema": 4,
+  "metrics": {
+    "eval/checkpoint/update": 4,
+    "eval/episode_length/mean": 111.0,
+    "eval/progress/final_mean_m": 5041.583984375,
+    "eval/reward/mean": 9.67333984375,
+    "eval/reward/std": 0.0,
+    "eval/terminated/count": 1,
+    "eval/truncated/count": 0
+  },
+  "observations_are_normalized": true,
+  "predictor_local_frame": "local_xz=[left,forward]",
+  "progress_diagnostics": "environment progress and independent reference/track projections",
+  "record_trajectories": true,
+  "reference_sha256": "c609f51a5192466e980ed332f70384d1ae7ad78654641b8bf0d5fbaf720c9541",
+  "seed_offset": 10000,
+  "source_fast_lane_sha256": "56704d910b4ab39540bd431f7007ff90bee8583651ee8629c6bdfe33aae2e55d",
+  "track_geometry_sha256": "7b4d3a3fbbb5d46db6060346edcf2596720b0424e23283d82b4b722d1849ff57",
+  "viewer_vehicle_frame": "vehicle_fl=[forward,left]"
+}

@@ -33,7 +33,7 @@ policy_hidden_sizes = [128, 128]
 value_hidden_sizes = [512, 512]
 predictor_hidden_sizes = [128, 128]
 trajectory_output_size = 10
-trajectory_codec = "bezier-5x2"
+trajectory_codec = "bezier-origin-5x2-10x0p1s-normalized-v1"
 initial_log_std = -0.5
 
 [dataset]
@@ -53,7 +53,8 @@ weight_decay = 0.00001
 predictor_loss_weight = 0.01
 validation_fraction = 0.15
 test_fraction = 0.15
-minimum_speed_mps = 5.0
+minimum_speed_mps = 0.1
+mirror_augmentation = true
 
 [ppo]
 method_variant = "ai_spline_absolute_stabilized_v2"
