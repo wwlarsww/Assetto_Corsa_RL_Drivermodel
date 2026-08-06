@@ -1,0 +1,6 @@
+sequence,source_time_s,received_monotonic_s,slip_ratio_front_left,slip_ratio_front_right,slip_ratio_rear_left,slip_ratio_rear_right,slip_angle_raw_front_left,slip_angle_raw_front_right,slip_angle_raw_rear_left,slip_angle_raw_rear_right,speed_kmh,gas,brake,steer_angle,local_velocity_mps_0,local_velocity_mps_1,local_velocity_mps_2,acceleration_g_0,acceleration_g_1,acceleration_g_2,wheel_slip_shared_raw_front_left,wheel_slip_shared_raw_front_right,wheel_slip_shared_raw_rear_left,wheel_slip_shared_raw_rear_right
+0,1000.0,0.0,0.1,0.2,-0.1,-0.2,0.01,0.02,-0.01,-0.02,72.0,0.6,0.1,0.2,1.0,0.0,20.0,0.4,0.0,0.2,1.0,2.0,3.0,4.0
+1,1000.02,0.02,0.1,0.2,-0.1,-0.2,0.01,0.02,-0.01,-0.02,72.0,0.6,0.1,0.2,1.0,0.0,20.0,0.4,0.0,0.2,1.0,2.0,3.0,4.0
+2,1000.04,0.04,0.1,0.2,-0.1,-0.2,0.01,0.02,-0.01,-0.02,72.0,0.6,0.1,0.2,1.0,0.0,20.0,0.4,0.0,0.2,1.0,2.0,3.0,4.0
+3,1000.06,0.06,0.1,0.2,-0.1,-0.2,0.01,0.02,-0.01,-0.02,72.0,0.6,0.1,0.2,1.0,0.0,20.0,0.4,0.0,0.2,1.0,2.0,3.0,4.0
+4,1000.08,0.08,0.1,0.2,-0.1,-0.2,0.01,0.02,-0.01,-0.02,72.0,0.6,0.1,0.2,1.0,0.0,20.0,0.4,0.0,0.2,1.0,2.0,3.0,4.0

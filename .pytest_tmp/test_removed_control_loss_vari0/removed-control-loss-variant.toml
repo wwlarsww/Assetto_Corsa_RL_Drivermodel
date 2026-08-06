@@ -1,0 +1,2 @@
+[environment]
+control_loss_termination = "legacy_variant"

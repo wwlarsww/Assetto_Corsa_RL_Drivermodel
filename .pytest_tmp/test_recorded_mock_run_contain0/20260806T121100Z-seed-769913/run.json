@@ -1,0 +1,155 @@
+{
+  "command": [
+    "test",
+    "mock-run"
+  ],
+  "configuration": {
+    "actions": {
+      "method_variant": "absolute_bounded_v1"
+    },
+    "assetto_corsa": {
+      "automatic_shifting": true,
+      "control_backend": "vgamepad",
+      "controls_configuration_path": "",
+      "crash_termination": "csp_collision_latched_v1",
+      "frame_timeout_s": 2.0,
+      "installation_directory": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\assettocorsa",
+      "launch_poll_interval_s": 0.25,
+      "launch_timeout_s": 120.0,
+      "poll_interval_s": 0.001,
+      "reset_backend": "csp_hotlap_spawn_v1",
+      "reset_collision_quiescence_s": 0.5,
+      "reset_position_tolerance": 0.05,
+      "reset_speed_threshold_mps": 5.0,
+      "reset_stable_frames": 3,
+      "reset_timeout_s": 10.0,
+      "steering_output_sign": -1.0,
+      "telemetry_calibration": "assetto_corsa_gym_world_v1"
+    },
+    "behavioral_cloning": {
+      "batch_size": 512,
+      "dataset_artifact_path": "data/processed/bmw_z4_gt3_monza/bc_dataset.npz",
+      "epochs": 3,
+      "learning_rate": 0.0003,
+      "method_variant": "ai_spline_absolute_v1",
+      "minimum_speed_mps": 0.1,
+      "mirror_augmentation": true,
+      "predictor_loss_weight": 0.0,
+      "test_fraction": 0.15,
+      "validation_fraction": 0.15,
+      "weight_decay": 1e-05
+    },
+    "dataset": {
+      "car_id": "bmw_z4_gt3",
+      "root_directory": "data/external/assetto_corsa_gym",
+      "steering_lock_degrees": 320.0,
+      "steering_lock_normalized": 0.7119140625,
+      "track_id": "monza",
+      "track_layout": ""
+    },
+    "environment": {
+      "control_frequency_hz": 20.0,
+      "critical_body_sideslip_angle_deg": 20.0,
+      "initial_combined_pedal": 1.0,
+      "initial_speed_mps": 20.0,
+      "minimum_body_sideslip_termination_speed_mps": 5.0,
+      "minimum_speed_mps": 1.3888888889,
+      "mock_track_half_width_m": 5.0,
+      "mock_track_length_m": 1000.0,
+      "stall_debounce_steps": 5,
+      "stall_startup_grace_steps": 25,
+      "termination_method_variant": "any_tyre_armed_stall_v1"
+    },
+    "evaluation": {
+      "deterministic": true,
+      "enabled": true,
+      "episodes": 3,
+      "evaluate_final_update": true,
+      "interval_updates": 5,
+      "record_trajectories": true,
+      "seed_offset": 10000
+    },
+    "experiment": {
+      "max_episode_steps": 1200,
+      "output_directory": "C:\\Users\\larsk\\OneDrive\\Projekte\\Assetto_Corsa_RL_Drivermodel\\.pytest_tmp\\test_recorded_mock_run_contain0",
+      "seed": 769913,
+      "truncate_on_max_episode_steps": true
+    },
+    "model": {
+      "feature_hidden_sizes": [
+        512,
+        512
+      ],
+      "initial_log_std": -0.5,
+      "policy_hidden_sizes": [
+        128,
+        128
+      ],
+      "predictor_hidden_sizes": [
+        128,
+        128
+      ],
+      "trajectory_codec": "bezier-origin-5x2-10x0p1s-normalized-v1",
+      "trajectory_output_size": 10,
+      "value_hidden_sizes": [
+        512,
+        512
+      ]
+    },
+    "ppo": {
+      "checkpoint_interval_updates": 1,
+      "clip_range": 0.2,
+      "entropy_coefficient": 0.0,
+      "gae_lambda": 0.95,
+      "gamma": 0.99,
+      "initial_checkpoint_metrics_path": "",
+      "initial_checkpoint_path": "",
+      "initial_log_std_after_bc": -1.5,
+      "kl_control_method_variant": "target_band_learning_rate_v1",
+      "kl_learning_rate_decrease_factor": 0.5,
+      "kl_learning_rate_increase_factor": 1.1,
+      "kl_target": 0.01,
+      "kl_tolerance": 0.003,
+      "learning_rate": 0.0003,
+      "max_gradient_norm": 0.5,
+      "maximum_initial_predictor_ade_m": 25.0,
+      "maximum_initial_predictor_fde_m": 40.0,
+      "method_variant": "ai_spline_absolute_stabilized_v2",
+      "minibatch_size": 64,
+      "minimum_learning_rate": 3e-05,
+      "predictor_loss_coefficient": 0.01,
+      "rollout_steps": 256,
+      "total_environment_steps": 512,
+      "update_epochs": 2,
+      "use_predicted_progress_reward": true,
+      "value_loss_coefficient": 0.5
+    },
+    "reference": {
+      "artifact_path": "data\\generated\\assetto_corsa_tracks\\monza\\default\\reference.npz",
+      "mode": "fixed"
+    },
+    "rewards": {
+      "prediction_horizon_discount": 0.5,
+      "prediction_method_variant": "discounted_progress_increments_v1",
+      "prediction_progress_scale": 0.01,
+      "progress_scale": 1.0,
+      "termination_penalty": -100.0
+    },
+    "track_assets": {
+      "auto_build": true,
+      "cache_directory": "data/generated/assetto_corsa_tracks",
+      "human_reference_artifact_path": "",
+      "minimum_reference_speed_mps": 5.0,
+      "reference_speed_source": "human_if_available_else_ai",
+      "source": "assetto_corsa_fast_lane"
+    }
+  },
+  "created_at": "2026-08-06T12:11:00.960824+00:00",
+  "project_version": "0.1.0",
+  "runtime": {
+    "machine": "AMD64",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.2 (tags/v3.12.2:6abddd9, Feb  6 2024, 21:26:36) [MSC v.1937 64 bit (AMD64)]"
+  },
+  "schema_version": 1
+}

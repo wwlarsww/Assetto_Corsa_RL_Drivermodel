@@ -1,0 +1,40 @@
+{
+  "axle_aggregation": "arithmetic_left_right_mean",
+  "duplicate_packets": 0,
+  "elapsed_s": 0.1,
+  "estimated_missed_packets": 0,
+  "first_sequence": 0,
+  "issues": [],
+  "last_sequence": 4,
+  "observed_frequency_hz": 50.0,
+  "requested_duration_s": 0.1,
+  "shared_memory_pairs": 5,
+  "slip_angle_raw_max": [
+    0.01,
+    0.02,
+    -0.01,
+    -0.02
+  ],
+  "slip_angle_raw_min": [
+    0.01,
+    0.02,
+    -0.01,
+    -0.02
+  ],
+  "slip_angle_raw_unit": "degree",
+  "slip_angle_scale_rad_per_raw": 0.017453292519943295,
+  "slip_calibration_name": "vanilla_ac_python_v1",
+  "slip_ratio_max": [
+    0.1,
+    0.2,
+    -0.1,
+    -0.2
+  ],
+  "slip_ratio_min": [
+    0.1,
+    0.2,
+    -0.1,
+    -0.2
+  ],
+  "unique_packets": 5
+}

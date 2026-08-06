@@ -1,0 +1,4 @@
+index,latency_s,progress_m,lateral_offset_m,heading_error_rad,speed_mps,position_x_m,position_y_m,vehicle_heading_rad
+1,9.700015652924776e-06,100.0,0.0,0.0,0.0,1.0,2.0,0.5
+2,4.600035026669502e-06,100.0,0.0,0.0,0.0,1.0,2.0,0.5
+3,2.100015990436077e-06,100.0,0.0,0.0,0.0,1.0,2.0,0.5
