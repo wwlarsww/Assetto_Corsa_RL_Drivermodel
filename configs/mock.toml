@@ -7,13 +7,13 @@ output_directory = "runs"
 [monitoring]
 enabled = true
 backend = "mlflow"
-tracking_uri = "http://127.0.0.1:5000"
+tracking_uri = "sqlite:///mlflow.db"
 experiment_name = "Assetto Corsa PPO"
 run_name = ""
 log_interval_updates = 1
 
-# Beim ersten Test Fehler nicht verschlucken.
-fail_on_error = true
+# Monitoring errors must never stop the learner.
+fail_on_error = false
 
 [environment]
 control_frequency_hz = 20.0
@@ -37,6 +37,9 @@ termination_penalty = -100.0
 prediction_method_variant = "discounted_progress_increments_v1"
 prediction_progress_scale = 0.01
 prediction_horizon_discount = 0.5
+reference_tracking_penalty_scale = 0.10
+reference_tracking_free_distance_m = 2.5
+reference_tracking_distance_scale_m = 2.0
 
 [model]
 feature_hidden_sizes = [512, 512]
@@ -44,7 +47,7 @@ policy_hidden_sizes = [128, 128]
 value_hidden_sizes = [512, 512]
 predictor_hidden_sizes = [128, 128]
 trajectory_output_size = 10
-trajectory_codec = "bezier-origin-5x2-10x0p1s-normalized-v1"
+trajectory_codec = "bezier-origin-5x2-bounded-monotonic-10x0p1s-v2"
 initial_log_std = -0.5
 
 [ppo]
@@ -59,9 +62,9 @@ gamma = 0.99
 gae_lambda = 0.95
 clip_range = 0.2
 value_loss_coefficient = 0.5
-entropy_coefficient = 0.0
+entropy_coefficient = 0.01
 predictor_loss_coefficient = 0.01
-initial_log_std_after_bc = -1.5
+initial_log_std_after_bc = -1.0
 kl_control_method_variant = "target_band_learning_rate_v1"
 kl_target = 0.01
 kl_tolerance = 0.003

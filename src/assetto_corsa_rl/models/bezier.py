@@ -11,6 +11,9 @@ from assetto_corsa_rl.models.trajectory_contract import (
     PREDICTOR_CONTROL_POINT_COUNT,
     PREDICTOR_COORDINATE_DIMENSION,
     PREDICTOR_COORDINATE_SCALE_M,
+    PREDICTOR_FORWARD_INCREMENT_MAX_M,
+    PREDICTOR_LATERAL_LIMIT_M,
+    PREDICTOR_MAX_LATERAL_TO_FORWARD_RATIO,
     PREDICTOR_WAYPOINT_COUNT,
 )
 
@@ -20,20 +23,40 @@ def decode_control_points(
     *,
     coordinate_dimension: int = PREDICTOR_COORDINATE_DIMENSION,
 ) -> Tensor:
-    """Decode five free, dimensionless ego-frame control points."""
+    """Decode bounded control points with monotonic forward progress.
+
+    The ten network outputs remain five pairs. Each pair is interpreted as a
+    lateral logit and a positive forward-increment logit. Forward positions are
+    the cumulative increments, so every control point is at least as far ahead
+    as the previous one. Lateral positions are bounded both globally and by a
+    maximum lateral-to-forward ratio near the vehicle origin.
+    """
 
     if coordinate_dimension <= 0:
         raise ValueError("coordinate_dimension must be positive")
     if flat_prediction.shape[-1] % coordinate_dimension:
         raise ValueError("prediction width must be divisible by coordinate_dimension")
-    control_points = flat_prediction.reshape(
+    raw_parameters = flat_prediction.reshape(
         *flat_prediction.shape[:-1],
         flat_prediction.shape[-1] // coordinate_dimension,
         coordinate_dimension,
     )
-    if control_points.shape[-2] != PREDICTOR_CONTROL_POINT_COUNT:
-        raise ValueError("trajectory head must decode to exactly five free control points")
-    return control_points
+    if raw_parameters.shape[-2] != PREDICTOR_CONTROL_POINT_COUNT:
+        raise ValueError("trajectory head must decode to exactly five control-parameter pairs")
+
+    lateral_limit = PREDICTOR_LATERAL_LIMIT_M / PREDICTOR_COORDINATE_SCALE_M
+    forward_increment_limit = PREDICTOR_FORWARD_INCREMENT_MAX_M / PREDICTOR_COORDINATE_SCALE_M
+    raw_lateral = raw_parameters[..., 0]
+    raw_forward_increment = raw_parameters[..., 1]
+
+    forward_increment = torch.sigmoid(raw_forward_increment) * forward_increment_limit
+    forward = torch.cumsum(forward_increment, dim=-1)
+    local_lateral_limit = torch.minimum(
+        torch.full_like(forward, lateral_limit),
+        forward * PREDICTOR_MAX_LATERAL_TO_FORWARD_RATIO,
+    )
+    lateral = torch.tanh(raw_lateral) * local_lateral_limit
+    return torch.stack((lateral, forward), dim=-1)
 
 
 def anchor_control_points(free_control_points: Tensor) -> Tensor:

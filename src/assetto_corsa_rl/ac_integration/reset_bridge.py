@@ -25,6 +25,11 @@ HOTLAP_RESET_ACK_FILE_NAME = "assetto_corsa_rl_hotlap_reset_ack.txt"
 HOTLAP_RESET_COMMAND_MAGIC = "ACRL_HOTLAP_RESET_COMMAND_V1"
 HOTLAP_RESET_ACK_MAGIC = "ACRL_HOTLAP_RESET_ACK_V1"
 HOTLAP_RESET_METHOD_VARIANT = "csp_hotlap_spawn_v1"
+HOTLAP_REFERENCE_SPEED_RESET_COMMAND_MAGIC = "ACRL_HOTLAP_RESET_COMMAND_V2"
+HOTLAP_REFERENCE_SPEED_RESET_METHOD_VARIANT = "csp_hotlap_reference_speed_v1"
+HOTLAP_REFERENCE_POSE_SPEED_RESET_COMMAND_MAGIC = "ACRL_HOTLAP_RESET_COMMAND_V3"
+HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT = "csp_reference_pose_speed_v2"
+MAXIMUM_HOTLAP_START_SPEED_MPS = 100.0
 
 _COMMAND_PACKET = struct.Struct("<4sBIB")
 _ACK_PACKET = struct.Struct("<4sBIBd")
@@ -188,9 +193,20 @@ class AssettoCorsaResetBridge:
 
         return cls(default_reset_command_path(), default_reset_ack_path())
 
-    def request_reset(self, *, timeout_s: float) -> ResetAcknowledgement:
+    def request_reset(
+        self,
+        *,
+        timeout_s: float,
+        start_speed_mps: float | None = None,
+        start_position_xy_m: tuple[float, float] | None = None,
+        start_heading_rad: float | None = None,
+    ) -> ResetAcknowledgement:
         """Atomically publish a reset and wait for its matching acknowledgement."""
 
+        if any(
+            value is not None for value in (start_speed_mps, start_position_xy_m, start_heading_rad)
+        ):
+            raise ValueError("python_ext_reset_car_v1 does not accept start pose or speed")
         if self._closed:
             raise ResetBridgeError("reset bridge is closed")
         if timeout_s <= 0:
@@ -256,6 +272,60 @@ def encode_hotlap_reset_command(*, sequence: int, track_id: str) -> bytes:
     return f"{HOTLAP_RESET_COMMAND_MAGIC}\n{sequence}\n{track_id}\n".encode("ascii")
 
 
+def encode_hotlap_reference_speed_reset_command(
+    *,
+    sequence: int,
+    track_id: str,
+    start_speed_mps: float,
+) -> bytes:
+    """Encode a HOTLAP_START request with an explicit forward speed."""
+
+    if not 0 <= sequence <= 0xFFFFFFFF:
+        raise ValueError("sequence must fit an unsigned 32-bit integer")
+    if not track_id or any(character in track_id for character in "\r\n"):
+        raise ValueError("track_id must be a non-empty single line")
+    if (
+        not math.isfinite(start_speed_mps)
+        or start_speed_mps < 0.0
+        or start_speed_mps > MAXIMUM_HOTLAP_START_SPEED_MPS
+    ):
+        raise ValueError(
+            f"start_speed_mps must be finite and lie in [0, {MAXIMUM_HOTLAP_START_SPEED_MPS}]"
+        )
+    return (
+        f"{HOTLAP_REFERENCE_SPEED_RESET_COMMAND_MAGIC}\n"
+        f"{sequence}\n{track_id}\n{start_speed_mps:.9g}\n"
+    ).encode("ascii")
+
+
+def encode_hotlap_reference_pose_speed_reset_command(
+    *,
+    sequence: int,
+    track_id: str,
+    start_speed_mps: float,
+    start_position_xy_m: tuple[float, float],
+    start_heading_rad: float,
+) -> bytes:
+    """Encode a CSP reset to an explicit canonical reference pose and speed."""
+
+    position = tuple(float(value) for value in start_position_xy_m)
+    if len(position) != 2 or not all(math.isfinite(value) for value in position):
+        raise ValueError("start_position_xy_m must contain two finite values")
+    if not math.isfinite(start_heading_rad):
+        raise ValueError("start_heading_rad must be finite")
+    speed_command = encode_hotlap_reference_speed_reset_command(
+        sequence=sequence,
+        track_id=track_id,
+        start_speed_mps=start_speed_mps,
+    ).decode("ascii")
+    lines = speed_command.splitlines()
+    return (
+        f"{HOTLAP_REFERENCE_POSE_SPEED_RESET_COMMAND_MAGIC}\n"
+        f"{lines[1]}\n{lines[2]}\n{lines[3]}\n"
+        f"{position[0]:.9g}\n{position[1]:.9g}\n{start_heading_rad:.9g}\n"
+    ).encode("ascii")
+
+
 def decode_hotlap_reset_acknowledgement(
     payload: str,
     *,
@@ -289,6 +359,8 @@ def decode_hotlap_reset_acknowledgement(
 
 class AssettoCorsaHotlapResetBridge:
     """Request a deterministic CSP teleport to the configured hotlap spawn."""
+
+    method_variant = HOTLAP_RESET_METHOD_VARIANT
 
     def __init__(
         self,
@@ -324,8 +396,35 @@ class AssettoCorsaHotlapResetBridge:
             expected_track_id=expected_track_id,
         )
 
-    def request_reset(self, *, timeout_s: float) -> ResetAcknowledgement:
+    def request_reset(
+        self,
+        *,
+        timeout_s: float,
+        start_speed_mps: float | None = None,
+        start_position_xy_m: tuple[float, float] | None = None,
+        start_heading_rad: float | None = None,
+    ) -> ResetAcknowledgement:
         """Publish one request and wait for the matching CSP acknowledgement."""
+
+        if any(
+            value is not None for value in (start_speed_mps, start_position_xy_m, start_heading_rad)
+        ):
+            raise ValueError("csp_hotlap_spawn_v1 does not accept start pose or speed")
+        return self._request_reset(
+            timeout_s=timeout_s,
+            encode_command=lambda sequence: encode_hotlap_reset_command(
+                sequence=sequence,
+                track_id=self.expected_track_id,
+            ),
+        )
+
+    def _request_reset(
+        self,
+        *,
+        timeout_s: float,
+        encode_command: Callable[[int], bytes],
+    ) -> ResetAcknowledgement:
+        """Publish one encoded command and await the matching acknowledgement."""
 
         if self._closed:
             raise ResetBridgeError("hotlap reset bridge is closed")
@@ -339,12 +438,7 @@ class AssettoCorsaHotlapResetBridge:
         )
         self.command_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.command_path.with_suffix(self.command_path.suffix + ".tmp")
-        temporary.write_bytes(
-            encode_hotlap_reset_command(
-                sequence=sequence,
-                track_id=self.expected_track_id,
-            )
-        )
+        temporary.write_bytes(encode_command(sequence))
         for attempt in range(COMMAND_REPLACE_RETRY_COUNT):
             try:
                 temporary.replace(self.command_path)
@@ -359,7 +453,13 @@ class AssettoCorsaHotlapResetBridge:
             acknowledgement = self._read_acknowledgement()
             if acknowledgement is not None and acknowledgement.sequence == sequence:
                 if acknowledgement.status is ResetBridgeStatus.SUCCESS:
-                    return acknowledgement
+                    return ResetAcknowledgement(
+                        sequence=acknowledgement.sequence,
+                        status=acknowledgement.status,
+                        source_time_s=acknowledgement.source_time_s,
+                        simulator_frame=acknowledgement.simulator_frame,
+                        method_variant=self.method_variant,
+                    )
                 if acknowledgement.status is ResetBridgeStatus.CSP_UNAVAILABLE:
                     raise ResetBridgeUnavailableError(
                         "CSP physics access is unavailable for HOTLAP_START reset"
@@ -388,3 +488,72 @@ class AssettoCorsaHotlapResetBridge:
         """Mark the stateless file adapter closed."""
 
         self._closed = True
+
+
+class AssettoCorsaHotlapReferenceSpeedResetBridge(AssettoCorsaHotlapResetBridge):
+    """Request CSP hotlap resets with a validated forward start speed."""
+
+    method_variant = HOTLAP_REFERENCE_SPEED_RESET_METHOD_VARIANT
+
+    def request_reset(
+        self,
+        *,
+        timeout_s: float,
+        start_speed_mps: float | None = None,
+        start_position_xy_m: tuple[float, float] | None = None,
+        start_heading_rad: float | None = None,
+    ) -> ResetAcknowledgement:
+        """Publish a reset carrying the requested forward start speed."""
+
+        if start_speed_mps is None:
+            raise ValueError("csp_hotlap_reference_speed_v1 requires start_speed_mps")
+        if start_position_xy_m is not None or start_heading_rad is not None:
+            raise ValueError("csp_hotlap_reference_speed_v1 does not accept a start pose")
+        return self._request_reset(
+            timeout_s=timeout_s,
+            encode_command=lambda sequence: encode_hotlap_reference_speed_reset_command(
+                sequence=sequence,
+                track_id=self.expected_track_id,
+                start_speed_mps=start_speed_mps,
+            ),
+        )
+
+
+class AssettoCorsaReferencePoseSpeedResetBridge(AssettoCorsaHotlapResetBridge):
+    """Request a reference-aligned CSP pose after probing HOTLAP_START."""
+
+    method_variant = HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT
+
+    def request_reset(
+        self,
+        *,
+        timeout_s: float,
+        start_speed_mps: float | None = None,
+        start_position_xy_m: tuple[float, float] | None = None,
+        start_heading_rad: float | None = None,
+    ) -> ResetAcknowledgement:
+        """Publish a reset with a human speed and optional reference pose."""
+
+        if start_speed_mps is None:
+            raise ValueError("csp_reference_pose_speed_v2 requires start_speed_mps")
+        if start_position_xy_m is None and start_heading_rad is None:
+            return self._request_reset(
+                timeout_s=timeout_s,
+                encode_command=lambda sequence: encode_hotlap_reference_speed_reset_command(
+                    sequence=sequence,
+                    track_id=self.expected_track_id,
+                    start_speed_mps=start_speed_mps,
+                ),
+            )
+        if start_position_xy_m is None or start_heading_rad is None:
+            raise ValueError("reference start position and heading must be provided together")
+        return self._request_reset(
+            timeout_s=timeout_s,
+            encode_command=lambda sequence: encode_hotlap_reference_pose_speed_reset_command(
+                sequence=sequence,
+                track_id=self.expected_track_id,
+                start_speed_mps=start_speed_mps,
+                start_position_xy_m=start_position_xy_m,
+                start_heading_rad=start_heading_rad,
+            ),
+        )

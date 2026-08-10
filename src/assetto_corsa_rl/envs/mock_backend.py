@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
 
+from assetto_corsa_rl.config import (
+    TERMINATION_METHOD_VARIANT,
+    UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+)
 from assetto_corsa_rl.envs.backend import validate_backend_action
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
+from assetto_corsa_rl.references.projection import wrapped_progress_delta
 from assetto_corsa_rl.types import (
     TRACK_PREVIEW_DISTANCES_M,
     BackendTransition,
@@ -37,6 +43,9 @@ class MockAssettoCorsaBackend:
     minimum_speed_mps: float = 2.0
     stall_startup_grace_steps: int = 25
     stall_debounce_steps: int = 5
+    termination_method_variant: str = TERMINATION_METHOD_VARIANT
+    progress_stall_window_s: float = 1.0
+    progress_stall_minimum_progress_m: float = 2.0
     critical_body_sideslip_angle_deg: float = 20.0
     minimum_body_sideslip_termination_speed_mps: float = 5.0
     _reference: ReferenceTrajectory | None = field(init=False, default=None, repr=False)
@@ -54,6 +63,17 @@ class MockAssettoCorsaBackend:
     _last_steering: float = field(init=False, default=0.0, repr=False)
     _stall_detection_armed: bool = field(init=False, default=False, repr=False)
     _consecutive_low_speed_steps: int = field(init=False, default=0, repr=False)
+    _progress_stall_window_steps: int = field(init=False, default=0, repr=False)
+    _progress_stall_progress_m: deque[float] = field(
+        init=False,
+        default_factory=lambda: deque[float](),
+        repr=False,
+    )
+    _progress_stall_window_progress_m: float | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         positive_values = (
@@ -64,6 +84,8 @@ class MockAssettoCorsaBackend:
             self.minimum_speed_mps,
             self.critical_body_sideslip_angle_deg,
             self.minimum_body_sideslip_termination_speed_mps,
+            self.progress_stall_window_s,
+            self.progress_stall_minimum_progress_m,
         )
         if any(value <= 0 for value in positive_values):
             raise ValueError("mock backend physical settings must be positive")
@@ -75,6 +97,18 @@ class MockAssettoCorsaBackend:
             raise ValueError("stall startup grace steps must be positive")
         if self.critical_body_sideslip_angle_deg > 90.0:
             raise ValueError("critical body sideslip angle must not exceed 90 degrees")
+        if self.termination_method_variant not in {
+            TERMINATION_METHOD_VARIANT,
+            UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                f"unsupported termination method variant: {self.termination_method_variant!r}"
+            )
+        self._progress_stall_window_steps = max(
+            1,
+            math.ceil(self.progress_stall_window_s * self.control_frequency_hz),
+        )
+        self._progress_stall_progress_m = deque(maxlen=self._progress_stall_window_steps + 1)
 
     def _update_stall_detection(self) -> None:
         """Arm after driving off and debounce subsequent low-speed frames."""
@@ -110,6 +144,9 @@ class MockAssettoCorsaBackend:
         self._step_count = 0
         self._stall_detection_armed = False
         self._consecutive_low_speed_steps = 0
+        self._progress_stall_progress_m.clear()
+        self._progress_stall_progress_m.append(self._progress_m)
+        self._progress_stall_window_progress_m = None
         self._last_longitudinal_acceleration = 0.0
         self._last_lateral_acceleration = 0.0
         self._last_front_slip = 0.0
@@ -159,6 +196,7 @@ class MockAssettoCorsaBackend:
         self._last_steering = steering
 
         self._update_stall_detection()
+        self._update_progress_stall_detection()
 
         termination_reason = self._termination_reason()
         telemetry = self._telemetry()
@@ -174,6 +212,11 @@ class MockAssettoCorsaBackend:
                 "number_of_tyres_out": int(abs(self._lateral_offset_m) > self.track_half_width_m),
                 "stall_detection_armed": self._stall_detection_armed,
                 "consecutive_low_speed_steps": self._consecutive_low_speed_steps,
+                "termination_method_variant": self.termination_method_variant,
+                "progress_stall_window_steps": self._progress_stall_window_steps,
+                "progress_stall_minimum_progress_m": self.progress_stall_minimum_progress_m,
+                "progress_stall_window_progress_m": self._progress_stall_window_progress_m,
+                "progress_stall_triggered": self._progress_stall_termination_due(),
             },
         )
 
@@ -189,17 +232,43 @@ class MockAssettoCorsaBackend:
         if abs(self._lateral_offset_m) > self.track_half_width_m:
             return TerminationReason.OFF_TRACK
         if (
-            self._stall_detection_armed
-            and self._consecutive_low_speed_steps >= self.stall_debounce_steps
+            (
+                self._stall_detection_armed
+                and self._consecutive_low_speed_steps >= self.stall_debounce_steps
+            )
+            or (
+                not self._stall_detection_armed
+                and self._step_count >= self.stall_startup_grace_steps
+            )
+            or self._progress_stall_termination_due()
         ):
-            return TerminationReason.STALLED
-        if not self._stall_detection_armed and self._step_count >= self.stall_startup_grace_steps:
             return TerminationReason.STALLED
         if self._speed_mps >= self.minimum_body_sideslip_termination_speed_mps and abs(
             self._last_body_sideslip_angle_rad
         ) > math.radians(self.critical_body_sideslip_angle_deg):
             return TerminationReason.EXCESSIVE_BODY_SIDESLIP
         return None
+
+    def _update_progress_stall_detection(self) -> None:
+        """Track wrap-safe net progress over the named V2 window."""
+
+        self._progress_stall_progress_m.append(self._progress_m)
+        self._progress_stall_window_progress_m = None
+        if len(self._progress_stall_progress_m) < self._progress_stall_window_steps + 1:
+            return
+        self._progress_stall_window_progress_m = wrapped_progress_delta(
+            self._progress_stall_progress_m[0],
+            self._progress_stall_progress_m[-1],
+            self.track_length_m,
+        )
+
+    def _progress_stall_termination_due(self) -> bool:
+        return (
+            self.termination_method_variant
+            == UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT
+            and self._progress_stall_window_progress_m is not None
+            and self._progress_stall_window_progress_m < self.progress_stall_minimum_progress_m
+        )
 
     def _telemetry(self) -> TelemetryFrame:
         if self._reference is None:

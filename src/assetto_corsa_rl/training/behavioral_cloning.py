@@ -11,29 +11,64 @@ import numpy.typing as npt
 import torch
 from torch import Tensor
 
-from assetto_corsa_rl.config import ProjectConfig
-from assetto_corsa_rl.data.bc_dataset import BCSplit, BehavioralCloningDataset
+from assetto_corsa_rl.ac_integration.track_assets import sha256_file
+from assetto_corsa_rl.config import (
+    PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT,
+    STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT,
+    STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT,
+    ProjectConfig,
+)
+from assetto_corsa_rl.data.bc_dataset import (
+    ACTI_MOTEC_CALIBRATION_NAME,
+    BC_DATASET_SCHEMA_VERSION,
+    MOTEC_STEERING_CONVERSION_NAME,
+    REFERENCE_FEATURE_CONTRACT,
+    BCSplit,
+    BehavioralCloningDataset,
+)
 from assetto_corsa_rl.experiment import ExperimentRecorder
-from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
+from assetto_corsa_rl.features.schema import (
+    OBSERVATION_FEATURE_NAMES,
+    OBSERVATION_FEATURES,
+    OBSERVATION_SIZE,
+)
 from assetto_corsa_rl.models.bezier import (
-    decode_bezier_trajectory_normalized,
+    decode_bezier_trajectory,
 )
 from assetto_corsa_rl.models.driver_network import DriverNetwork
+from assetto_corsa_rl.models.predictor_target_normalization import (
+    predictor_target_normalization_method_from_metadata,
+)
 from assetto_corsa_rl.models.trajectory_contract import (
     BEZIER_TRAJECTORY_CODEC,
     PREDICTOR_COORDINATE_SCALE_M,
+    PREDICTOR_FORWARD_INCREMENT_MAX_M,
+    PREDICTOR_LATERAL_LIMIT_M,
+    PREDICTOR_MAX_LATERAL_TO_FORWARD_RATIO,
 )
 from assetto_corsa_rl.training.checkpoints import (
     TrainingState,
     load_checkpoint,
     save_checkpoint,
 )
-from assetto_corsa_rl.training.losses import behavioural_cloning_loss
+from assetto_corsa_rl.training.losses import (
+    behavioural_cloning_loss,
+    masked_normalized_bezier_trajectory_loss,
+    normalized_bezier_trajectory_loss_per_sample,
+)
 from assetto_corsa_rl.types import PREDICTOR_TIME_OFFSETS_S
 
 LOGGER = logging.getLogger(__name__)
 
 _PREDICTOR_REPORT_HORIZONS_S = (0.1, 0.5, 1.0)
+_STRAIGHT_STEERING_TARGET_THRESHOLD = 0.02
+_STRAIGHT_STEERING_SAMPLE_WEIGHT = 10.0
+_CAUSAL_FEEDBACK_FEATURE_INDICES = tuple(
+    feature.index
+    for feature in OBSERVATION_FEATURES
+    if (feature.group == "vehicle_state" and feature.name != "vehicle.speed_mps")
+    or feature.group == "previous_action"
+)
 _PREDICTOR_REPORT_INDICES = tuple(
     int(np.argmin(np.abs(PREDICTOR_TIME_OFFSETS_S - horizon_s)))
     for horizon_s in _PREDICTOR_REPORT_HORIZONS_S
@@ -241,9 +276,8 @@ def _run_bc_epochs(
             model=model,
             device=device,
         )
-        weight = config.behavioral_cloning.predictor_loss_weight
-        train_joint_loss = _joint_loss(train_metrics, weight)
-        validation_joint_loss = _joint_loss(validation_metrics, weight)
+        train_joint_loss = _joint_loss(config, train_metrics)
+        validation_joint_loss = _joint_loss(config, validation_metrics)
         learning_rate = float(optimizer.param_groups[0]["lr"])
         is_best = validation_joint_loss < best.validation_joint_loss
         record = _build_epoch_record(
@@ -275,6 +309,7 @@ def _run_bc_epochs(
             model=model,
             optimizer=optimizer,
             config=config,
+            dataset_metadata=dataset.metadata,
         )
 
     return best, history
@@ -294,12 +329,14 @@ def _evaluate_epoch(
             dataset.train,
             batch_size=batch_size,
             device=device,
+            predictor_target_scale_m=dataset.predictor_target_scale_m,
         ),
         evaluate_behavioral_cloning(
             model,
             dataset.validation,
             batch_size=batch_size,
             device=device,
+            predictor_target_scale_m=dataset.predictor_target_scale_m,
         ),
     )
 
@@ -325,12 +362,14 @@ def _finalize_bc_training(
         dataset.validation,
         batch_size=config.behavioral_cloning.batch_size,
         device=target_device,
+        predictor_target_scale_m=dataset.predictor_target_scale_m,
     )
     test = evaluate_behavioral_cloning(
         model,
         dataset.test,
         batch_size=config.behavioral_cloning.batch_size,
         device=target_device,
+        predictor_target_scale_m=dataset.predictor_target_scale_m,
     )
     result = BCTrainingResult(
         run_directory=recorder.run_directory,
@@ -361,6 +400,35 @@ def _finalize_bc_training(
             "best_validation_action_mse": best_validation_action_mse,
             "predictor_trained_with_bc": (config.behavioral_cloning.predictor_loss_weight > 0.0),
             "predictor_loss_weight": config.behavioral_cloning.predictor_loss_weight,
+            "predictor_target_normalization_method_variant": (
+                config.behavioral_cloning.predictor_target_normalization_method_variant
+            ),
+            "action_loss_method_variant": (config.behavioral_cloning.action_loss_method_variant),
+            "steering_loss_weight": config.behavioral_cloning.steering_loss_weight,
+            "steering_robustness_method_variant": (
+                config.behavioral_cloning.steering_robustness_method_variant
+            ),
+            "steering_robustness_loss_weight": (
+                config.behavioral_cloning.steering_robustness_loss_weight
+            ),
+            "steering_robustness_feedback_features": (
+                [OBSERVATION_FEATURE_NAMES[index] for index in _CAUSAL_FEEDBACK_FEATURE_INDICES]
+                if config.behavioral_cloning.steering_robustness_method_variant
+                == PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT
+                else []
+            ),
+            "straight_steering_target_threshold": (
+                _STRAIGHT_STEERING_TARGET_THRESHOLD
+                if config.behavioral_cloning.action_loss_method_variant
+                == STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT
+                else None
+            ),
+            "straight_steering_sample_weight": (
+                _STRAIGHT_STEERING_SAMPLE_WEIGHT
+                if config.behavioral_cloning.action_loss_method_variant
+                == STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT
+                else None
+            ),
             "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
             "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
             "epoch_history": epoch_history,
@@ -423,16 +491,100 @@ def _train_one_epoch(
             device,
         )
         output = model(observation)
-        action_loss = behavioural_cloning_loss(output.action_mean, action)
+        weighted_action_variant = config.behavioral_cloning.action_loss_method_variant in {
+            STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT,
+            STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT,
+        }
+        action_weights = (
+            torch.as_tensor(
+                [1.0, config.behavioral_cloning.steering_loss_weight],
+                dtype=output.action_mean.dtype,
+                device=device,
+            )
+            if weighted_action_variant
+            else None
+        )
+        if (
+            config.behavioral_cloning.action_loss_method_variant
+            == STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT
+        ):
+            if action_weights is None:
+                raise RuntimeError("straight-steering loss requires action weights")
+            element_weights = action_weights.expand_as(action).clone()
+            straight = action[:, 1].abs() <= _STRAIGHT_STEERING_TARGET_THRESHOLD
+            element_weights[straight, 1] *= _STRAIGHT_STEERING_SAMPLE_WEIGHT
+            action_loss = behavioural_cloning_loss(
+                output.action_mean,
+                action,
+                element_weights=element_weights,
+            )
+        else:
+            action_loss = behavioural_cloning_loss(
+                output.action_mean,
+                action,
+                output_weights=action_weights,
+            )
+        steering_robustness_loss = torch.zeros((), dtype=action_loss.dtype, device=device)
+        if (
+            config.behavioral_cloning.steering_robustness_method_variant
+            == PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT
+        ):
+            donor_indices = torch.as_tensor(
+                random.permutation(observation.shape[0]),
+                dtype=torch.long,
+                device=device,
+            )
+            robust_observation = _permute_causal_feedback_features(
+                observation,
+                donor_indices,
+            )
+            robust_steering = model(robust_observation).action_mean[:, 1]
+            steering_robustness_loss = torch.nn.functional.mse_loss(
+                robust_steering,
+                action[:, 1],
+            )
         predictor_loss = _masked_predictor_loss(
             output.trajectory_parameters,
             target,
             valid,
+            dataset.predictor_target_scale_m,
         )
-        total_loss = action_loss + config.behavioral_cloning.predictor_loss_weight * predictor_loss
+        total_loss = (
+            action_loss
+            + config.behavioral_cloning.steering_robustness_loss_weight * steering_robustness_loss
+            + config.behavioral_cloning.predictor_loss_weight * predictor_loss
+        )
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward()  # type: ignore[no-untyped-call]
         optimizer.step()  # pyright: ignore[reportUnknownMemberType]
+
+
+def _permute_causal_feedback_features(
+    observation: Tensor,
+    donor_indices: Tensor,
+) -> Tensor:
+    """Break action-caused feedback shortcuts while retaining route context.
+
+    Human demonstrations contain steering, lateral acceleration and slip at the
+    same instant. Randomly pairing those feedback channels with another route
+    context forces the auxiliary BC branch to infer steering from speed, track
+    boundaries and the future reference instead of waiting for a turn that has
+    already started.
+    """
+
+    if observation.ndim != 2 or observation.shape[1] != OBSERVATION_SIZE:
+        raise ValueError("observation must have shape (batch, observation_size)")
+    if donor_indices.ndim != 1 or donor_indices.shape[0] != observation.shape[0]:
+        raise ValueError("donor_indices must have one entry per observation")
+    if donor_indices.dtype != torch.long:
+        raise TypeError("donor_indices must use torch.long")
+    if bool(torch.any((donor_indices < 0) | (donor_indices >= observation.shape[0]))):
+        raise ValueError("donor_indices contain an out-of-range batch index")
+    augmented = observation.clone()
+    augmented[:, _CAUSAL_FEEDBACK_FEATURE_INDICES] = observation[donor_indices][
+        :, _CAUSAL_FEEDBACK_FEATURE_INDICES
+    ]
+    return augmented
 
 
 def _build_epoch_record(
@@ -464,6 +616,7 @@ def _maybe_update_best_checkpoint(
     model: DriverNetwork,
     optimizer: torch.optim.Optimizer,
     config: ProjectConfig,
+    dataset_metadata: dict[str, object],
 ) -> _BCBestState:
     if validation_joint_loss >= best.validation_joint_loss:
         return best
@@ -483,8 +636,20 @@ def _maybe_update_best_checkpoint(
             "action_method_variant": config.actions.method_variant,
             "project": config.to_dict(),
             "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
+            "dataset_metadata": dataset_metadata,
             "predictor_trained_with_bc": (config.behavioral_cloning.predictor_loss_weight > 0.0),
             "predictor_loss_weight": config.behavioral_cloning.predictor_loss_weight,
+            "predictor_target_normalization_method_variant": (
+                config.behavioral_cloning.predictor_target_normalization_method_variant
+            ),
+            "action_loss_method_variant": config.behavioral_cloning.action_loss_method_variant,
+            "steering_loss_weight": config.behavioral_cloning.steering_loss_weight,
+            "steering_robustness_method_variant": (
+                config.behavioral_cloning.steering_robustness_method_variant
+            ),
+            "steering_robustness_loss_weight": (
+                config.behavioral_cloning.steering_robustness_loss_weight
+            ),
             "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
             "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
         },
@@ -502,13 +667,41 @@ def _validate_dataset_contract(
 ) -> None:
     """Reject stale datasets built for an incompatible predictor contract."""
 
-    if dataset.metadata.get("schema_version") != 4:
+    if dataset.metadata.get("schema_version") != BC_DATASET_SCHEMA_VERSION:
         raise ValueError("BC dataset schema is stale; rebuild the BC dataset")
+    normalization_method = predictor_target_normalization_method_from_metadata(dataset.metadata)
+    expected_normalization_method = (
+        config.behavioral_cloning.predictor_target_normalization_method_variant
+    )
+    if normalization_method != expected_normalization_method:
+        raise ValueError(
+            "BC dataset predictor target normalization does not match configuration; "
+            "rebuild the BC dataset"
+        )
+    if dataset.metadata.get("reference_feature_contract") != REFERENCE_FEATURE_CONTRACT:
+        raise ValueError("BC dataset reference feature contract is stale; rebuild the BC dataset")
+    if dataset.metadata.get("calibration") != ACTI_MOTEC_CALIBRATION_NAME:
+        raise ValueError("BC dataset MoTeC calibration is stale; rebuild the BC dataset")
+    if dataset.metadata.get("steering_conversion") != MOTEC_STEERING_CONVERSION_NAME:
+        raise ValueError("BC dataset steering conversion is stale; rebuild the BC dataset")
+    expected_reference_sha256 = sha256_file(Path(config.reference.artifact_path))
+    if dataset.metadata.get("reference_sha256") != expected_reference_sha256:
+        raise ValueError(
+            "BC dataset was built from a different fixed reference; rebuild the BC dataset"
+        )
     if dataset.metadata.get("trajectory_codec") != config.model.trajectory_codec:
         raise ValueError("BC dataset trajectory codec does not match the model")
     scale = dataset.metadata.get("predictor_coordinate_scale_m")
     if scale != PREDICTOR_COORDINATE_SCALE_M:
         raise ValueError("BC dataset predictor coordinate scale does not match")
+    constraint_metadata = {
+        "predictor_lateral_limit_m": PREDICTOR_LATERAL_LIMIT_M,
+        "predictor_forward_increment_max_m": PREDICTOR_FORWARD_INCREMENT_MAX_M,
+        "predictor_max_lateral_to_forward_ratio": (PREDICTOR_MAX_LATERAL_TO_FORWARD_RATIO),
+    }
+    for name, expected in constraint_metadata.items():
+        if dataset.metadata.get(name) != expected:
+            raise ValueError(f"BC dataset {name} does not match predictor codec")
     point_count = dataset.metadata.get("predictor_point_count")
     if point_count != int(PREDICTOR_TIME_OFFSETS_S.size):
         raise ValueError("BC dataset predictor point count does not match")
@@ -532,6 +725,7 @@ def evaluate_behavioral_cloning(
     *,
     batch_size: int,
     device: torch.device,
+    predictor_target_scale_m: npt.ArrayLike,
 ) -> BCEvaluationMetrics:
     """Evaluate action and decoded-trajectory errors without random sampling."""
 
@@ -548,20 +742,19 @@ def evaluate_behavioral_cloning(
         if not valid.any():
             continue
 
-        prediction_normalized = decode_bezier_trajectory_normalized(
+        prediction_m = decode_bezier_trajectory(
             output.trajectory_parameters[valid],
             sample_count=target.shape[1],
         )
         valid_target = target[valid]
-        target_normalized = valid_target / PREDICTOR_COORDINATE_SCALE_M
-        smooth_loss = torch.nn.functional.smooth_l1_loss(
-            prediction_normalized,
-            target_normalized,
-            reduction="none",
-        ).mean(dim=(-2, -1))
+        smooth_loss = normalized_bezier_trajectory_loss_per_sample(
+            output.trajectory_parameters[valid],
+            valid_target,
+            predictor_target_scale_m,
+        )
         accumulator.add_predictor_error(
             smooth_loss_per_sample=smooth_loss,
-            prediction_m=(prediction_normalized * PREDICTOR_COORDINATE_SCALE_M),
+            prediction_m=prediction_m,
             target_m=valid_target,
         )
 
@@ -569,10 +762,22 @@ def evaluate_behavioral_cloning(
 
 
 def _joint_loss(
+    config: ProjectConfig,
     metrics: BCEvaluationMetrics,
-    predictor_loss_weight: float,
 ) -> float:
-    return metrics.action_mse + predictor_loss_weight * metrics.predictor_smooth_l1
+    if config.behavioral_cloning.action_loss_method_variant in {
+        STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT,
+        STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT,
+    }:
+        steering_weight = config.behavioral_cloning.steering_loss_weight
+        action_loss = (
+            metrics.action_combined_pedal_mse + steering_weight * metrics.action_steering_mse
+        ) / (1.0 + steering_weight)
+    else:
+        action_loss = metrics.action_mse
+    return (
+        action_loss + config.behavioral_cloning.predictor_loss_weight * metrics.predictor_smooth_l1
+    )
 
 
 def _log_training_start(
@@ -581,11 +786,18 @@ def _log_training_start(
     device: torch.device,
 ) -> None:
     LOGGER.info(
-        "BC training | epochs=%d | train=%d | validation=%d | batch=%d | device=%s",
+        "BC training | epochs=%d | train=%d | validation=%d | batch=%d | "
+        "action_loss=%s steering_weight=%.3f | steering_robustness=%s weight=%.3f | "
+        "predictor_normalization=%s | device=%s",
         config.behavioral_cloning.epochs,
         dataset.train.sample_count,
         dataset.validation.sample_count,
         config.behavioral_cloning.batch_size,
+        config.behavioral_cloning.action_loss_method_variant,
+        config.behavioral_cloning.steering_loss_weight,
+        config.behavioral_cloning.steering_robustness_method_variant,
+        config.behavioral_cloning.steering_robustness_loss_weight,
+        config.behavioral_cloning.predictor_target_normalization_method_variant,
         device,
     )
     LOGGER.info("BC legend   | T=train | V=validation | *=new best checkpoint")
@@ -687,17 +899,14 @@ def _masked_predictor_loss(
     flat_prediction: Tensor,
     target_xz_m: Tensor,
     valid_mask: Tensor,
+    predictor_target_scale_m: npt.ArrayLike,
 ) -> Tensor:
-    if valid_mask.any():
-        prediction_normalized = decode_bezier_trajectory_normalized(
-            flat_prediction[valid_mask],
-            sample_count=target_xz_m.shape[1],
-        )
-        return torch.nn.functional.smooth_l1_loss(
-            prediction_normalized,
-            target_xz_m[valid_mask] / PREDICTOR_COORDINATE_SCALE_M,
-        )
-    return flat_prediction.sum() * 0.0
+    return masked_normalized_bezier_trajectory_loss(
+        flat_prediction,
+        target_xz_m,
+        valid_mask,
+        predictor_target_scale_m,
+    )
 
 
 def _batch_tensors(

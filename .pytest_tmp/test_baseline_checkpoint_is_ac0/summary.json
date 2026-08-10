@@ -1,1 +1,0 @@
-{"method_variant": "ai_spline_absolute_v1", "action_method_variant": "absolute_bounded_v1", "final_validation": {"predictor_ade_m": 1.0, "predictor_fde_m": 1.0}}

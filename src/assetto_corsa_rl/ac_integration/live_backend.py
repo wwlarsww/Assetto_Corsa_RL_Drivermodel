@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol
@@ -16,7 +18,11 @@ from assetto_corsa_rl.ac_integration.collision_bridge import (
     CollisionState,
 )
 from assetto_corsa_rl.ac_integration.reset_bridge import (
+    HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT,
+    HOTLAP_REFERENCE_SPEED_RESET_METHOD_VARIANT,
+    AssettoCorsaHotlapReferenceSpeedResetBridge,
     AssettoCorsaHotlapResetBridge,
+    AssettoCorsaReferencePoseSpeedResetBridge,
     AssettoCorsaResetBridge,
     ResetAcknowledgement,
 )
@@ -27,16 +33,24 @@ from assetto_corsa_rl.ac_integration.shared_memory import (
 from assetto_corsa_rl.ac_integration.slip_bridge import (
     AssettoCorsaSlipBridgeFileReader,
     SlipBridgePacket,
+    SlipBridgeTimeoutError,
 )
 from assetto_corsa_rl.ac_integration.slip_features import (
     assetto_corsa_body_sideslip_angle_rad,
     vanilla_ac_slip_features,
+)
+from assetto_corsa_rl.config import (
+    LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT,
+    PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT,
+    TERMINATION_METHOD_VARIANT,
+    UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
 )
 from assetto_corsa_rl.control.vgamepad import VGamepadControlWriter
 from assetto_corsa_rl.envs.backend import validate_backend_action
 from assetto_corsa_rl.features.preprocessing import stabilise_low_speed_slip
 from assetto_corsa_rl.features.track_geometry import TrackGeometry
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
+from assetto_corsa_rl.references.projection import wrapped_progress_delta
 from assetto_corsa_rl.types import (
     BackendTransition,
     ReferenceLinePreview,
@@ -49,6 +63,7 @@ from assetto_corsa_rl.types import (
 STANDARD_GRAVITY_MPS2 = 9.80665
 ASSETTO_CORSA_LIVE_STATUS = 2
 LIVE_TELEMETRY_CALIBRATION_NAME = "assetto_corsa_gym_world_v1"
+LOGGER = logging.getLogger(__name__)
 
 
 class LiveBackendError(RuntimeError):
@@ -61,6 +76,10 @@ class LiveBackendTimeoutError(LiveBackendError):
 
 class LiveSessionMismatchError(LiveBackendError):
     """Raised when the running car/track does not match the experiment config."""
+
+
+class _ReferencePoseResetError(LiveBackendError):
+    """Raised for a fresh but transiently misaligned CSP pose-reset frame."""
 
 
 class _TelemetryReader(Protocol):
@@ -95,8 +114,19 @@ class _ControlWriter(Protocol):
     def close(self) -> None: ...
 
 
+def _is_positive_integer(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value > 0
+
+
 class _ResetController(Protocol):
-    def request_reset(self, *, timeout_s: float) -> ResetAcknowledgement: ...
+    def request_reset(
+        self,
+        *,
+        timeout_s: float,
+        start_speed_mps: float | None = None,
+        start_position_xy_m: tuple[float, float] | None = None,
+        start_heading_rad: float | None = None,
+    ) -> ResetAcknowledgement: ...
 
     def close(self) -> None: ...
 
@@ -113,7 +143,7 @@ class AssettoCorsaLiveBackend:
     returned only after a newer live physics packet and a fresh slip packet.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0915 - explicit validation and transport state setup
         self,
         *,
         telemetry_reader: _TelemetryReader,
@@ -130,12 +160,23 @@ class AssettoCorsaLiveBackend:
         stall_debounce_steps: int,
         critical_body_sideslip_angle_deg: float,
         minimum_body_sideslip_termination_speed_mps: float,
+        termination_method_variant: str = TERMINATION_METHOD_VARIANT,
+        progress_stall_window_s: float = 1.0,
+        progress_stall_minimum_progress_m: float = 2.0,
         frame_timeout_s: float = 2.0,
         reset_timeout_s: float = 10.0,
         reset_position_tolerance: float = 0.05,
+        reset_reference_lateral_offset_m: float = 0.0,
+        reset_reference_heading_tolerance_rad: float = 0.05,
         reset_speed_threshold_mps: float = 5.0,
+        reset_reference_speed_tolerance_mps: float = 2.0,
         reset_stable_frames: int = 3,
+        reset_max_abs_slip_ratio: float = 0.2,
+        reset_slip_stable_frames: int = 1,
+        reset_reference_speed_max_attempts: int = 1,
         reset_collision_quiescence_s: float = 0.5,
+        reset_method_variant: str = "csp_hotlap_spawn_v1",
+        step_timing_method_variant: str = LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT,
         poll_interval_s: float = 0.001,
         monotonic_clock: Callable[[], float] = time.perf_counter,
         sleep: Callable[[float], None] = time.sleep,
@@ -145,10 +186,15 @@ class AssettoCorsaLiveBackend:
             minimum_speed_mps,
             critical_body_sideslip_angle_deg,
             minimum_body_sideslip_termination_speed_mps,
+            progress_stall_window_s,
+            progress_stall_minimum_progress_m,
             frame_timeout_s,
             reset_timeout_s,
             reset_position_tolerance,
+            reset_reference_heading_tolerance_rad,
             reset_speed_threshold_mps,
+            reset_reference_speed_tolerance_mps,
+            reset_max_abs_slip_ratio,
             poll_interval_s,
         )
         if any(value <= 0 for value in positive):
@@ -159,12 +205,37 @@ class AssettoCorsaLiveBackend:
             raise ValueError("stall_startup_grace_steps must be positive")
         if critical_body_sideslip_angle_deg > 90.0:
             raise ValueError("critical body sideslip angle must not exceed 90 degrees")
+        if termination_method_variant not in {
+            TERMINATION_METHOD_VARIANT,
+            UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                f"unsupported termination method variant: {termination_method_variant!r}"
+            )
         if reset_stable_frames <= 0:
             raise ValueError("reset_stable_frames must be positive")
+        if reset_slip_stable_frames <= 0:
+            raise ValueError("reset_slip_stable_frames must be positive")
+        if not _is_positive_integer(reset_reference_speed_max_attempts):
+            raise ValueError("reset_reference_speed_max_attempts must be a positive integer")
         if reset_collision_quiescence_s < 0:
             raise ValueError("reset_collision_quiescence_s must be non-negative")
         if not expected_car_id or not expected_track_id:
             raise ValueError("expected car and track identifiers must not be empty")
+        if reset_method_variant not in {
+            "csp_hotlap_spawn_v1",
+            HOTLAP_REFERENCE_SPEED_RESET_METHOD_VARIANT,
+            HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT,
+            "python_ext_reset_car_v1",
+        }:
+            raise ValueError(f"unsupported reset method variant: {reset_method_variant!r}")
+        if step_timing_method_variant not in {
+            LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT,
+            PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                f"unsupported live step timing method variant: {step_timing_method_variant!r}"
+            )
         self.telemetry_reader = telemetry_reader
         self.slip_reader = slip_reader
         self.collision_reader = collision_reader
@@ -181,12 +252,26 @@ class AssettoCorsaLiveBackend:
         self.minimum_body_sideslip_termination_speed_mps = (
             minimum_body_sideslip_termination_speed_mps
         )
+        self.termination_method_variant = termination_method_variant
+        self.progress_stall_window_steps = max(
+            1,
+            math.ceil(progress_stall_window_s * control_frequency_hz),
+        )
+        self.progress_stall_minimum_progress_m = progress_stall_minimum_progress_m
         self.frame_timeout_s = frame_timeout_s
         self.reset_timeout_s = reset_timeout_s
         self.reset_position_tolerance = reset_position_tolerance
+        self.reset_reference_lateral_offset_m = reset_reference_lateral_offset_m
+        self.reset_reference_heading_tolerance_rad = reset_reference_heading_tolerance_rad
         self.reset_speed_threshold_mps = reset_speed_threshold_mps
+        self.reset_reference_speed_tolerance_mps = reset_reference_speed_tolerance_mps
         self.reset_stable_frames = reset_stable_frames
+        self.reset_max_abs_slip_ratio = reset_max_abs_slip_ratio
+        self.reset_slip_stable_frames = reset_slip_stable_frames
+        self.reset_reference_speed_max_attempts = reset_reference_speed_max_attempts
         self.reset_collision_quiescence_s = reset_collision_quiescence_s
+        self.reset_method_variant = reset_method_variant
+        self.step_timing_method_variant = step_timing_method_variant
         self.poll_interval_s = poll_interval_s
         self._monotonic_clock = monotonic_clock
         self._sleep = sleep
@@ -198,8 +283,19 @@ class AssettoCorsaLiveBackend:
         self._step_count = 0
         self._stall_detection_armed = False
         self._consecutive_low_speed_steps = 0
+        self._progress_stall_progress_m: deque[float] = deque(
+            maxlen=self.progress_stall_window_steps + 1
+        )
+        self._progress_stall_window_progress_m: float | None = None
         self._last_reset_acknowledgement: ResetAcknowledgement | None = None
         self._last_collision_state: CollisionState | None = None
+        self._hotlap_start_progress_m: float | None = None
+        self._last_reset_target_speed_mps: float | None = None
+        self._last_reset_reference_lateral_error_m: float | None = None
+        self._last_reset_reference_heading_error_rad: float | None = None
+        self._last_reset_max_abs_slip_ratio: float | None = None
+        self._last_reset_attempts: int | None = None
+        self._last_snapshot_monotonic_s: float | None = None
         self._closed = False
 
     @classmethod
@@ -215,15 +311,26 @@ class AssettoCorsaLiveBackend:
         stall_debounce_steps: int,
         critical_body_sideslip_angle_deg: float,
         minimum_body_sideslip_termination_speed_mps: float,
+        termination_method_variant: str,
+        progress_stall_window_s: float,
+        progress_stall_minimum_progress_m: float,
         frame_timeout_s: float,
         reset_timeout_s: float,
         reset_position_tolerance: float,
+        reset_reference_lateral_offset_m: float,
+        reset_reference_heading_tolerance_rad: float,
         reset_speed_threshold_mps: float,
+        reset_reference_speed_tolerance_mps: float,
         reset_stable_frames: int,
+        reset_max_abs_slip_ratio: float,
+        reset_slip_stable_frames: int,
+        reset_reference_speed_max_attempts: int,
         reset_collision_quiescence_s: float,
         poll_interval_s: float,
         steering_output_sign: float,
+        steering_output_gain: float = 1.0,
         reset_backend: str = "csp_hotlap_spawn_v1",
+        step_timing_method_variant: str = LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT,
         control_writer: _ControlWriter | None = None,
     ) -> AssettoCorsaLiveBackend:
         """Connect all live transports and clean up partially opened resources."""
@@ -240,9 +347,18 @@ class AssettoCorsaLiveBackend:
             if control is None:
                 control = VGamepadControlWriter(
                     steering_output_sign=steering_output_sign,
+                    steering_output_gain=steering_output_gain,
                 )
             if reset_backend == "csp_hotlap_spawn_v1":
                 reset = AssettoCorsaHotlapResetBridge.connect(
+                    expected_track_id=expected_track_id,
+                )
+            elif reset_backend == HOTLAP_REFERENCE_SPEED_RESET_METHOD_VARIANT:
+                reset = AssettoCorsaHotlapReferenceSpeedResetBridge.connect(
+                    expected_track_id=expected_track_id,
+                )
+            elif reset_backend == HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT:
+                reset = AssettoCorsaReferencePoseSpeedResetBridge.connect(
                     expected_track_id=expected_track_id,
                 )
             elif reset_backend == "python_ext_reset_car_v1":
@@ -266,12 +382,23 @@ class AssettoCorsaLiveBackend:
                 minimum_body_sideslip_termination_speed_mps=(
                     minimum_body_sideslip_termination_speed_mps
                 ),
+                termination_method_variant=termination_method_variant,
+                progress_stall_window_s=progress_stall_window_s,
+                progress_stall_minimum_progress_m=progress_stall_minimum_progress_m,
                 frame_timeout_s=frame_timeout_s,
                 reset_timeout_s=reset_timeout_s,
                 reset_position_tolerance=reset_position_tolerance,
+                reset_reference_lateral_offset_m=reset_reference_lateral_offset_m,
+                reset_reference_heading_tolerance_rad=(reset_reference_heading_tolerance_rad),
                 reset_speed_threshold_mps=reset_speed_threshold_mps,
+                reset_reference_speed_tolerance_mps=(reset_reference_speed_tolerance_mps),
                 reset_stable_frames=reset_stable_frames,
+                reset_max_abs_slip_ratio=reset_max_abs_slip_ratio,
+                reset_slip_stable_frames=reset_slip_stable_frames,
+                reset_reference_speed_max_attempts=reset_reference_speed_max_attempts,
                 reset_collision_quiescence_s=reset_collision_quiescence_s,
+                reset_method_variant=reset_backend,
+                step_timing_method_variant=step_timing_method_variant,
                 poll_interval_s=poll_interval_s,
             )
         except BaseException:
@@ -281,7 +408,7 @@ class AssettoCorsaLiveBackend:
                         resource.close()
             raise
 
-    def reset(
+    def reset(  # noqa: PLR0915 - explicit reset transport and safety sequence
         self,
         *,
         seed: int | None,
@@ -298,13 +425,87 @@ class AssettoCorsaLiveBackend:
         try:
             first = self.telemetry_reader.read()
             self._validate_session(first, reference)
-            acknowledgement = self.reset_controller.request_reset(timeout_s=self.reset_timeout_s)
-            snapshot = self._wait_for_reset_state(
-                first.physics.packet_id,
-                first.graphics.packet_id,
-            )
-            snapshot = self._wait_for_reset_collision_quiescence(snapshot)
-            slip_packet = self.slip_reader.receive(timeout_s=self.frame_timeout_s)
+            if self.reset_method_variant in {
+                HOTLAP_REFERENCE_SPEED_RESET_METHOD_VARIANT,
+                HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT,
+            }:
+                after_physics_packet_id = first.physics.packet_id
+                after_graphics_packet_id = first.graphics.packet_id
+                if self._hotlap_start_progress_m is None:
+                    self.reset_controller.request_reset(
+                        timeout_s=self.reset_timeout_s,
+                        start_speed_mps=0.0,
+                    )
+                    probe = self._wait_for_reset_state(
+                        after_physics_packet_id,
+                        after_graphics_packet_id,
+                    )
+                    self._hotlap_start_progress_m = self._project_reference_progress(
+                        probe,
+                        reference,
+                    )
+                    after_physics_packet_id = probe.physics.packet_id
+                    after_graphics_packet_id = probe.graphics.packet_id
+                target_speed_mps = reference.human_mean_speed_at(self._hotlap_start_progress_m)
+                target_position_xy_m: tuple[float, float] | None = None
+                target_heading_rad: float | None = None
+                if self.reset_method_variant == HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT:
+                    target_position, target_heading = reference.world_pose_at(
+                        self._hotlap_start_progress_m
+                    )
+                    target_position = (
+                        target_position
+                        + np.asarray(
+                            [-math.sin(target_heading), math.cos(target_heading)],
+                            dtype=np.float32,
+                        )
+                        * self.reset_reference_lateral_offset_m
+                    )
+                    target_position_xy_m = (
+                        float(target_position[0]),
+                        float(target_position[1]),
+                    )
+                    target_heading_rad = float(target_heading)
+                (
+                    acknowledgement,
+                    snapshot,
+                    slip_packet,
+                    pose_lateral_error_m,
+                    pose_heading_error_rad,
+                ) = self._perform_reference_speed_reset(
+                    after_physics_packet_id=after_physics_packet_id,
+                    after_graphics_packet_id=after_graphics_packet_id,
+                    reference=reference,
+                    target_speed_mps=target_speed_mps,
+                    target_position_xy_m=target_position_xy_m,
+                    target_heading_rad=target_heading_rad,
+                )
+                self._last_reset_max_abs_slip_ratio = self._maximum_abs_slip_ratio(
+                    snapshot,
+                    slip_packet,
+                )
+                if self.reset_method_variant == HOTLAP_REFERENCE_POSE_SPEED_RESET_METHOD_VARIANT:
+                    self._last_reset_reference_lateral_error_m = pose_lateral_error_m
+                    self._last_reset_reference_heading_error_rad = pose_heading_error_rad
+                else:
+                    self._last_reset_reference_lateral_error_m = None
+                    self._last_reset_reference_heading_error_rad = None
+                self._last_reset_target_speed_mps = target_speed_mps
+            else:
+                acknowledgement = self.reset_controller.request_reset(
+                    timeout_s=self.reset_timeout_s
+                )
+                snapshot = self._wait_for_reset_state(
+                    first.physics.packet_id,
+                    first.graphics.packet_id,
+                )
+                snapshot = self._wait_for_reset_collision_quiescence(snapshot)
+                slip_packet = self.slip_reader.receive(timeout_s=self.frame_timeout_s)
+                self._last_reset_target_speed_mps = None
+                self._last_reset_max_abs_slip_ratio = None
+                self._last_reset_reference_lateral_error_m = None
+                self._last_reset_reference_heading_error_rad = None
+                self._last_reset_attempts = 1
             collision_state = self.collision_reader.synchronise(
                 expected_track_id=self.expected_track_id,
                 timeout_s=self.frame_timeout_s,
@@ -312,20 +513,32 @@ class AssettoCorsaLiveBackend:
             self._reference = reference
             self._last_physics_packet_id = snapshot.physics.packet_id
             self._last_graphics_packet_id = snapshot.graphics.packet_id
+            self._last_snapshot_monotonic_s = snapshot.monotonic_time_s
             self._episode_origin_monotonic_s = snapshot.monotonic_time_s
             self._episode_start_completed_laps = snapshot.graphics.completed_laps
             self._step_count = 0
             self._stall_detection_armed = False
             self._consecutive_low_speed_steps = 0
+            self._progress_stall_progress_m.clear()
+            self._progress_stall_window_progress_m = None
             self._last_reset_acknowledgement = acknowledgement
             self._last_collision_state = collision_state
             if action is not None:
                 self.control_writer.apply(action)
-            return self._build_frame(snapshot, slip_packet)
+            initial_frame = self._build_frame(snapshot, slip_packet)
+            self._progress_stall_progress_m.append(initial_frame.progress_m)
+            return initial_frame
         except BaseException:
             self._reference = None
             self._last_physics_packet_id = None
             self._last_graphics_packet_id = None
+            self._last_snapshot_monotonic_s = None
+            self._last_reset_max_abs_slip_ratio = None
+            self._last_reset_reference_lateral_error_m = None
+            self._last_reset_reference_heading_error_rad = None
+            self._last_reset_attempts = None
+            self._progress_stall_progress_m.clear()
+            self._progress_stall_window_progress_m = None
             self.control_writer.neutral()
             raise
 
@@ -340,12 +553,32 @@ class AssettoCorsaLiveBackend:
         ):
             raise RuntimeError("reset must be called before step")
         action = validate_backend_action(absolute_action)
+        reward_progress_start_m: float | None = None
+        observation_to_action_delay_s: float | None = None
+        after_physics_packet_id = self._last_physics_packet_id
+        after_graphics_packet_id = self._last_graphics_packet_id
+        if self.step_timing_method_variant == PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT:
+            baseline = self.telemetry_reader.read()
+            self._validate_session(baseline, self._reference)
+            if baseline.graphics.status != ASSETTO_CORSA_LIVE_STATUS:
+                raise LiveBackendError("pre-action telemetry does not report a LIVE session")
+            reward_progress_start_m = self._project_reference_progress(
+                baseline,
+                self._reference,
+            )
+            after_physics_packet_id = baseline.physics.packet_id
+            after_graphics_packet_id = baseline.graphics.packet_id
+            if self._last_snapshot_monotonic_s is not None:
+                observation_to_action_delay_s = max(
+                    baseline.monotonic_time_s - self._last_snapshot_monotonic_s,
+                    0.0,
+                )
         action_time = self._monotonic_clock()
         try:
             self.control_writer.apply(action)
             snapshot = self._wait_for_fresh_frame(
-                after_physics_packet_id=self._last_physics_packet_id,
-                after_graphics_packet_id=self._last_graphics_packet_id,
+                after_physics_packet_id=after_physics_packet_id,
+                after_graphics_packet_id=after_graphics_packet_id,
                 not_before_s=action_time + 1.0 / self.control_frequency_hz,
                 timeout_s=self.frame_timeout_s,
             )
@@ -361,12 +594,14 @@ class AssettoCorsaLiveBackend:
             raise
         self._last_physics_packet_id = snapshot.physics.packet_id
         self._last_graphics_packet_id = snapshot.graphics.packet_id
+        self._last_snapshot_monotonic_s = snapshot.monotonic_time_s
         self._last_collision_state = collision_state
         self._step_count += 1
         body_sideslip_angle_rad = assetto_corsa_body_sideslip_angle_rad(
             snapshot.physics.local_velocity_mps
         )
         self._update_stall_detection(frame.vehicle_state.speed_mps)
+        self._update_progress_stall_detection(frame.progress_m)
         termination = self._termination_reason(
             snapshot,
             frame,
@@ -376,6 +611,10 @@ class AssettoCorsaLiveBackend:
         diagnostics = {
             "live_backend": True,
             "telemetry_calibration": LIVE_TELEMETRY_CALIBRATION_NAME,
+            "step_timing_method_variant": self.step_timing_method_variant,
+            "reward_progress_start_m": reward_progress_start_m,
+            "observation_to_action_delay_s": observation_to_action_delay_s,
+            "action_hold_duration_s": max(self._monotonic_clock() - action_time, 0.0),
             "physics_packet_id": snapshot.physics.packet_id,
             "graphics_packet_id": snapshot.graphics.packet_id,
             "slip_sequence": slip_packet.sequence,
@@ -386,6 +625,12 @@ class AssettoCorsaLiveBackend:
                 if self._last_reset_acknowledgement is not None
                 else None
             ),
+            "reset_target_speed_mps": self._last_reset_target_speed_mps,
+            "reset_start_reference_progress_m": self._hotlap_start_progress_m,
+            "reset_max_abs_slip_ratio": self._last_reset_max_abs_slip_ratio,
+            "reset_attempts": self._last_reset_attempts,
+            "reset_reference_lateral_error_m": (self._last_reset_reference_lateral_error_m),
+            "reset_reference_heading_error_rad": (self._last_reset_reference_heading_error_rad),
             "simulator_seed_supported": False,
             "absolute_pedal": float(action[0]),
             "absolute_steering": float(action[1]),
@@ -401,6 +646,11 @@ class AssettoCorsaLiveBackend:
             "number_of_tyres_out": snapshot.physics.number_of_tyres_out,
             "stall_detection_armed": self._stall_detection_armed,
             "consecutive_low_speed_steps": self._consecutive_low_speed_steps,
+            "termination_method_variant": self.termination_method_variant,
+            "progress_stall_window_steps": self.progress_stall_window_steps,
+            "progress_stall_minimum_progress_m": self.progress_stall_minimum_progress_m,
+            "progress_stall_window_progress_m": self._progress_stall_window_progress_m,
+            "progress_stall_triggered": self._progress_stall_termination_due(),
             "reset_method_variant": (
                 self._last_reset_acknowledgement.method_variant
                 if self._last_reset_acknowledgement is not None
@@ -412,6 +662,92 @@ class AssettoCorsaLiveBackend:
             termination_reason=termination,
             diagnostics=diagnostics,
         )
+
+    def _perform_reference_speed_reset(
+        self,
+        *,
+        after_physics_packet_id: int,
+        after_graphics_packet_id: int,
+        reference: ReferenceTrajectory,
+        target_speed_mps: float,
+        target_position_xy_m: tuple[float, float] | None,
+        target_heading_rad: float | None,
+    ) -> tuple[
+        ResetAcknowledgement,
+        AssettoCorsaTelemetry,
+        SlipBridgePacket,
+        float | None,
+        float | None,
+    ]:
+        """Retry a fully acknowledged moving reset after unsafe settling or pose."""
+
+        last_failure: (
+            LiveBackendTimeoutError | _ReferencePoseResetError | SlipBridgeTimeoutError | None
+        ) = None
+        for attempt in range(1, self.reset_reference_speed_max_attempts + 1):
+            acknowledgement = self.reset_controller.request_reset(
+                timeout_s=self.reset_timeout_s,
+                start_speed_mps=target_speed_mps,
+                start_position_xy_m=target_position_xy_m,
+                start_heading_rad=target_heading_rad,
+            )
+            try:
+                snapshot = self._wait_for_reference_speed_reset_state(
+                    after_physics_packet_id,
+                    after_graphics_packet_id,
+                    target_speed_mps=target_speed_mps,
+                )
+                slip_packet = self.slip_reader.receive(timeout_s=self.frame_timeout_s)
+                snapshot, slip_packet = self._wait_for_reference_speed_slip_stability(
+                    snapshot,
+                    slip_packet,
+                    target_speed_mps=target_speed_mps,
+                )
+                pose_lateral_error_m: float | None = None
+                pose_heading_error_rad: float | None = None
+                if target_position_xy_m is not None:
+                    (
+                        pose_lateral_error_m,
+                        pose_heading_error_rad,
+                    ) = self._validate_reference_pose_reset(snapshot, reference)
+            except (
+                LiveBackendTimeoutError,
+                _ReferencePoseResetError,
+                SlipBridgeTimeoutError,
+            ) as error:
+                last_failure = error
+                if attempt >= self.reset_reference_speed_max_attempts:
+                    break
+                LOGGER.warning(
+                    "reference-speed reset attempt %d/%d was unsafe: %s; retrying",
+                    attempt,
+                    self.reset_reference_speed_max_attempts,
+                    error,
+                )
+                self.control_writer.neutral()
+                retry_baseline = self.telemetry_reader.read()
+                self._validate_session(retry_baseline, reference)
+                after_physics_packet_id = retry_baseline.physics.packet_id
+                after_graphics_packet_id = retry_baseline.graphics.packet_id
+                continue
+
+            self._last_reset_attempts = attempt
+            return (
+                acknowledgement,
+                snapshot,
+                slip_packet,
+                pose_lateral_error_m,
+                pose_heading_error_rad,
+            )
+
+        if last_failure is None:
+            raise RuntimeError("reference-speed reset retry loop ended without a result")
+        self._last_reset_attempts = self.reset_reference_speed_max_attempts
+        raise LiveBackendTimeoutError(
+            "reference-speed reset remained unsafe after "
+            f"{self.reset_reference_speed_max_attempts} attempt(s); "
+            f"last failure: {last_failure}"
+        ) from last_failure
 
     def _wait_for_reset_state(
         self,
@@ -474,6 +810,197 @@ class AssettoCorsaLiveBackend:
             not_before_s=self._monotonic_clock() + self.reset_collision_quiescence_s,
             timeout_s=self.reset_collision_quiescence_s + self.frame_timeout_s,
         )
+
+    def _wait_for_reference_speed_reset_state(
+        self,
+        after_physics_packet_id: int,
+        after_graphics_packet_id: int,
+        *,
+        target_speed_mps: float,
+    ) -> AssettoCorsaTelemetry:
+        """Return the first fresh non-pit frame at the requested CSP speed."""
+
+        deadline = self._monotonic_clock() + self.reset_timeout_s
+        physics_packet_id = after_physics_packet_id
+        graphics_packet_id = after_graphics_packet_id
+        latest_speed_mps: float | None = None
+        while self._monotonic_clock() < deadline:
+            remaining = deadline - self._monotonic_clock()
+            try:
+                latest = self._wait_for_fresh_frame(
+                    after_physics_packet_id=physics_packet_id,
+                    after_graphics_packet_id=graphics_packet_id,
+                    not_before_s=self._monotonic_clock(),
+                    timeout_s=max(
+                        min(remaining, self.frame_timeout_s),
+                        self.poll_interval_s,
+                    ),
+                )
+            except LiveBackendTimeoutError:
+                continue
+            physics_packet_id = latest.physics.packet_id
+            graphics_packet_id = latest.graphics.packet_id
+            latest_speed_mps = latest.physics.speed_kmh / 3.6
+            if (
+                not latest.graphics.is_in_pit
+                and abs(latest_speed_mps - target_speed_mps)
+                <= self.reset_reference_speed_tolerance_mps
+            ):
+                return latest
+        observed = "none" if latest_speed_mps is None else f"{latest_speed_mps:.3f} m/s"
+        raise LiveBackendTimeoutError(
+            "reference-speed reset was acknowledged but the requested "
+            f"{target_speed_mps:.3f} m/s was not observed; latest={observed}"
+        )
+
+    def _wait_for_reference_speed_slip_stability(
+        self,
+        snapshot: AssettoCorsaTelemetry,
+        slip_packet: SlipBridgePacket,
+        *,
+        target_speed_mps: float,
+    ) -> tuple[AssettoCorsaTelemetry, SlipBridgePacket]:
+        """Reject the CSP wheel-speed transient before exposing BC features."""
+
+        deadline = self._monotonic_clock() + self.reset_timeout_s
+        stable_frames = 0
+        latest_max_abs_slip = self._maximum_abs_slip_ratio(snapshot, slip_packet)
+        latest_speed_mps = snapshot.physics.speed_kmh / 3.6
+        first_speed_mps = latest_speed_mps
+        first_max_abs_slip = latest_max_abs_slip
+        peak_max_abs_slip = latest_max_abs_slip
+        while True:
+            speed_is_valid = (
+                abs(latest_speed_mps - target_speed_mps) <= self.reset_reference_speed_tolerance_mps
+            )
+            if speed_is_valid and latest_max_abs_slip <= self.reset_max_abs_slip_ratio + 1e-6:
+                stable_frames += 1
+            else:
+                stable_frames = 0
+            if stable_frames >= self.reset_slip_stable_frames:
+                return snapshot, slip_packet
+
+            remaining = deadline - self._monotonic_clock()
+            if remaining <= 0.0:
+                position_xy_m = (
+                    snapshot.graphics.car_coordinates_m[2],
+                    snapshot.graphics.car_coordinates_m[0],
+                )
+                heading_rad = _wrapped_angle(-snapshot.physics.heading_rad)
+                raise LiveBackendTimeoutError(
+                    "reference-speed reset did not reach stable wheel slip; "
+                    f"first_speed={first_speed_mps:.3f} m/s, "
+                    f"first_max_abs_slip_ratio={first_max_abs_slip:.3f}, "
+                    f"latest_speed={latest_speed_mps:.3f} m/s, "
+                    f"latest_max_abs_slip_ratio={latest_max_abs_slip:.3f}, "
+                    f"peak_max_abs_slip_ratio={peak_max_abs_slip:.3f}, "
+                    f"latest_position_xy=({position_xy_m[0]:.3f}, "
+                    f"{position_xy_m[1]:.3f}) m, "
+                    f"latest_heading={heading_rad:.4f} rad, "
+                    f"required<={self.reset_max_abs_slip_ratio:.3f} for "
+                    f"{self.reset_slip_stable_frames} frames"
+                )
+            try:
+                snapshot = self._wait_for_fresh_frame(
+                    after_physics_packet_id=snapshot.physics.packet_id,
+                    after_graphics_packet_id=snapshot.graphics.packet_id,
+                    not_before_s=self._monotonic_clock(),
+                    timeout_s=max(
+                        min(remaining, self.frame_timeout_s),
+                        self.poll_interval_s,
+                    ),
+                )
+            except LiveBackendTimeoutError:
+                # CSP can briefly suspend both shared-memory pages while the
+                # explicit pose is settled. Honour the larger reset timeout.
+                continue
+            try:
+                slip_packet = self.slip_reader.receive(
+                    timeout_s=max(
+                        min(remaining, self.frame_timeout_s),
+                        self.poll_interval_s,
+                    )
+                )
+            except SlipBridgeTimeoutError:
+                # Treat a transient file-bridge gap like a shared-memory gap;
+                # the outer reset deadline remains the authoritative bound.
+                continue
+            latest_speed_mps = snapshot.physics.speed_kmh / 3.6
+            latest_max_abs_slip = self._maximum_abs_slip_ratio(snapshot, slip_packet)
+            peak_max_abs_slip = max(peak_max_abs_slip, latest_max_abs_slip)
+
+    def _validate_reference_pose_reset(
+        self,
+        snapshot: AssettoCorsaTelemetry,
+        reference: ReferenceTrajectory,
+    ) -> tuple[float, float]:
+        """Require the moving reset frame to remain aligned with the reference."""
+
+        position_xy_m = np.asarray(
+            [
+                snapshot.graphics.car_coordinates_m[2],
+                snapshot.graphics.car_coordinates_m[0],
+            ],
+            dtype=np.float32,
+        )
+        progress_m = float(reference.project_world_positions(position_xy_m[None, :])[0])
+        reference_position, reference_heading = reference.world_pose_at(progress_m)
+        displacement = position_xy_m - reference_position
+        lateral_error_m = float(
+            -displacement[0] * math.sin(reference_heading)
+            + displacement[1] * math.cos(reference_heading)
+        )
+        vehicle_heading_rad = _wrapped_angle(-snapshot.physics.heading_rad)
+        heading_error_rad = _wrapped_angle(vehicle_heading_rad - reference_heading)
+        lateral_alignment_error_m = lateral_error_m - self.reset_reference_lateral_offset_m
+        if abs(lateral_alignment_error_m) > self.reset_position_tolerance:
+            raise _ReferencePoseResetError(
+                "reference-pose reset was acknowledged but lateral alignment "
+                f"is {lateral_error_m:.3f} m for target "
+                f"{self.reset_reference_lateral_offset_m:.3f} m; tolerance="
+                f"{self.reset_position_tolerance:.3f} m"
+            )
+        if abs(heading_error_rad) > self.reset_reference_heading_tolerance_rad:
+            raise _ReferencePoseResetError(
+                "reference-pose reset was acknowledged but heading alignment "
+                f"is {heading_error_rad:.4f} rad; tolerance="
+                f"{self.reset_reference_heading_tolerance_rad:.4f} rad"
+            )
+        return lateral_error_m, heading_error_rad
+
+    @staticmethod
+    def _maximum_abs_slip_ratio(
+        snapshot: AssettoCorsaTelemetry,
+        slip_packet: SlipBridgePacket,
+    ) -> float:
+        raw = vanilla_ac_slip_features(slip_packet)
+        slip = stabilise_low_speed_slip(
+            snapshot.physics.speed_kmh / 3.6,
+            np.asarray(
+                [
+                    raw.front_slip_ratio,
+                    raw.rear_slip_ratio,
+                    raw.front_sideslip_angle_rad,
+                    raw.rear_sideslip_angle_rad,
+                ],
+                dtype=np.float32,
+            ),
+        )
+        return float(np.max(np.abs(slip[:2])))
+
+    @staticmethod
+    def _project_reference_progress(
+        snapshot: AssettoCorsaTelemetry,
+        reference: ReferenceTrajectory,
+    ) -> float:
+        position_xy_m = np.asarray(
+            [
+                snapshot.graphics.car_coordinates_m[2],
+                snapshot.graphics.car_coordinates_m[0],
+            ],
+            dtype=np.float32,
+        )
+        return float(reference.project_world_positions(position_xy_m[None, :])[0])
 
     def _wait_for_fresh_frame(
         self,
@@ -630,7 +1157,7 @@ class AssettoCorsaLiveBackend:
             return TerminationReason.LAP_COMPLETE
         if snapshot.physics.number_of_tyres_out > 0:
             return TerminationReason.OFF_TRACK
-        if self._stall_termination_due():
+        if self._stall_termination_due() or self._progress_stall_termination_due():
             return TerminationReason.STALLED
         if (
             frame.vehicle_state.speed_mps >= self.minimum_body_sideslip_termination_speed_mps
@@ -652,6 +1179,29 @@ class AssettoCorsaLiveBackend:
             self._consecutive_low_speed_steps = 0
         elif self._stall_detection_armed:
             self._consecutive_low_speed_steps += 1
+
+    def _update_progress_stall_detection(self, progress_m: float) -> None:
+        """Track net reference progress over the configured rolling window."""
+
+        self._progress_stall_progress_m.append(progress_m)
+        self._progress_stall_window_progress_m = None
+        if len(self._progress_stall_progress_m) < self.progress_stall_window_steps + 1:
+            return
+        if self._reference is None:
+            raise RuntimeError("progress-stall detection requires an active reference")
+        self._progress_stall_window_progress_m = wrapped_progress_delta(
+            self._progress_stall_progress_m[0],
+            self._progress_stall_progress_m[-1],
+            self._reference.track_length_m,
+        )
+
+    def _progress_stall_termination_due(self) -> bool:
+        return (
+            self.termination_method_variant
+            == UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT
+            and self._progress_stall_window_progress_m is not None
+            and self._progress_stall_window_progress_m < self.progress_stall_minimum_progress_m
+        )
 
     def _require_open(self) -> None:
         if self._closed:

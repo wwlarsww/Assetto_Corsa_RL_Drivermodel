@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 ParameterValue = str | int | float | bool | None
 MetricValue = int | float
@@ -18,9 +18,13 @@ class ExperimentTracker(Protocol):
     def active(self) -> bool:
         """Return whether at least one run is active."""
 
+        ...
+
     @property
     def run_id(self) -> str | None:
         """Return the currently active run identifier, if available."""
+
+        ...
 
     def start_run(
         self,
@@ -32,11 +36,15 @@ class ExperimentTracker(Protocol):
     ) -> str | None:
         """Start a top-level or nested experiment run."""
 
+        ...
+
     def log_parameters(
         self,
         parameters: Mapping[str, ParameterValue],
     ) -> None:
         """Log immutable run parameters."""
+
+        ...
 
     def log_metrics(
         self,
@@ -46,6 +54,8 @@ class ExperimentTracker(Protocol):
     ) -> None:
         """Log numeric metrics at one nonnegative step."""
 
+        ...
+
     def log_artifact(
         self,
         path: str | Path,
@@ -54,11 +64,15 @@ class ExperimentTracker(Protocol):
     ) -> None:
         """Upload one existing local file."""
 
+        ...
+
     def set_tags(
         self,
         tags: Mapping[str, str],
     ) -> None:
         """Add or update run tags."""
+
+        ...
 
     def end_run(
         self,
@@ -66,6 +80,8 @@ class ExperimentTracker(Protocol):
         status: str = "FINISHED",
     ) -> None:
         """Finish the currently active run."""
+
+        ...
 
 
 def flatten_parameters(
@@ -79,7 +95,8 @@ def flatten_parameters(
     for raw_name, value in values.items():
         name = f"{prefix}.{raw_name}" if prefix else str(raw_name)
         if isinstance(value, Mapping):
-            flattened.update(flatten_parameters(value, prefix=name))
+            nested = cast(Mapping[str, Any], value)
+            flattened.update(flatten_parameters(nested, prefix=name))
             continue
         flattened[name] = _parameter_value(value)
     return flattened

@@ -83,6 +83,21 @@ agent loop. The Python backend records its reset-time baseline and terminates
 on any later change. The app exposes no network input, policy control, damage,
 or vehicle geometry.
 
+The same Lua app accepts three bounded local reset commands. V1 implements the
+stationary `csp_hotlap_spawn_v1` baseline. V2 implements the named
+`csp_hotlap_reference_speed_v1` variant and carries a finite forward speed in
+`[0, 100]` m/s. V3 implements `csp_reference_pose_speed_v2` and additionally
+carries a bounded world pose derived from the fixed reference. CSP teleports to
+`ac.SpawnSet.HotlapStart`, repairs the car, optionally places and settles the V3
+pose, and holds the chassis at the requested forward speed for 0.5 s. It does
+not force identical wheel angular velocities; Assetto Corsa's tyre physics
+settles each wheel using its own rotation convention. The Python side obtains
+the moving-reset value from the arithmetic human mean profile at the measured
+spawn point; the Lua app never reads dataset files. Collision callbacks are
+ignored while reset is active and for 1.0 s after acknowledgement so placement
+and suspension transients do not become episode crashes. Later collisions
+increment the normal latched sequence immediately.
+
 Install it while Assetto Corsa is closed:
 
 ```powershell

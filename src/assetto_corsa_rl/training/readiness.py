@@ -9,17 +9,37 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from assetto_corsa_rl.ac_integration.ai_spline import AISplineFormatError, AssettoCorsaAISpline
 from assetto_corsa_rl.ac_integration.launcher import (
     configured_content_paths,
     configured_fast_lane_path,
     configured_track_model_path,
 )
+from assetto_corsa_rl.ac_integration.track_assets import sha256_file
 from assetto_corsa_rl.config import (
     ACTION_METHOD_VARIANT,
     BASELINE_METHOD_VARIANT,
+    LINEAR_BC_X360_CONTROL_PROFILE,
+    POLICY_PROTECTED_PPO_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
+    UNIFORM_BC_ACTION_LOSS_METHOD_VARIANT,
+    UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
     ProjectConfig,
+)
+from assetto_corsa_rl.data.bc_dataset import (
+    ACTI_MOTEC_CALIBRATION_NAME,
+    BC_DATASET_SCHEMA_VERSION,
+    MOTEC_STEERING_CONVERSION_NAME,
+    REFERENCE_FEATURE_CONTRACT,
+)
+from assetto_corsa_rl.models.predictor_target_normalization import (
+    predictor_target_normalization_method_from_metadata,
+    predictor_target_scale_m_from_metadata,
+)
+from assetto_corsa_rl.models.trajectory_contract import (
+    LEGACY_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
 )
 
 
@@ -66,6 +86,14 @@ def assess_training_readiness(
     stall_startup_grace_s = (
         config.environment.stall_startup_grace_steps / config.environment.control_frequency_hz
     )
+    progress_stall_description = (
+        f"; additionally terminates after {config.environment.progress_stall_window_s:.2f} s "
+        "with less than "
+        f"{config.environment.progress_stall_minimum_progress_m:.3f} m net reference progress"
+        if config.environment.termination_method_variant
+        == UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT
+        else ""
+    )
     checks = [
         ReadinessCheck(
             "method_variant",
@@ -88,12 +116,25 @@ def assess_training_readiness(
                 f"{config.environment.termination_method_variant}: stall detection arms after "
                 f"driving above {stall_speed_kmh:.3f} km/h and terminates after "
                 f"{stall_debounce_s:.2f} s continuously below it; a car that never drives off "
-                f"terminates after {stall_startup_grace_s:.2f} s; "
+                f"terminates after {stall_startup_grace_s:.2f} s"
+                f"{progress_stall_description}; "
                 + (
                     f"time-limit truncation after {config.experiment.max_episode_steps} steps"
                     if config.experiment.truncate_on_max_episode_steps
                     else "time-limit truncation disabled"
                 )
+            ),
+        )
+    )
+    checks.append(
+        ReadinessCheck(
+            "reference_reward",
+            "ok",
+            (
+                f"{config.rewards.reference_tracking_method_variant}: "
+                f"lateral_scale={config.rewards.reference_tracking_penalty_scale:.3f}, "
+                f"free_distance={config.rewards.reference_tracking_free_distance_m:.3f} m, "
+                f"heading_scale={config.rewards.reference_heading_penalty_scale:.3f}"
             ),
         )
     )
@@ -116,7 +157,7 @@ def assess_training_readiness(
             "ok" if config.assetto_corsa.automatic_shifting else "warning",
             (
                 "launched sessions temporarily enable AUTO_SHIFTER/AUTO_CLUTCH; "
-                "live validation verifies first gear and forward motion"
+                "live validation verifies a forward gear and forward motion"
                 if config.assetto_corsa.automatic_shifting
                 else "automatic shifting is disabled; this is not the automatic-gearbox baseline"
             ),
@@ -130,15 +171,24 @@ def assess_training_readiness(
             "acknowledged CSP reset adapters are implemented",
         )
     )
+    checks.append(
+        ReadinessCheck(
+            "live_step_timing",
+            "ok",
+            config.assetto_corsa.step_timing_method_variant,
+        )
+    )
     return TrainingReadinessReport(backend=backend, checks=tuple(checks))
 
 
 def _artefact_checks(config: ProjectConfig) -> list[ReadinessCheck]:
+    reference_path = Path(config.reference.artifact_path)
+    dataset_path = Path(config.behavioral_cloning.dataset_artifact_path)
     checks = [
-        _file_check("fixed_reference", Path(config.reference.artifact_path)),
+        _file_check("fixed_reference", reference_path),
         _file_check(
             "bc_dataset",
-            Path(config.behavioral_cloning.dataset_artifact_path),
+            dataset_path,
         ),
     ]
     checkpoint_path = Path(config.ppo.initial_checkpoint_path)
@@ -148,7 +198,92 @@ def _artefact_checks(config: ProjectConfig) -> list[ReadinessCheck]:
     if metrics_path.is_file():
         checks.append(_checkpoint_variant_check(config, metrics_path))
         checks.append(_predictor_quality_check(config, metrics_path))
+    if reference_path.is_file() and dataset_path.is_file() and metrics_path.is_file():
+        checks.append(
+            _bc_reference_compatibility_check(
+                reference_path=reference_path,
+                dataset_path=dataset_path,
+                metrics_path=metrics_path,
+            )
+        )
     return checks
+
+
+def _bc_reference_compatibility_check(
+    *,
+    reference_path: Path,
+    dataset_path: Path,
+    metrics_path: Path,
+) -> ReadinessCheck:
+    """Require dataset and BC checkpoint metrics to name the active reference hash."""
+
+    try:
+        active_sha256 = sha256_file(reference_path)
+        with np.load(dataset_path, allow_pickle=False) as archive:
+            dataset_metadata = json.loads(str(archive["metadata_json"].item()))
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        checkpoint_metadata = metrics["dataset_metadata"]
+        dataset_schema = int(dataset_metadata["schema_version"])
+        dataset_contract = str(dataset_metadata["reference_feature_contract"])
+        dataset_sha256 = str(dataset_metadata["reference_sha256"])
+        checkpoint_schema = int(checkpoint_metadata["schema_version"])
+        checkpoint_contract = str(checkpoint_metadata["reference_feature_contract"])
+        checkpoint_sha256 = str(checkpoint_metadata["reference_sha256"])
+        dataset_calibration = str(dataset_metadata["calibration"])
+        checkpoint_calibration = str(checkpoint_metadata["calibration"])
+        dataset_steering = str(dataset_metadata["steering_conversion"])
+        checkpoint_steering = str(checkpoint_metadata["steering_conversion"])
+        dataset_predictor_normalization = predictor_target_normalization_method_from_metadata(
+            dataset_metadata
+        )
+        checkpoint_predictor_normalization = predictor_target_normalization_method_from_metadata(
+            checkpoint_metadata
+        )
+        dataset_predictor_scale_m = predictor_target_scale_m_from_metadata(dataset_metadata)
+        checkpoint_predictor_scale_m = predictor_target_scale_m_from_metadata(checkpoint_metadata)
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        OSError,
+        UnicodeError,
+    ) as error:
+        return ReadinessCheck(
+            "bc_reference_compatibility",
+            "error",
+            f"cannot verify BC/reference provenance; rebuild dataset and checkpoint: {error}",
+        )
+
+    matches = (
+        dataset_schema == BC_DATASET_SCHEMA_VERSION
+        and checkpoint_schema == BC_DATASET_SCHEMA_VERSION
+        and dataset_contract == REFERENCE_FEATURE_CONTRACT
+        and checkpoint_contract == REFERENCE_FEATURE_CONTRACT
+        and dataset_sha256 == active_sha256
+        and checkpoint_sha256 == active_sha256
+        and dataset_calibration == ACTI_MOTEC_CALIBRATION_NAME
+        and checkpoint_calibration == ACTI_MOTEC_CALIBRATION_NAME
+        and dataset_steering == MOTEC_STEERING_CONVERSION_NAME
+        and checkpoint_steering == MOTEC_STEERING_CONVERSION_NAME
+        and dataset_predictor_normalization == checkpoint_predictor_normalization
+        and np.allclose(
+            dataset_predictor_scale_m,
+            checkpoint_predictor_scale_m,
+            rtol=0.0,
+            atol=1e-6,
+        )
+    )
+    return ReadinessCheck(
+        "bc_reference_compatibility",
+        "ok" if matches else "error",
+        (
+            f"BC dataset/checkpoint match active reference sha256={active_sha256}"
+            if matches
+            else "BC dataset/checkpoint use a stale reference or steering calibration; "
+            "rebuild both before PPO"
+        ),
+    )
 
 
 def _file_check(name: str, path: Path) -> ReadinessCheck:
@@ -204,6 +339,23 @@ def _checkpoint_variant_check(
         payload = json.loads(metrics_path.read_text(encoding="utf-8"))
         method_variant = str(payload["method_variant"])
         action_method_variant = str(payload["action_method_variant"])
+        action_loss_method_variant = str(
+            payload.get(
+                "action_loss_method_variant",
+                UNIFORM_BC_ACTION_LOSS_METHOD_VARIANT,
+            )
+        )
+        steering_loss_weight = float(payload.get("steering_loss_weight", 1.0))
+        steering_robustness_method = str(
+            payload.get("steering_robustness_method_variant", "none_v1")
+        )
+        steering_robustness_weight = float(payload.get("steering_robustness_loss_weight", 1.0))
+        predictor_target_normalization = str(
+            payload.get(
+                "predictor_target_normalization_method_variant",
+                LEGACY_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
+            )
+        )
     except (KeyError, TypeError, json.JSONDecodeError, OSError, UnicodeError) as error:
         return ReadinessCheck(
             "checkpoint_variant",
@@ -214,17 +366,32 @@ def _checkpoint_variant_check(
     acceptable_method_variants = {
         expected,
     }
-    if expected == STABILIZED_PPO_METHOD_VARIANT:
+    if expected in {
+        STABILIZED_PPO_METHOD_VARIANT,
+        POLICY_PROTECTED_PPO_METHOD_VARIANT,
+    }:
         acceptable_method_variants.add(BASELINE_METHOD_VARIANT)
     matches = (
         method_variant in acceptable_method_variants
         and action_method_variant == ACTION_METHOD_VARIANT
+        and action_loss_method_variant == config.behavioral_cloning.action_loss_method_variant
+        and steering_loss_weight == config.behavioral_cloning.steering_loss_weight
+        and steering_robustness_method
+        == config.behavioral_cloning.steering_robustness_method_variant
+        and steering_robustness_weight == config.behavioral_cloning.steering_robustness_loss_weight
+        and predictor_target_normalization
+        == config.behavioral_cloning.predictor_target_normalization_method_variant
     )
     message = (
-        f"BC checkpoint variants match {method_variant}/{ACTION_METHOD_VARIANT}"
+        f"BC checkpoint variants match {method_variant}/{ACTION_METHOD_VARIANT}/"
+        f"{action_loss_method_variant}/{steering_robustness_method}/"
+        f"{predictor_target_normalization}"
         if matches
-        else "BC checkpoint uses incompatible method/action variants; rebuild it for "
-        f"{expected!r}/{ACTION_METHOD_VARIANT!r}"
+        else "BC checkpoint uses incompatible method/action/loss variants; rebuild it for "
+        f"{expected!r}/{ACTION_METHOD_VARIANT!r}/"
+        f"{config.behavioral_cloning.action_loss_method_variant!r}/"
+        f"{config.behavioral_cloning.steering_robustness_method_variant!r}/"
+        f"{config.behavioral_cloning.predictor_target_normalization_method_variant!r}"
     )
     return ReadinessCheck(
         "checkpoint_variant",
@@ -259,8 +426,17 @@ def _installation_checks(config: ProjectConfig) -> list[ReadinessCheck]:
         checks.append(_reset_bridge_capability_check(bridge))
     if collision_bridge.is_file():
         checks.append(_collision_bridge_capability_check(collision_bridge))
-        if config.assetto_corsa.reset_backend == "csp_hotlap_spawn_v1":
-            checks.append(_hotlap_reset_bridge_capability_check(collision_bridge))
+        if config.assetto_corsa.reset_backend in {
+            "csp_hotlap_spawn_v1",
+            "csp_hotlap_reference_speed_v1",
+            "csp_reference_pose_speed_v2",
+        }:
+            checks.append(
+                _hotlap_reset_bridge_capability_check(
+                    collision_bridge,
+                    method_variant=config.assetto_corsa.reset_backend,
+                )
+            )
     return checks
 
 
@@ -321,7 +497,11 @@ def _collision_bridge_capability_check(path: Path) -> ReadinessCheck:
     )
 
 
-def _hotlap_reset_bridge_capability_check(path: Path) -> ReadinessCheck:
+def _hotlap_reset_bridge_capability_check(
+    path: Path,
+    *,
+    method_variant: str = "csp_hotlap_spawn_v1",
+) -> ReadinessCheck:
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
@@ -330,21 +510,63 @@ def _hotlap_reset_bridge_capability_check(path: Path) -> ReadinessCheck:
             "error",
             f"cannot inspect {path}: {error}",
         )
-    capable = (
-        "ACRL_HOTLAP_RESET_COMMAND_V1" in source
-        and "physics.teleportCarTo(0, ac.SpawnSet.HotlapStart)" in source
+    shared_capabilities = (
+        "physics.teleportCarTo(0, ac.SpawnSet.HotlapStart)" in source
         and "physics.resetCarState(0)" in source
-        and "physics.engageGear(0, 1)" in source
     )
+    if method_variant == "csp_reference_pose_speed_v2":
+        capable = (
+            shared_capabilities
+            and "ACRL_HOTLAP_RESET_COMMAND_V3" in source
+            and "physics.setCarPosition" in source
+            and "pendingReset.targetHeadingRad" in source
+            and "local placementDirection = -velocityDirection" in source
+            and "pendingReset.posePlaced" in source
+            and "resetCollisionSuppressionDuration" in source
+            and "collisionSuppressionRemaining" in source
+            and "physics.setWheelAngularVelocity" in source
+            and "physics.setCarVelocity" in source
+            and "pendingReset.velocityHold" in source
+        )
+        success_message = (
+            "installed CSP Lua app supports reference-pose-aligned, human-speed HOTLAP_START resets"
+        )
+        failure_message = (
+            "installed CSP Lua app lacks reference-pose/speed HOTLAP_START reset support"
+        )
+    elif method_variant == "csp_hotlap_reference_speed_v1":
+        capable = (
+            shared_capabilities
+            and "ACRL_HOTLAP_RESET_COMMAND_V2" in source
+            and "ac.getCar(0)" in source
+            and "physics.setWheelAngularVelocity" in source
+            and "physics.setCarVelocity" in source
+            and "referenceSpeedHoldDuration" in source
+            and "pendingReset.velocityHold" in source
+        )
+        success_message = (
+            "installed CSP Lua app supports multi-frame human-reference-speed HOTLAP_START resets"
+        )
+        failure_message = (
+            "installed CSP Lua app lacks multi-frame reference-speed HOTLAP_START reset support"
+        )
+    else:
+        capable = (
+            shared_capabilities
+            and "ACRL_HOTLAP_RESET_COMMAND_V1" in source
+            and "physics.engageGear(0, 1)" in source
+        )
+        success_message = (
+            "installed CSP Lua app supports acknowledged deterministic HOTLAP_START "
+            "resets with first-gear engagement"
+        )
+        failure_message = (
+            "installed CSP Lua app lacks deterministic HOTLAP_START reset/gear support"
+        )
     return ReadinessCheck(
         "hotlap_reset_bridge_capability",
         "ok" if capable else "error",
-        (
-            "installed CSP Lua app supports acknowledged deterministic HOTLAP_START resets "
-            "with first-gear engagement"
-            if capable
-            else "installed CSP Lua app lacks deterministic HOTLAP_START reset/gear support"
-        ),
+        success_message if capable else failure_message,
     )
 
 
@@ -379,6 +601,25 @@ def _control_checks(config: ProjectConfig) -> list[ReadinessCheck]:
                     ),
                 )
             )
+            if input_method == "X360":
+                linear_profile = (
+                    config.assetto_corsa.x360_control_profile == LINEAR_BC_X360_CONTROL_PROFILE
+                )
+                checks.append(
+                    ReadinessCheck(
+                        "x360_control_profile",
+                        "ok",
+                        (
+                            "launched sessions temporarily apply the BC-calibrated linear "
+                            "X360 steering profile; steering output gain="
+                            f"{config.assetto_corsa.steering_output_gain:.3f}"
+                            if linear_profile
+                            else "launched sessions preserve the user's X360 steering curve; "
+                            "steering output gain="
+                            f"{config.assetto_corsa.steering_output_gain:.3f}"
+                        ),
+                    )
+                )
     package_available = importlib.util.find_spec("vgamepad") is not None
     checks.append(
         ReadinessCheck(

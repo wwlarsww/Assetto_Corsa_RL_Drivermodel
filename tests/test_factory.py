@@ -9,7 +9,7 @@ import pytest
 from conftest import FastLaneFactory
 
 from assetto_corsa_rl.ac_integration.live_backend import AssettoCorsaLiveBackend
-from assetto_corsa_rl.config import ProjectConfig
+from assetto_corsa_rl.config import TERMINATION_METHOD_VARIANT, ProjectConfig
 from assetto_corsa_rl.envs.factory import create_assetto_corsa_environment
 from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES, OBSERVATION_SIZE
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
@@ -77,8 +77,22 @@ def test_live_factory_loads_fixed_artifacts_before_connecting(
     assert connect_arguments["expected_car_id"] == "bmw_z4_gt3"
     assert connect_arguments["expected_track_id"] == "monza"
     assert connect_arguments["steering_output_sign"] == -1.0
+    assert connect_arguments["steering_output_gain"] == pytest.approx(1.0)
+    assert connect_arguments["termination_method_variant"] == TERMINATION_METHOD_VARIANT
+    assert connect_arguments["progress_stall_window_s"] == pytest.approx(1.0)
+    assert connect_arguments["progress_stall_minimum_progress_m"] == pytest.approx(2.0)
     assert connect_arguments["reset_collision_quiescence_s"] == pytest.approx(0.5)
     assert connect_arguments["control_writer"] is None
     assert connect_arguments["track_geometry"].track_length_m == pytest.approx(1000.0)
     environment.close()
     assert backend.closed
+
+    reference_speed_config = replace(
+        config,
+        assetto_corsa=replace(
+            config.assetto_corsa,
+            reset_backend="csp_hotlap_reference_speed_v1",
+        ),
+    )
+    with pytest.raises(ValueError, match="human_mean_speed_mps"):
+        create_assetto_corsa_environment(reference_speed_config)

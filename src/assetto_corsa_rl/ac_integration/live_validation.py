@@ -16,6 +16,8 @@ import numpy as np
 
 from assetto_corsa_rl.envs.environment import AssettoCorsaEnv
 
+REFERENCE_SPEED_RESET_METHOD_VARIANT = "csp_hotlap_reference_speed_v1"
+
 
 @dataclass(frozen=True, slots=True)
 class LiveValidationIssue:
@@ -197,6 +199,8 @@ def validate_live_environment(  # noqa: PLR0912, PLR0915 - staged acceptance rep
     maximum_reset_lateral_offset_m: float = 5.0,
     maximum_reset_heading_error_rad: float = 0.15,
     maximum_reset_speed_mps: float = 0.5,
+    reference_start_speed_tolerance_mps: float = 2.0,
+    control_frequency_hz: float = 20.0,
     expected_simulator_steering_sign: float = 1.0,
     drive_off_steps: int = 40,
     drive_off_throttle: float = 0.35,
@@ -221,6 +225,8 @@ def validate_live_environment(  # noqa: PLR0912, PLR0915 - staged acceptance rep
         raise ValueError("drive-off acceptance thresholds must be positive")
     if minimum_forward_gear < 1:
         raise ValueError("minimum_forward_gear must be at least one")
+    if not math.isfinite(control_frequency_hz) or control_frequency_hz <= 0:
+        raise ValueError("control_frequency_hz must be finite and positive")
     if (
         min(
             reset_position_tolerance_m,
@@ -235,6 +241,7 @@ def validate_live_environment(  # noqa: PLR0912, PLR0915 - staged acceptance rep
             maximum_reset_lateral_offset_m,
             maximum_reset_heading_error_rad,
             maximum_reset_speed_mps,
+            reference_start_speed_tolerance_mps,
         )
         <= 0
     ):
@@ -287,22 +294,34 @@ def validate_live_environment(  # noqa: PLR0912, PLR0915 - staged acceptance rep
         maximum_lateral = max(abs(sample.lateral_offset_m) for sample in reset_samples)
         maximum_heading_error = max(abs(sample.heading_error_rad) for sample in reset_samples)
         maximum_speed = max(sample.speed_mps for sample in reset_samples)
-        if position_spread > reset_position_tolerance_m:
+        effective_position_tolerance_m = reset_position_tolerance_m
+        effective_progress_tolerance_m = reset_progress_tolerance_m
+        if reset_method_variant == REFERENCE_SPEED_RESET_METHOD_VARIANT:
+            one_control_frame_m = maximum_speed / control_frequency_hz
+            effective_position_tolerance_m = max(
+                effective_position_tolerance_m,
+                one_control_frame_m,
+            )
+            effective_progress_tolerance_m = max(
+                effective_progress_tolerance_m,
+                one_control_frame_m,
+            )
+        if position_spread > effective_position_tolerance_m:
             issues.append(
                 LiveValidationIssue(
                     "reset",
                     "position_not_repeatable",
                     f"reset position spread {position_spread:.3f} m exceeds "
-                    f"{reset_position_tolerance_m:.3f} m",
+                    f"{effective_position_tolerance_m:.3f} m",
                 )
             )
-        if progress_spread > reset_progress_tolerance_m:
+        if progress_spread > effective_progress_tolerance_m:
             issues.append(
                 LiveValidationIssue(
                     "reset",
                     "progress_not_repeatable",
                     f"reset progress spread {progress_spread:.3f} m exceeds "
-                    f"{reset_progress_tolerance_m:.3f} m",
+                    f"{effective_progress_tolerance_m:.3f} m",
                 )
             )
         if heading_spread > reset_heading_tolerance_rad:
@@ -332,7 +351,34 @@ def validate_live_environment(  # noqa: PLR0912, PLR0915 - staged acceptance rep
                     f"{maximum_reset_heading_error_rad:.4f} rad",
                 )
             )
-        if maximum_speed > maximum_reset_speed_mps:
+        if reset_method_variant == REFERENCE_SPEED_RESET_METHOD_VARIANT:
+            try:
+                maximum_speed_error = max(
+                    abs(
+                        sample.speed_mps
+                        - environment.active_reference.human_mean_speed_at(sample.progress_m)
+                    )
+                    for sample in reset_samples
+                )
+            except (AttributeError, ValueError) as error:
+                issues.append(
+                    LiveValidationIssue(
+                        "reset",
+                        "human_mean_start_speed_unavailable",
+                        str(error),
+                    )
+                )
+            else:
+                if maximum_speed_error > reference_start_speed_tolerance_mps:
+                    issues.append(
+                        LiveValidationIssue(
+                            "reset",
+                            "reference_start_speed_mismatch",
+                            f"maximum reset-speed error {maximum_speed_error:.3f} m/s "
+                            f"exceeds {reference_start_speed_tolerance_mps:.3f} m/s",
+                        )
+                    )
+        elif maximum_speed > maximum_reset_speed_mps:
             issues.append(
                 LiveValidationIssue(
                     "reset",

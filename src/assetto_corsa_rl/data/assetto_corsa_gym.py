@@ -113,7 +113,7 @@ def download_initial_dataset(
     """Download and verify raw human data plus the official baseline line."""
 
     try:
-        from huggingface_hub import (  # noqa: PLC0415
+        from huggingface_hub import (  # type: ignore[import-not-found]  # noqa: PLC0415
             HfApi,
             snapshot_download,  # pyright: ignore[reportUnknownVariableType]
         )

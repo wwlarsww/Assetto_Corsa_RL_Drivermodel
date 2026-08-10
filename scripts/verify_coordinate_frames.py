@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 import numpy as np
 
@@ -60,6 +61,7 @@ def _symmetric_p95(first: np.ndarray, second: np.ndarray) -> float:
 
 
 def main() -> int:
+    """Verify static and dynamic coordinate frames."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--geometry", type=Path, required=True)
     parser.add_argument("--reference", type=Path, required=True)
@@ -131,7 +133,7 @@ def main() -> int:
 
     report["status"] = "PASS" if not errors else "FAIL"
     report["errors"] = errors
-    print(json.dumps(report, indent=2, sort_keys=True))
+    sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return 0 if not errors else 1
 
 

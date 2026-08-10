@@ -8,15 +8,32 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Self, TypeVar
 
-from assetto_corsa_rl.models.trajectory_contract import BEZIER_TRAJECTORY_CODEC
+from assetto_corsa_rl.models.trajectory_contract import (
+    BEZIER_TRAJECTORY_CODEC,
+    LEGACY_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
+    TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
+)
 
 ConfigSection = TypeVar("ConfigSection")
 BASELINE_METHOD_VARIANT = "ai_spline_absolute_v1"
 STABILIZED_PPO_METHOD_VARIANT = "ai_spline_absolute_stabilized_v2"
+POLICY_PROTECTED_PPO_METHOD_VARIANT = "ai_spline_absolute_policy_protected_v3"
 ACTION_METHOD_VARIANT = "absolute_bounded_v1"
 TERMINATION_METHOD_VARIANT = "any_tyre_armed_stall_v1"
+UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT = "unrecoverable_progress_stall_v2"
 PREDICTION_REWARD_METHOD_VARIANT = "discounted_progress_increments_v1"
 KL_CONTROL_METHOD_VARIANT = "target_band_learning_rate_v1"
+CURRENT_REFERENCE_TRACKING_METHOD_VARIANT = "current_distance_quadratic_v1"
+SUCCESSOR_REFERENCE_TRACKING_METHOD_VARIANT = "successor_progress_alignment_v1"
+LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT = "observation_to_post_hold_v1"
+PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT = "pre_action_progress_baseline_v1"
+PRESERVE_USER_X360_CONTROL_PROFILE = "preserve_user_x360_v1"
+LINEAR_BC_X360_CONTROL_PROFILE = "linear_bc_calibrated_x360_v2"
+UNIFORM_BC_ACTION_LOSS_METHOD_VARIANT = "uniform_action_mse_v1"
+STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT = "steering_weighted_action_mse_v1"
+STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT = "straight_steering_weighted_action_mse_v2"
+NO_BC_STEERING_ROBUSTNESS_METHOD_VARIANT = "none_v1"
+PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT = "permuted_causal_feedback_steering_v1"
 
 
 def _positive(name: str, value: float | int) -> None:
@@ -36,6 +53,21 @@ def _positive_integer(name: str, value: object) -> None:
         raise ValueError(f"{name} must be positive, got {value!r}")
 
 
+def _non_negative_integer(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer, got {value!r} ({type(value).__name__})")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value!r}")
+
+
+def _is_finite_real(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(float(value))
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
     """Run-level settings that influence reproducibility and persistence."""
@@ -47,10 +79,7 @@ class ExperimentConfig:
 
     def __post_init__(self) -> None:
         _positive_integer("experiment.max_episode_steps", self.max_episode_steps)
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
-            raise TypeError("experiment.seed must be an integer")
-        if self.seed < 0:
-            raise ValueError("experiment.seed must be non-negative")
+        _non_negative_integer("experiment.seed", self.seed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +94,8 @@ class EnvironmentConfig:
     minimum_speed_mps: float = 5.0 / 3.6
     stall_startup_grace_steps: int = 25
     stall_debounce_steps: int = 5
+    progress_stall_window_s: float = 1.0
+    progress_stall_minimum_progress_m: float = 2.0
     initial_combined_pedal: float = 1.0
     critical_body_sideslip_angle_deg: float = 20.0
     minimum_body_sideslip_termination_speed_mps: float = 5.0
@@ -82,14 +113,24 @@ class EnvironmentConfig:
             _positive(f"environment.{name}", getattr(self, name))
         if self.minimum_speed_mps >= self.initial_speed_mps:
             raise ValueError("minimum speed must be lower than the initial speed")
-        if self.termination_method_variant != TERMINATION_METHOD_VARIANT:
+        if self.termination_method_variant not in {
+            TERMINATION_METHOD_VARIANT,
+            UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+        }:
             raise ValueError(
-                f"environment.termination_method_variant must be {TERMINATION_METHOD_VARIANT!r}"
+                "environment.termination_method_variant must be "
+                f"{TERMINATION_METHOD_VARIANT!r} or "
+                f"{UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT!r}"
             )
         _positive_integer("environment.stall_debounce_steps", self.stall_debounce_steps)
         _positive_integer(
             "environment.stall_startup_grace_steps",
             self.stall_startup_grace_steps,
+        )
+        _positive("environment.progress_stall_window_s", self.progress_stall_window_s)
+        _positive(
+            "environment.progress_stall_minimum_progress_m",
+            self.progress_stall_minimum_progress_m,
         )
         if not -1.0 <= self.initial_combined_pedal <= 1.0:
             raise ValueError("initial_combined_pedal must lie in [-1, 1]")
@@ -110,13 +151,19 @@ class ActionConfig:
 
 @dataclass(frozen=True, slots=True)
 class RewardConfig:
-    """Progress and named rollout prediction-reward configuration."""
+    """Progress, reference tracking and prediction reward configuration."""
 
     progress_scale: float = 1.0
     termination_penalty: float = -100.0
     prediction_method_variant: str = PREDICTION_REWARD_METHOD_VARIANT
     prediction_progress_scale: float = 0.01
     prediction_horizon_discount: float = 0.5
+    reference_tracking_method_variant: str = CURRENT_REFERENCE_TRACKING_METHOD_VARIANT
+    reference_tracking_penalty_scale: float = 0.0
+    reference_tracking_free_distance_m: float = 2.5
+    reference_tracking_distance_scale_m: float = 2.0
+    reference_heading_penalty_scale: float = 0.0
+    reference_heading_scale_rad: float = math.pi / 18.0
 
     def __post_init__(self) -> None:
         _positive("rewards.progress_scale", self.progress_scale)
@@ -130,6 +177,35 @@ class RewardConfig:
             raise ValueError("prediction_progress_scale must be non-negative")
         if not 0.0 < self.prediction_horizon_discount <= 1.0:
             raise ValueError("prediction_horizon_discount must lie in (0, 1]")
+        if self.reference_tracking_method_variant not in {
+            CURRENT_REFERENCE_TRACKING_METHOD_VARIANT,
+            SUCCESSOR_REFERENCE_TRACKING_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                "rewards.reference_tracking_method_variant must be "
+                f"{CURRENT_REFERENCE_TRACKING_METHOD_VARIANT!r} or "
+                f"{SUCCESSOR_REFERENCE_TRACKING_METHOD_VARIANT!r}"
+            )
+        _non_negative(
+            "rewards.reference_tracking_penalty_scale",
+            self.reference_tracking_penalty_scale,
+        )
+        _non_negative(
+            "rewards.reference_tracking_free_distance_m",
+            self.reference_tracking_free_distance_m,
+        )
+        _positive(
+            "rewards.reference_tracking_distance_scale_m",
+            self.reference_tracking_distance_scale_m,
+        )
+        _non_negative(
+            "rewards.reference_heading_penalty_scale",
+            self.reference_heading_penalty_scale,
+        )
+        _positive(
+            "rewards.reference_heading_scale_rad",
+            self.reference_heading_scale_rad,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,6 +326,13 @@ class BehavioralCloningConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 1e-5
     predictor_loss_weight: float = 0.0
+    predictor_target_normalization_method_variant: str = (
+        LEGACY_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT
+    )
+    action_loss_method_variant: str = UNIFORM_BC_ACTION_LOSS_METHOD_VARIANT
+    steering_loss_weight: float = 1.0
+    steering_robustness_method_variant: str = NO_BC_STEERING_ROBUSTNESS_METHOD_VARIANT
+    steering_robustness_loss_weight: float = 1.0
     validation_fraction: float = 0.15
     test_fraction: float = 0.15
     minimum_speed_mps: float = 0.1
@@ -273,6 +356,43 @@ class BehavioralCloningConfig:
             self.minimum_speed_mps,
         )
         _non_negative("behavioral_cloning.predictor_loss_weight", self.predictor_loss_weight)
+        if self.predictor_target_normalization_method_variant not in {
+            LEGACY_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
+            TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                "behavioral_cloning.predictor_target_normalization_method_variant must be "
+                f"{LEGACY_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT!r} or "
+                f"{TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT!r}"
+            )
+        if self.action_loss_method_variant not in {
+            UNIFORM_BC_ACTION_LOSS_METHOD_VARIANT,
+            STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT,
+            STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                "behavioral_cloning.action_loss_method_variant must be "
+                f"{UNIFORM_BC_ACTION_LOSS_METHOD_VARIANT!r} or "
+                f"{STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT!r} or "
+                f"{STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT!r}"
+            )
+        _positive(
+            "behavioral_cloning.steering_loss_weight",
+            self.steering_loss_weight,
+        )
+        if self.steering_robustness_method_variant not in {
+            NO_BC_STEERING_ROBUSTNESS_METHOD_VARIANT,
+            PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                "behavioral_cloning.steering_robustness_method_variant must be "
+                f"{NO_BC_STEERING_ROBUSTNESS_METHOD_VARIANT!r} or "
+                f"{PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT!r}"
+            )
+        _positive(
+            "behavioral_cloning.steering_robustness_loss_weight",
+            self.steering_robustness_loss_weight,
+        )
         if self.weight_decay < 0:
             raise ValueError("behavioral_cloning.weight_decay must be non-negative")
         for name in ("validation_fraction", "test_fraction"):
@@ -298,9 +418,9 @@ class PPOConfig:
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     value_loss_coefficient: float = 0.5
-    entropy_coefficient: float = 0.0
+    entropy_coefficient: float = 0.01
     predictor_loss_coefficient: float = 0.0
-    initial_log_std_after_bc: float = -1.5
+    initial_log_std_after_bc: float = -1.0
     kl_control_method_variant: str = KL_CONTROL_METHOD_VARIANT
     kl_target: float = 0.01
     kl_tolerance: float = 0.003
@@ -321,8 +441,15 @@ class PPOConfig:
 
 
 def _validate_ppo_identity_and_sizes(config: PPOConfig) -> None:
-    if config.method_variant != STABILIZED_PPO_METHOD_VARIANT:
-        raise ValueError(f"ppo.method_variant must be {STABILIZED_PPO_METHOD_VARIANT!r}")
+    if config.method_variant not in {
+        STABILIZED_PPO_METHOD_VARIANT,
+        POLICY_PROTECTED_PPO_METHOD_VARIANT,
+    }:
+        raise ValueError(
+            "ppo.method_variant must be "
+            f"{STABILIZED_PPO_METHOD_VARIANT!r} or "
+            f"{POLICY_PROTECTED_PPO_METHOD_VARIANT!r}"
+        )
     for name in (
         "total_environment_steps",
         "rollout_steps",
@@ -387,10 +514,7 @@ class EvaluationConfig:
     def __post_init__(self) -> None:
         _positive_integer("evaluation.interval_updates", self.interval_updates)
         _positive_integer("evaluation.episodes", self.episodes)
-        if isinstance(self.seed_offset, bool) or not isinstance(self.seed_offset, int):
-            raise TypeError("evaluation.seed_offset must be an integer")
-        if self.seed_offset < 0:
-            raise ValueError("evaluation.seed_offset must be non-negative")
+        _non_negative_integer("evaluation.seed_offset", self.seed_offset)
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,16 +524,25 @@ class AssettoCorsaRuntimeConfig:
     installation_directory: str = r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
     controls_configuration_path: str = ""
     control_backend: str = "vgamepad"
+    x360_control_profile: str = PRESERVE_USER_X360_CONTROL_PROFILE
     reset_backend: str = "csp_hotlap_spawn_v1"
     crash_termination: str = "csp_collision_latched_v1"
     telemetry_calibration: str = "assetto_corsa_gym_world_v1"
+    step_timing_method_variant: str = LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT
     automatic_shifting: bool = True
     steering_output_sign: float = -1.0
+    steering_output_gain: float = 1.0
     frame_timeout_s: float = 2.0
     reset_timeout_s: float = 10.0
     reset_position_tolerance: float = 0.05
+    reset_reference_lateral_offset_m: float = 0.0
+    reset_reference_heading_tolerance_rad: float = 0.05
     reset_speed_threshold_mps: float = 5.0
+    reset_reference_speed_tolerance_mps: float = 2.0
     reset_stable_frames: int = 3
+    reset_max_abs_slip_ratio: float = 0.2
+    reset_slip_stable_frames: int = 1
+    reset_reference_speed_max_attempts: int = 1
     reset_collision_quiescence_s: float = 0.5
     poll_interval_s: float = 0.001
     launch_timeout_s: float = 120.0
@@ -420,13 +553,25 @@ class AssettoCorsaRuntimeConfig:
             raise ValueError("assetto_corsa.installation_directory must not be empty")
         if self.control_backend not in {"vgamepad"}:
             raise ValueError("assetto_corsa.control_backend must be 'vgamepad'")
+        if self.x360_control_profile not in {
+            PRESERVE_USER_X360_CONTROL_PROFILE,
+            LINEAR_BC_X360_CONTROL_PROFILE,
+        }:
+            raise ValueError(
+                "assetto_corsa.x360_control_profile must be "
+                f"{PRESERVE_USER_X360_CONTROL_PROFILE!r} or "
+                f"{LINEAR_BC_X360_CONTROL_PROFILE!r}"
+            )
         if self.reset_backend not in {
             "csp_hotlap_spawn_v1",
+            "csp_hotlap_reference_speed_v1",
+            "csp_reference_pose_speed_v2",
             "python_ext_reset_car_v1",
         }:
             raise ValueError(
-                "assetto_corsa.reset_backend must be 'csp_hotlap_spawn_v1' or "
-                "'python_ext_reset_car_v1'"
+                "assetto_corsa.reset_backend must be 'csp_hotlap_spawn_v1', "
+                "'csp_hotlap_reference_speed_v1', 'csp_reference_pose_speed_v2' "
+                "or 'python_ext_reset_car_v1'"
             )
         if self.crash_termination != "csp_collision_latched_v1":
             raise ValueError("assetto_corsa.crash_termination must be 'csp_collision_latched_v1'")
@@ -434,13 +579,37 @@ class AssettoCorsaRuntimeConfig:
             raise ValueError(
                 "assetto_corsa.telemetry_calibration must be 'assetto_corsa_gym_world_v1'"
             )
+        if self.step_timing_method_variant not in {
+            LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT,
+            PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT,
+        }:
+            raise ValueError(
+                "assetto_corsa.step_timing_method_variant must be "
+                f"{LEGACY_LIVE_STEP_TIMING_METHOD_VARIANT!r} or "
+                f"{PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT!r}"
+            )
         if self.steering_output_sign not in {-1.0, 1.0}:
             raise ValueError("assetto_corsa.steering_output_sign must be -1.0 or 1.0")
+        if (
+            not _is_finite_real(self.steering_output_gain)
+            or not 0.0 < self.steering_output_gain <= 2.0
+        ):
+            raise ValueError("assetto_corsa.steering_output_gain must be finite and lie in (0, 2]")
+        if (
+            not math.isfinite(self.reset_reference_lateral_offset_m)
+            or abs(self.reset_reference_lateral_offset_m) > 5.0
+        ):
+            raise ValueError(
+                "assetto_corsa.reset_reference_lateral_offset_m must be finite and lie in [-5, 5]"
+            )
         for name in (
             "frame_timeout_s",
             "reset_timeout_s",
             "reset_position_tolerance",
+            "reset_reference_heading_tolerance_rad",
             "reset_speed_threshold_mps",
+            "reset_reference_speed_tolerance_mps",
+            "reset_max_abs_slip_ratio",
             "poll_interval_s",
             "launch_timeout_s",
             "launch_poll_interval_s",
@@ -449,6 +618,14 @@ class AssettoCorsaRuntimeConfig:
         _positive_integer(
             "assetto_corsa.reset_stable_frames",
             self.reset_stable_frames,
+        )
+        _positive_integer(
+            "assetto_corsa.reset_slip_stable_frames",
+            self.reset_slip_stable_frames,
+        )
+        _positive_integer(
+            "assetto_corsa.reset_reference_speed_max_attempts",
+            self.reset_reference_speed_max_attempts,
         )
         _non_negative(
             "assetto_corsa.reset_collision_quiescence_s",

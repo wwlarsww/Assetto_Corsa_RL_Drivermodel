@@ -1,5 +1,10 @@
+import math
+
 import numpy as np
 
+from assetto_corsa_rl.config import (
+    UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+)
 from assetto_corsa_rl.envs.mock_backend import MockAssettoCorsaBackend
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
 from assetto_corsa_rl.types import TerminationReason
@@ -58,3 +63,29 @@ def test_mock_uses_short_startup_fallback_if_car_never_moves() -> None:
     assert first.termination_reason is None
     assert second.termination_reason is None
     assert third.termination_reason is TerminationReason.STALLED
+
+
+def test_mock_progress_stall_terminates_sideways_motion_after_window() -> None:
+    backend = MockAssettoCorsaBackend(
+        control_frequency_hz=10.0,
+        track_half_width_m=100.0,
+        termination_method_variant=UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+        progress_stall_window_s=0.3,
+        progress_stall_minimum_progress_m=2.0,
+        critical_body_sideslip_angle_deg=90.0,
+    )
+    backend.reset(
+        seed=None,
+        reference=ReferenceTrajectory.constant(track_length_m=1000.0, speed_mps=20.0),
+    )
+    backend._heading_error_rad = math.pi / 2.0
+
+    first = backend.step(np.zeros(2, dtype=np.float32))
+    second = backend.step(np.zeros(2, dtype=np.float32))
+    third = backend.step(np.zeros(2, dtype=np.float32))
+
+    assert first.termination_reason is None
+    assert second.termination_reason is None
+    assert third.termination_reason is TerminationReason.STALLED
+    assert third.diagnostics is not None
+    assert third.diagnostics["progress_stall_triggered"] is True

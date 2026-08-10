@@ -33,6 +33,9 @@ class _Reader:
         self.index += 1
         return frame
 
+    def close(self) -> None:
+        """Match the live telemetry-reader protocol used by the backend."""
+
 
 def _telemetry(
     physics_packet_id: int,

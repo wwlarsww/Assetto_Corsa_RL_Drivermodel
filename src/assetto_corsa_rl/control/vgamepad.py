@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,14 @@ from assetto_corsa_rl.envs.backend import validate_backend_action
 
 class VirtualGamepadUnavailableError(RuntimeError):
     """Raised when the optional Windows controller stack is unavailable."""
+
+
+def _is_finite_real(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(float(value))
+    )
 
 
 class VGamepadControlWriter:
@@ -28,9 +37,15 @@ class VGamepadControlWriter:
         gamepad: Any | None = None,
         *,
         steering_output_sign: float = -1.0,
+        steering_output_gain: float = 1.0,
     ) -> None:
         if steering_output_sign not in {-1.0, 1.0}:
             raise ValueError("steering_output_sign must be -1.0 or 1.0")
+        if (
+            not _is_finite_real(steering_output_gain)
+            or not 0.0 < steering_output_gain <= 2.0
+        ):
+            raise ValueError("steering_output_gain must be finite and lie in (0, 2]")
         if gamepad is None:
             try:
                 module = importlib.import_module("vgamepad")
@@ -44,6 +59,7 @@ class VGamepadControlWriter:
             raise VirtualGamepadUnavailableError("vgamepad returned no controller instance")
         self._gamepad = gamepad
         self._steering_output_sign = steering_output_sign
+        self._steering_output_gain = float(steering_output_gain)
         self._closed = False
         self.neutral()
 
@@ -57,7 +73,13 @@ class VGamepadControlWriter:
         )
         pedal, steering = (float(action[0]), float(action[1]))
         self._gamepad.left_joystick_float(
-            x_value_float=self._steering_output_sign * steering,
+            x_value_float=float(
+                np.clip(
+                    self._steering_output_sign * self._steering_output_gain * steering,
+                    -1.0,
+                    1.0,
+                )
+            ),
             y_value_float=0.0,
         )
         self._gamepad.right_trigger_float(value_float=max(pedal, 0.0))

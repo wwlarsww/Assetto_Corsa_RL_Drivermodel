@@ -1,4 +1,0 @@
-ACRL_CSP_STATE_V1
-monza
-11
-1234

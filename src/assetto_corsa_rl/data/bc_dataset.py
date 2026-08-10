@@ -14,6 +14,7 @@ import numpy.typing as npt
 
 from assetto_corsa_rl.ac_integration.ai_spline import AssettoCorsaAISpline
 from assetto_corsa_rl.ac_integration.launcher import configured_fast_lane_path
+from assetto_corsa_rl.ac_integration.track_assets import sha256_file
 from assetto_corsa_rl.config import ProjectConfig
 from assetto_corsa_rl.data.augmentation import (
     BC_MIRROR_AUGMENTATION_NAME,
@@ -33,9 +34,18 @@ from assetto_corsa_rl.features.track_geometry import (
     periodic_interpolate,
     world_to_ego,
 )
+from assetto_corsa_rl.models.predictor_target_normalization import (
+    PREDICTOR_TARGET_NORMALIZATION_METADATA_KEY,
+    fit_predictor_target_scale_m,
+    predictor_target_normalization_metadata,
+    predictor_target_scale_m_from_metadata,
+)
 from assetto_corsa_rl.models.trajectory_contract import (
     BEZIER_TRAJECTORY_CODEC,
     PREDICTOR_COORDINATE_SCALE_M,
+    PREDICTOR_FORWARD_INCREMENT_MAX_M,
+    PREDICTOR_LATERAL_LIMIT_M,
+    PREDICTOR_MAX_LATERAL_TO_FORWARD_RATIO,
 )
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
 from assetto_corsa_rl.types import (
@@ -45,7 +55,10 @@ from assetto_corsa_rl.types import (
 )
 
 STANDARD_GRAVITY_MPS2 = 9.80665
-ACTI_MOTEC_CALIBRATION_NAME = "acti_motec_ai_spline_absolute_v1"
+ACTI_MOTEC_CALIBRATION_NAME = "acti_motec_ai_spline_absolute_steering_left_v2"
+MOTEC_STEERING_CONVERSION_NAME = "motec_positive_right_to_policy_positive_left_v1"
+BC_DATASET_SCHEMA_VERSION = 6
+REFERENCE_FEATURE_CONTRACT = "sha256_bound_time_parameterized_fixed_reference_v1"
 
 _CHANNEL_NAMES = (
     "Ground Speed",
@@ -136,6 +149,13 @@ class BehavioralCloningDataset:
             < 1
         ):
             raise ValueError("every BC split must contain at least one sample")
+        predictor_target_scale_m_from_metadata(self.metadata)
+
+    @property
+    def predictor_target_scale_m(self) -> FloatArray:
+        """Return the immutable per-horizon, per-axis predictor target scales."""
+
+        return predictor_target_scale_m_from_metadata(self.metadata)
 
     def to_npz(self, path: str | Path) -> None:
         """Atomically write numeric arrays with pickle support unnecessary."""
@@ -313,7 +333,8 @@ def build_bc_dataset(
 
     if maximum_recordings is not None and maximum_recordings <= 0:
         raise ValueError("maximum_recordings must be positive")
-    reference = ReferenceTrajectory.from_npz(config.reference.artifact_path)
+    reference_path = Path(config.reference.artifact_path)
+    reference = ReferenceTrajectory.from_npz(reference_path)
     if reference.world_position_xy_m is None:
         raise ValueError("fixed reference must contain world_position_xy_m")
     spline = AssettoCorsaAISpline.from_file(configured_fast_lane_path(config))
@@ -362,6 +383,11 @@ def build_bc_dataset(
         for name, ids in split_ids.items()
     }
     unaugmented_train_samples = int(raw_splits["train"].observations.shape[0])
+    predictor_target_scale_m = fit_predictor_target_scale_m(
+        raw_splits["train"].predictor_target_xz_m,
+        raw_splits["train"].predictor_valid_mask,
+        method_variant=(config.behavioral_cloning.predictor_target_normalization_method_variant),
+    )
     if config.behavioral_cloning.mirror_augmentation:
         mirrored_observations, mirrored_actions, mirrored_targets = mirror_bc_samples(
             raw_splits["train"].observations,
@@ -397,11 +423,18 @@ def build_bc_dataset(
         test=normalise(raw_splits["test"]),
         normalizer=normalizer,
         metadata={
-            "schema_version": 4,
+            "schema_version": BC_DATASET_SCHEMA_VERSION,
             "method_variant": config.behavioral_cloning.method_variant,
             "action_method_variant": config.actions.method_variant,
             "fast_lane_sha256": spline.source_sha256,
+            "reference_sha256": sha256_file(reference_path),
+            "reference_feature_contract": REFERENCE_FEATURE_CONTRACT,
+            "reference_speed_min_mps": float(np.min(reference.speed_mps)),
+            "reference_speed_mean_mps": float(np.mean(reference.speed_mps)),
+            "reference_speed_max_mps": float(np.max(reference.speed_mps)),
             "calibration": ACTI_MOTEC_CALIBRATION_NAME,
+            "steering_conversion": MOTEC_STEERING_CONVERSION_NAME,
+            "steering_convention": "policy_positive_left_v1",
             "slip_preprocessing": LOW_SPEED_SLIP_PREPROCESSING_NAME,
             "previous_action_normalization": PREVIOUS_ACTION_NORMALIZATION_NAME,
             "minimum_speed_mps": config.behavioral_cloning.minimum_speed_mps,
@@ -413,6 +446,17 @@ def build_bc_dataset(
             "unaugmented_train_samples": unaugmented_train_samples,
             "trajectory_codec": BEZIER_TRAJECTORY_CODEC,
             "predictor_coordinate_scale_m": PREDICTOR_COORDINATE_SCALE_M,
+            PREDICTOR_TARGET_NORMALIZATION_METADATA_KEY: (
+                predictor_target_normalization_metadata(
+                    method_variant=(
+                        config.behavioral_cloning.predictor_target_normalization_method_variant
+                    ),
+                    scale_m=predictor_target_scale_m,
+                )
+            ),
+            "predictor_lateral_limit_m": PREDICTOR_LATERAL_LIMIT_M,
+            "predictor_forward_increment_max_m": PREDICTOR_FORWARD_INCREMENT_MAX_M,
+            "predictor_max_lateral_to_forward_ratio": (PREDICTOR_MAX_LATERAL_TO_FORWARD_RATIO),
             "track_id": config.dataset.track_id,
             "car_id": config.dataset.car_id,
             "control_frequency_hz": config.environment.control_frequency_hz,
@@ -583,7 +627,7 @@ def _resample_lap(
     absolute_action = np.column_stack(
         (
             (interpolate("Throttle Pos") - interpolate("Brake Pos")) / 100.0,
-            interpolate("Steering Angle")
+            -interpolate("Steering Angle")
             * config.dataset.steering_lock_normalized
             / config.dataset.steering_lock_degrees,
         )

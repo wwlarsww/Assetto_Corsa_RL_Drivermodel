@@ -58,6 +58,7 @@ class EvaluationEpisode:
     steps: int
     terminated: bool
     truncated: bool
+    termination_reason: str | None
     final_progress_m: float
 
 
@@ -371,6 +372,7 @@ def _run_episode(
     total_reward = 0.0
     terminated = False
     truncated = False
+    termination_reason: str | None = None
     final_progress_m = _progress_from_info(info)
     steps = 0
 
@@ -410,6 +412,8 @@ def _run_episode(
         total_reward += float(reward)
         steps = step_index + 1
         final_progress_m = _progress_from_info(next_info)
+        reported_reason = next_info.get("termination_reason")
+        termination_reason = reported_reason if isinstance(reported_reason, str) else None
         observation, info = next_observation, next_info
         if terminated or truncated:
             break
@@ -423,6 +427,7 @@ def _run_episode(
         steps=steps,
         terminated=bool(terminated),
         truncated=bool(truncated),
+        termination_reason=termination_reason,
         final_progress_m=final_progress_m,
     )
 
@@ -1081,6 +1086,16 @@ def _write_evaluation_artifacts(
         )
 
     asset_bundle = static_geometry.track_assets
+    termination_reason_counts = {
+        reason: sum(episode.termination_reason == reason for episode in episodes)
+        for reason in sorted(
+            {
+                episode.termination_reason
+                for episode in episodes
+                if episode.termination_reason is not None
+            }
+        )
+    }
     summary_path = output_directory / "summary.json"
     summary_path.write_text(
         json.dumps(
@@ -1091,6 +1106,7 @@ def _write_evaluation_artifacts(
                 "deterministic": config.evaluation.deterministic,
                 "environment_steps": environment_steps,
                 "episodes": config.evaluation.episodes,
+                "termination_reason_counts": termination_reason_counts,
                 "metrics": metrics,
                 "record_trajectories": config.evaluation.record_trajectories,
                 "seed_offset": config.evaluation.seed_offset,

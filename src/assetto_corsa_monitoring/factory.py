@@ -14,9 +14,13 @@ def create_tracker(config: MonitoringConfig) -> ExperimentTracker:
     if not config.enabled or config.normalized_backend == "none":
         return NullTracker()
     if config.normalized_backend == "mlflow":
-        return MLflowTracker(
+        tracker = MLflowTracker(
             tracking_uri=config.tracking_uri,
+            artifact_root=config.artifact_root,
             experiment_name=config.experiment_name,
             fail_on_error=config.fail_on_error,
         )
+        if tracker.prepare():
+            return tracker
+        return NullTracker()
     raise ValueError(f"Unsupported monitoring backend: {config.backend!r}")

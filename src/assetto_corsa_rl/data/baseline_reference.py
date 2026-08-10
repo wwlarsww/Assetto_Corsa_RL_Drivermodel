@@ -129,6 +129,7 @@ def build_baseline_reference(
     bin_count = int(np.ceil(track_length_m / distance_bin_m))
     speed_bin_count = int(np.ceil(maximum_speed_mps / speed_resolution_mps))
     histogram = np.zeros((bin_count, speed_bin_count), dtype=np.uint32)
+    speed_sum_mps = np.zeros(bin_count, dtype=np.float64)
     samples_seen = 0
     samples_used = 0
 
@@ -152,8 +153,10 @@ def build_baseline_reference(
             & (channels["Lap Invalidated"] < 0.5)
         )
         distance_bins = np.floor(phase[valid] * bin_count).astype(np.int64)
-        speed_bins = np.floor(speed_mps[valid] / speed_resolution_mps).astype(np.int64)
+        valid_speed_mps = speed_mps[valid]
+        speed_bins = np.floor(valid_speed_mps / speed_resolution_mps).astype(np.int64)
         np.add.at(histogram, (distance_bins, speed_bins), 1)
+        np.add.at(speed_sum_mps, distance_bins, valid_speed_mps)
         samples_used += int(np.count_nonzero(valid))
 
     counts = histogram.sum(axis=1)
@@ -164,10 +167,21 @@ def build_baseline_reference(
     speed_profile = (median_bins.astype(np.float64) + 0.5) * speed_resolution_mps
     speed_profile[counts == 0] = np.nan
     speed_profile = _periodic_interpolate_missing(speed_profile)
+    human_mean_speed_profile = np.divide(
+        speed_sum_mps,
+        counts,
+        out=np.full(bin_count, np.nan, dtype=np.float64),
+        where=counts > 0,
+    )
+    human_mean_speed_profile = _periodic_interpolate_missing(human_mean_speed_profile)
     smoothing_bins = max(1, round(smoothing_window_m / distance_bin_m))
     if smoothing_bins % 2 == 0:
         smoothing_bins += 1
     speed_profile = _circular_moving_average(speed_profile, smoothing_bins)
+    human_mean_speed_profile = _circular_moving_average(
+        human_mean_speed_profile,
+        smoothing_bins,
+    )
 
     distance = np.linspace(0.0, track_length_m, bin_count, endpoint=False, dtype=np.float64)
     world_xy, world_heading = _resample_closed_line(
@@ -183,6 +197,7 @@ def build_baseline_reference(
         speed_mps=speed_profile.astype(np.float32),
         track_length_m=track_length_m,
         world_position_xy_m=world_xy,
+        human_mean_speed_mps=human_mean_speed_profile.astype(np.float32),
         source_track_sha256=spline.source_sha256,
     )
     report = BaselineReferenceBuildReport(
@@ -197,6 +212,7 @@ def build_baseline_reference(
     )
     metadata = {
         "method": "ai_spline_line_with_valid_human_median_speed_v1",
+        "reset_speed_method": "valid_human_arithmetic_mean_by_distance_v1",
         "fast_lane_file": fast_lane_path.name,
         "fast_lane_sha256": spline.source_sha256,
         **(provenance or {}),

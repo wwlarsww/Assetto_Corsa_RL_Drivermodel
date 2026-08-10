@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Self
@@ -18,13 +19,24 @@ from assetto_corsa_rl.ac_integration.shared_memory import (
     AssettoCorsaTelemetry,
     AssettoCorsaTelemetryUnavailableError,
 )
-from assetto_corsa_rl.config import ProjectConfig
+from assetto_corsa_rl.config import LINEAR_BC_X360_CONTROL_PROFILE, ProjectConfig
 
 LOGGER = logging.getLogger("assetto_corsa_rl")
 ASSETTO_CORSA_LIVE_STATUS = 2
 ASSETTO_CORSA_STEAM_APP_ID = "244210"
 CONFIG_FILE_RETRY_COUNT = 100
 CONFIG_FILE_RETRY_DELAY_S = 0.02
+SESSION_REUSE_FRESHNESS_PROBES = 4
+SESSION_REUSE_FRESHNESS_DELAY_S = 0.25
+STALE_SESSION_CLOSE_TIMEOUT_S = 15.0
+STALE_SESSION_FORCE_EXIT_TIMEOUT_S = 5.0
+STALE_SESSION_FORCED_EXIT_CODE = 1
+WINDOWS_PROCESS_TERMINATE = 0x0001
+WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+WINDOWS_SYNCHRONIZE = 0x00100000
+WINDOWS_STILL_ACTIVE = 259
+WINDOWS_TH32CS_SNAPPROCESS = 0x00000002
+WINDOWS_MAX_PATH = 260
 
 
 class AssettoCorsaLaunchError(RuntimeError):
@@ -38,6 +50,50 @@ class _ProcessHandle(Protocol):
         """Return an exit code after termination, otherwise ``None``."""
 
         ...
+
+
+class _AttachedWindowsProcess:
+    """Small pollable wrapper around an already running Windows process."""
+
+    def __init__(self, pid: int, handle: int, kernel32: Any) -> None:
+        self.pid = pid
+        self._handle = handle
+        self._kernel32 = kernel32
+
+    def poll(self) -> int | None:
+        """Return the existing process exit code, or ``None`` while active."""
+
+        ctypes_api: Any = ctypes
+        exit_code = ctypes_api.c_ulong()
+        if not self._kernel32.GetExitCodeProcess(
+            self._handle,
+            ctypes_api.byref(exit_code),
+        ):
+            error_code = ctypes_api.get_last_error()
+            raise AssettoCorsaLaunchError(
+                f"cannot query stale Assetto Corsa process {self.pid}: {error_code}"
+            )
+        return None if exit_code.value == WINDOWS_STILL_ACTIVE else int(exit_code.value)
+
+    def close(self) -> None:
+        """Release the Win32 process handle without affecting the process."""
+
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = 0
+
+    def terminate(self) -> None:
+        """Force the already verified process to exit."""
+
+        ctypes_api: Any = ctypes
+        if not self._kernel32.TerminateProcess(
+            self._handle,
+            STALE_SESSION_FORCED_EXIT_CODE,
+        ):
+            error_code = ctypes_api.get_last_error()
+            raise AssettoCorsaLaunchError(
+                f"cannot terminate stale Assetto Corsa process {self.pid}: {error_code}"
+            )
 
 
 class _CasePreservingConfigParser(configparser.ConfigParser):
@@ -112,6 +168,8 @@ class AssettoCorsaSessionLauncher:
         *,
         process_factory: Callable[[Path, Path], _ProcessHandle] | None = None,
         process_close_request: Callable[[_ProcessHandle], bool] | None = None,
+        process_terminate_request: Callable[[_ProcessHandle], bool] | None = None,
+        existing_process_locator: Callable[[Path], tuple[_ProcessHandle, ...]] | None = None,
         telemetry_probe: Callable[[], AssettoCorsaTelemetry | None] | None = None,
         reuse_existing_session: bool = True,
         controller_index: int | None = None,
@@ -142,6 +200,10 @@ class AssettoCorsaSessionLauncher:
         )
         self._process_factory = process_factory or self._start_process
         self._process_close_request = process_close_request or self._request_graceful_close
+        self._process_terminate_request = process_terminate_request or self._request_force_terminate
+        self._existing_process_locator = (
+            existing_process_locator or self._find_processes_for_executable
+        )
         self._telemetry_probe = telemetry_probe or self._read_live_telemetry
         self._reuse_existing_session = reuse_existing_session
         if controller_index is not None and not 0 <= controller_index <= 3:
@@ -172,18 +234,23 @@ class AssettoCorsaSessionLauncher:
         current = self._telemetry_probe()
         if current is not None:
             if self._matches_expected_session(current) and self._reuse_existing_session:
-                self._reused_existing_session = True
-                LOGGER.info("Reusing the already running matching Assetto Corsa session")
-                return
-            if self._matches_expected_session(current):
+                if not self._matching_session_packets_advance(current):
+                    self._recover_stale_matching_session()
+                    current = None
+                else:
+                    self._reused_existing_session = True
+                    LOGGER.info("Reusing the already running matching Assetto Corsa session")
+                    return
+            if current is not None and self._matches_expected_session(current):
                 raise AssettoCorsaLaunchError(
                     "Assetto Corsa is already publishing the matching session, but this "
                     "operation requires a newly launched session"
                 )
-            raise AssettoCorsaLaunchError(
-                "Assetto Corsa is already publishing a different or non-live session; "
-                "close it before using --launch-game"
-            )
+            if current is not None:
+                raise AssettoCorsaLaunchError(
+                    "Assetto Corsa is already publishing a different or non-live session; "
+                    "close it before using --launch-game"
+                )
 
         self._session_spec = self._build_session_spec()
         self._install_race_configuration(self._session_spec)
@@ -199,6 +266,8 @@ class AssettoCorsaSessionLauncher:
             )
             self._wait_for_expected_session()
         except BaseException:
+            with suppress(Exception):
+                self.stop_owned_session()
             self.restore_user_configuration()
             raise
 
@@ -213,7 +282,7 @@ class AssettoCorsaSessionLauncher:
         return "not_started"
 
     def stop_owned_session(self, *, timeout_s: float = 15.0) -> bool:
-        """Gracefully close only the AC process created by this launcher."""
+        """Gracefully close the AC process created directly or through Steam."""
 
         if timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
@@ -221,6 +290,7 @@ class AssettoCorsaSessionLauncher:
         if process is None:
             return False
         if process.poll() is not None:
+            self._release_process_handle(process)
             self._process = None
             return True
         if not self._process_close_request(process):
@@ -230,6 +300,7 @@ class AssettoCorsaSessionLauncher:
         deadline = self._monotonic_clock() + timeout_s
         while self._monotonic_clock() < deadline:
             if process.poll() is not None:
+                self._release_process_handle(process)
                 self._process = None
                 return True
             self._sleep(min(0.05, deadline - self._monotonic_clock()))
@@ -286,6 +357,18 @@ class AssettoCorsaSessionLauncher:
         if not parser.has_section("X360"):
             parser.add_section("X360")
         parser.set("X360", "JOYPAD_INDEX", str(self._controller_index))
+        if self._config.assetto_corsa.x360_control_profile == LINEAR_BC_X360_CONTROL_PROFILE:
+            # The BC steer map is an absolute linear controller calibration.
+            # Human-oriented gamma, filtering and high-speed attenuation would
+            # otherwise turn a policy command of 0.2 into only a few percent.
+            parser.set("X360", "STEER_GAMMA", "1")
+            # Retain temporal smoothing so small BC start transients do not
+            # throw a 67 m/s car across the narrow left margin. Unlike gamma
+            # and speed sensitivity, this does not change the steady command.
+            parser.set("X360", "STEER_FILTER", "0.7")
+            parser.set("X360", "SPEED_SENSITIVITY", "0")
+            parser.set("X360", "STEER_DEADZONE", "0")
+            parser.set("X360", "STEER_SPEED", "1")
         self._replace_with_retry(self._controls_path, self._controls_backup_path)
         try:
             with self._controls_temporary_path.open(
@@ -572,23 +655,82 @@ class AssettoCorsaSessionLauncher:
     def _wait_for_expected_session(self) -> None:
         deadline = self._monotonic_clock() + self._config.assetto_corsa.launch_timeout_s
         last_identity = "telemetry unavailable"
+        steam_handoff = False
+        last_process_exit: str | None = None
         while self._monotonic_clock() < deadline:
             if self._process is not None:
                 return_code = self._process.poll()
                 if return_code is not None:
-                    raise AssettoCorsaLaunchError(
-                        f"Assetto Corsa exited before the session became live (code {return_code})"
+                    process = self._process
+                    last_process_exit = f"process {process.pid} exited with code {return_code}"
+                    self._release_process_handle(process)
+                    self._process = None
+                    steam_handoff = True
+                    LOGGER.info(
+                        "Initial Assetto Corsa process %s exited with code %s; waiting for "
+                        "Steam to start the game",
+                        process.pid,
+                        return_code,
                     )
+            if steam_handoff and self._process is None:
+                self._adopt_steam_started_process()
             telemetry = self._telemetry_probe()
             if telemetry is not None:
                 last_identity = self._describe_session(telemetry)
-                if self._matches_expected_session(telemetry):
-                    LOGGER.info("Assetto Corsa session is live and matches the training config")
-                    return
+                if self._matches_expected_session(
+                    telemetry
+                ) and self._matching_session_packets_advance(telemetry):
+                    live_process = self._process
+                    if live_process is not None and live_process.poll() is None:
+                        LOGGER.info("Assetto Corsa session is live and matches the training config")
+                        return
+                    if live_process is not None:
+                        return_code = live_process.poll()
+                        last_process_exit = (
+                            f"process {live_process.pid} exited with code {return_code}"
+                        )
+                        self._release_process_handle(live_process)
+                        self._process = None
+                        steam_handoff = True
+                    if steam_handoff and self._adopt_steam_started_process():
+                        LOGGER.info("Assetto Corsa session is live and matches the training config")
+                        return
             self._sleep(self._config.assetto_corsa.launch_poll_interval_s)
+        exit_context = "" if last_process_exit is None else f"; {last_process_exit}"
         raise AssettoCorsaLaunchError(
-            f"timed out waiting for the configured Assetto Corsa session ({last_identity})"
+            "timed out waiting for Steam and the configured Assetto Corsa session "
+            f"({last_identity}{exit_context})"
         )
+
+    def _adopt_steam_started_process(self) -> bool:
+        """Adopt exactly one delayed AC process started by Steam after handoff."""
+
+        candidates = self._existing_process_locator(self._executable)
+        try:
+            active = [candidate for candidate in candidates if candidate.poll() is None]
+            if len(active) > 1:
+                raise AssettoCorsaLaunchError(
+                    "Steam handoff produced multiple Assetto Corsa processes for the exact "
+                    f"configured executable {self._executable}; refusing ambiguous ownership"
+                )
+            if not active:
+                return False
+            adopted = active[0]
+            self._process = adopted
+            LOGGER.info("Adopted Steam-started Assetto Corsa process %s", adopted.pid)
+            return True
+        finally:
+            for candidate in candidates:
+                if candidate is not self._process:
+                    self._release_process_handle(candidate)
+
+    @staticmethod
+    def _release_process_handle(process: _ProcessHandle) -> None:
+        """Release optional handles used for an adopted existing process."""
+
+        close = getattr(process, "close", None)
+        if callable(close):
+            close()
 
     def _matches_expected_session(self, telemetry: AssettoCorsaTelemetry) -> bool:
         static = telemetry.static
@@ -600,6 +742,102 @@ class AssettoCorsaSessionLauncher:
             and static.car_model == self._config.dataset.car_id
             and track_id == self._config.dataset.track_id
         )
+
+    def _matching_session_packets_advance(
+        self,
+        initial: AssettoCorsaTelemetry,
+    ) -> bool:
+        """Reject stale shared-memory pages before attaching to a live session."""
+
+        initial_physics_packet = initial.physics.packet_id
+        initial_graphics_packet = initial.graphics.packet_id
+        delay_s = min(
+            SESSION_REUSE_FRESHNESS_DELAY_S,
+            max(0.01, self._config.assetto_corsa.launch_poll_interval_s),
+        )
+        for _ in range(SESSION_REUSE_FRESHNESS_PROBES):
+            self._sleep(delay_s)
+            current = self._telemetry_probe()
+            if current is None or not self._matches_expected_session(current):
+                continue
+            if (
+                current.physics.packet_id != initial_physics_packet
+                or current.graphics.packet_id != initial_graphics_packet
+            ):
+                return True
+        return False
+
+    def _recover_stale_matching_session(self) -> None:
+        """Close one exact stale AC process before starting a fresh one."""
+
+        candidates = self._existing_process_locator(self._executable)
+        try:
+            if len(candidates) != 1:
+                qualifier = "none" if not candidates else str(len(candidates))
+                raise AssettoCorsaLaunchError(
+                    "Assetto Corsa shared memory is stale, but safe automatic recovery "
+                    f"requires exactly one process for {self._executable}; found "
+                    f"{qualifier}. Close the stale session manually and retry"
+                )
+            process = candidates[0]
+            if process.poll() is not None:
+                LOGGER.info("The stale Assetto Corsa process exited before recovery")
+                return
+            graceful_requested = self._process_close_request(process)
+            if graceful_requested and self._wait_for_process_exit(
+                process,
+                timeout_s=STALE_SESSION_CLOSE_TIMEOUT_S,
+            ):
+                LOGGER.info(
+                    "Closed stale Assetto Corsa process %s; launching a fresh session",
+                    process.pid,
+                )
+                return
+            if graceful_requested:
+                LOGGER.warning(
+                    "Stale Assetto Corsa process %s ignored WM_CLOSE; forcing exit",
+                    process.pid,
+                )
+            else:
+                LOGGER.warning(
+                    "Stale Assetto Corsa process %s has no closeable window; forcing exit",
+                    process.pid,
+                )
+            if not self._process_terminate_request(process):
+                raise AssettoCorsaLaunchError(
+                    f"could not terminate stale Assetto Corsa process {process.pid}"
+                )
+            if not self._wait_for_process_exit(
+                process,
+                timeout_s=STALE_SESSION_FORCE_EXIT_TIMEOUT_S,
+            ):
+                raise AssettoCorsaLaunchError(
+                    f"stale Assetto Corsa process {process.pid} remained active after termination"
+                )
+            LOGGER.info(
+                "Terminated stale Assetto Corsa process %s; launching a fresh session",
+                process.pid,
+            )
+        finally:
+            for candidate in candidates:
+                close = getattr(candidate, "close", None)
+                if callable(close):
+                    close()
+
+    def _wait_for_process_exit(
+        self,
+        process: _ProcessHandle,
+        *,
+        timeout_s: float,
+    ) -> bool:
+        """Wait a bounded period for one exact process handle to report exit."""
+
+        deadline = self._monotonic_clock() + timeout_s
+        while self._monotonic_clock() < deadline:
+            if process.poll() is not None:
+                return True
+            self._sleep(min(0.05, deadline - self._monotonic_clock()))
+        return process.poll() is not None
 
     @staticmethod
     def _describe_session(telemetry: AssettoCorsaTelemetry) -> str:
@@ -625,8 +863,83 @@ class AssettoCorsaSessionLauncher:
             raise AssettoCorsaLaunchError(f"cannot start Assetto Corsa: {error}") from error
 
     @staticmethod
+    def _find_processes_for_executable(
+        executable: Path,
+    ) -> tuple[_ProcessHandle, ...]:
+        """Return processes whose full image path exactly matches ``executable``."""
+
+        if sys.platform != "win32":
+            return ()
+        ctypes_api: Any = ctypes
+        kernel32: Any = ctypes_api.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes_api.c_void_p
+        kernel32.OpenProcess.restype = ctypes_api.c_void_p
+
+        class _ProcessEntry32W(ctypes.Structure):
+            _fields_ = (
+                ("dwSize", ctypes_api.c_ulong),
+                ("cntUsage", ctypes_api.c_ulong),
+                ("th32ProcessID", ctypes_api.c_ulong),
+                ("th32DefaultHeapID", ctypes_api.c_void_p),
+                ("th32ModuleID", ctypes_api.c_ulong),
+                ("cntThreads", ctypes_api.c_ulong),
+                ("th32ParentProcessID", ctypes_api.c_ulong),
+                ("pcPriClassBase", ctypes_api.c_long),
+                ("dwFlags", ctypes_api.c_ulong),
+                ("szExeFile", ctypes_api.c_wchar * WINDOWS_MAX_PATH),
+            )
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(WINDOWS_TH32CS_SNAPPROCESS, 0)
+        invalid_handle = ctypes_api.c_void_p(-1).value
+        if not snapshot or snapshot == invalid_handle:
+            error_code = ctypes_api.get_last_error()
+            raise AssettoCorsaLaunchError(
+                f"could not enumerate processes for stale-session recovery: {error_code}"
+            )
+        process_ids: set[int] = set()
+        try:
+            entry = _ProcessEntry32W()
+            entry.dwSize = ctypes_api.sizeof(entry)
+            available = bool(kernel32.Process32FirstW(snapshot, ctypes_api.byref(entry)))
+            while available:
+                if str(entry.szExeFile).casefold() == executable.name.casefold():
+                    process_ids.add(int(entry.th32ProcessID))
+                available = bool(kernel32.Process32NextW(snapshot, ctypes_api.byref(entry)))
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+        expected = str(executable.resolve(strict=False)).casefold()
+        matches: list[_ProcessHandle] = []
+        access = (
+            WINDOWS_PROCESS_TERMINATE
+            | WINDOWS_PROCESS_QUERY_LIMITED_INFORMATION
+            | WINDOWS_SYNCHRONIZE
+        )
+        for pid in sorted(process_ids):
+            handle = kernel32.OpenProcess(access, False, pid)
+            if not handle:
+                continue
+            capacity = 32_768
+            path_buffer = ctypes_api.create_unicode_buffer(capacity)
+            path_size = ctypes_api.c_ulong(capacity)
+            if not kernel32.QueryFullProcessImageNameW(
+                handle,
+                0,
+                path_buffer,
+                ctypes_api.byref(path_size),
+            ):
+                kernel32.CloseHandle(handle)
+                continue
+            actual = str(Path(path_buffer.value).resolve(strict=False)).casefold()
+            if actual == expected:
+                matches.append(_AttachedWindowsProcess(pid, handle, kernel32))
+            else:
+                kernel32.CloseHandle(handle)
+        return tuple(matches)
+
+    @staticmethod
     def _request_graceful_close(process: _ProcessHandle) -> bool:
-        """Post ``WM_CLOSE`` to visible top-level windows owned by ``process``."""
+        """Post ``WM_CLOSE`` to top-level windows owned by ``process``."""
 
         if sys.platform != "win32":
             return False
@@ -644,11 +957,8 @@ class AssettoCorsaSessionLauncher:
             nonlocal close_requested
             owner = ctypes_api.c_ulong()
             user32.GetWindowThreadProcessId(window, ctypes_api.byref(owner))
-            if (
-                owner.value == process.pid
-                and user32.IsWindowVisible(window)
-                and user32.PostMessageW(window, 0x0010, 0, 0)  # WM_CLOSE
-            ):
+            is_owned = owner.value == process.pid
+            if is_owned and user32.PostMessageW(window, 0x0010, 0, 0):  # WM_CLOSE
                 close_requested = True
             return True
 
@@ -659,3 +969,13 @@ class AssettoCorsaSessionLauncher:
                     f"could not enumerate windows for Assetto Corsa process: {error_code}"
                 )
         return close_requested
+
+    @staticmethod
+    def _request_force_terminate(process: _ProcessHandle) -> bool:
+        """Force termination only for a previously exact-path-verified process."""
+
+        terminate = getattr(process, "terminate", None)
+        if not callable(terminate):
+            return False
+        terminate()
+        return True

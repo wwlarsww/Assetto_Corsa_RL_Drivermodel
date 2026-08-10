@@ -109,10 +109,11 @@ a_t = tanh(u_t),  u_t ~ Normal(mu_t, sigma)
 There is no delta limit or action integration. A direct switch from `-1` to
 `+1` in one agent step is valid. An Assetto Corsa backend maps the combined
 pedal to throttle/brake and steering to the simulator's normalised range.
-The initial live variant uses Assetto Corsa's automatic shifter and automatic
-clutch; gear selection is not part of the policy action. A deterministic reset
-engages first gear, and live acceptance requires actual forward motion and
-positive reference-line progress under a bounded throttle command.
+The live variants use Assetto Corsa's automatic shifter and automatic clutch;
+gear selection is not part of the policy action. The stationary reset engages
+first gear, while the human-reference-speed reset selects a forward gear for
+its flying start. Live acceptance requires actual forward motion and positive
+reference-line progress under a bounded throttle command.
 
 The policy uses a tanh-squashed Gaussian with state-independent log standard
 deviation. PPO stores the transformed log probability including the tanh
@@ -141,9 +142,11 @@ delta_reference_progress = wrap_signed(s_t - s_(t-1))
 
 The environment adds a fixed negative penalty for safety termination. Lap
 completion is not a safety violation. In live runs the collision baseline is
-recorded only after the acknowledged deterministic `HOTLAP_START` reset, stable
-frames and a configured neutral quiescence interval so reset-induced callbacks
-cannot leak into the episode. Every subsequent CSP collision event terminates immediately as
+recorded only after the acknowledged deterministic reset and its bounded
+settling window. The stationary baseline uses a Python-side neutral quiescence
+interval; moving CSP resets suppress callbacks during reset and for one second
+after acknowledgement so placement transients cannot leak into the episode.
+Every later CSP collision event terminates immediately as
 `CRASH`; damage and inferred vehicle dimensions
 are not part of the criterion. The explicitly named termination variant
 `any_tyre_armed_stall_v1` terminates as soon as Assetto Corsa reports one tyre
@@ -156,21 +159,31 @@ calibrated lateral axis and local z is forward-positive. It terminates when
 `minimum_body_sideslip_termination_speed_mps = 5.0`. Longitudinal tyre slip
 ratio remains an observation but is no longer a termination criterion, so
 launch wheelspin is permitted.
-Every episode starts from the explicit absolute action `[+1, 0]`: full
-throttle and centred steering. The live backend keeps the controller neutral
-during reset validation and collision quiescence, then applies this initial
-action immediately before returning the first observation. The same action is
-stored in the observation's previous-action fields. This primes the actuator
-without creating an unrecorded simulator transition; the policy may replace
-both commands without a delta limit on its first regular step.
-For the live configurations, `minimum_speed_mps = 1.3888888889` arms stall
-detection after the first successful drive-off. Five consecutive later frames
-below 5 km/h then terminate. A separate 25-step startup fallback terminates a
-car that never drives off after 1 s at 25 Hz. These settings are recorded under
-`any_tyre_armed_stall_v1`; they are not the former 250-step launch grace. Normal
-`max_episode_steps` truncation is disabled: an episode ends by lap completion
-or an explicit safety termination. Transport timeouts remain adapter errors
-and never become successful environment transitions.
+The separate named `unrecoverable_progress_stall_v2` live experiment retains
+all V1 conditions and adds a wrap-safe rolling reference-progress window. The
+active extended configuration terminates as `STALLED` after 1.0 s with less
+than 2.0 m net forward reference progress. This cuts off a rolling or spinning
+car in gravel even when CSP reports no collision, Assetto Corsa still reports
+zero tyres out, and chassis speed remains above the ordinary 5 km/h stall
+threshold. The stationary thesis baseline remains on V1.
+The thesis baseline starts from the explicit absolute action `[+1, 0]`: full
+throttle and centred steering. The backend keeps the controller neutral during
+reset validation, then applies the configured initial action immediately before
+returning the first observation and stores it in the previous-action fields.
+The named pose-and-speed flying-start experiment instead configures `[0, 0]`
+because CSP already supplies the physical speed. This avoids injecting a pedal
+history that the deterministic BC policy did not produce. Neither variant
+creates an unrecorded simulator transition; the policy may replace both
+commands without a delta limit on its first regular step.
+For all live variants, `minimum_speed_mps = 1.3888888889` arms stall detection
+after the first successful drive-off. The thesis baseline requires five later
+frames below 5 km/h and uses a separate 25-step fallback, both 0.2 s/1 s at
+25 Hz. The extended experiment explicitly uses two low-speed frames and a
+20-step fallback, both 0.1 s/1 s at 20 Hz. These settings are recorded under
+the selected termination variant; they are not the former 250-step launch grace. The
+baseline disables ordinary `max_episode_steps` truncation, while the extended
+smoke run retains its configured 2,400-step safety limit. Transport timeouts
+remain adapter errors and never become successful environment transitions.
 
 After the rollout, the predictor is decoded into twenty ego-frame Bézier
 samples. The same frame contains a reference polyline comprising the exact
@@ -199,6 +212,28 @@ Prediction terms are added **after rollout collection and before GAE**. They
 must never be calculated inside simulator dynamics or appended after advantage
 estimation.
 
+The flying-start experiment additionally selects the named, non-baseline
+`successor_progress_alignment_v1` reference reward. For each sampled action it
+stores the reached state's lateral and heading errors together with that
+transition's progress reward. Post-rollout processing computes
+
+```text
+d = max(abs(successor_lateral_offset) - free_distance, 0) / distance_scale
+h = abs(successor_heading_error)
+alignment = exp(-0.5 * d^2) * clip(cos(h), 0, 1)
+r_reference = max(r_progress, 0) * (alignment - 1)
+              - lateral_scale * d^2
+              - heading_penalty_scale * (h / heading_scale)^2
+```
+
+Thus aligned forward progress is unchanged, while progress produced by an
+action that leaves the line or points away from it is cancelled proportionally.
+Reverse progress is not cancelled. The active Monza flying-start configuration
+uses a 2.5 m free corridor, 2 m lateral scale and 10 degree heading scale. The
+legacy `current_distance_quadratic_v1` remains the default and therefore the
+thesis baseline is not silently changed. Both reference variants stay in
+rollout post-processing before GAE.
+
 ## Network and predictor contract
 
 Figure 2.3 specifies these widths:
@@ -216,11 +251,23 @@ predictor target is the actually observed future human path, not the prescribed
 reference points in the observation. During RL, predictor supervision remains
 an auxiliary update against actually observed future positions.
 
+The default `uniform_action_mse_v1` remains the thesis-shaped action loss. The
+named `steering_weighted_action_mse_v1` variant computes a weighted mean with a
+configurable steering weight; the active extended experiment uses 20. The
+separate experimental `straight_steering_weighted_action_mse_v2` additionally
+multiplies steering elements whose target magnitude is at most `0.02` by 10.
+Its threshold and sample weight are written to BC summary metadata. Although
+that experiment reduced held-out straight-steering bias, its deterministic live
+rollout was worse, so it is retained as an optional named method and is not the
+active checkpoint.
+
 The network default remains the baseline `initial_log_std = -0.5`. When PPO
 loads a checkpoint identified as a behavioural-cloning checkpoint, the
 stabilised variant sets `initial_log_std_after_bc = -1.5`, corresponding to
 `sigma ~= 0.223`. A resumed PPO checkpoint keeps its learned standard
-deviation and is not reset. The named `target_band_learning_rate_v1` controller
+deviation and is not reset. The extended high-speed experiment explicitly
+overrides this with `-3.1` (`sigma ~= 0.045`) to remain close to the BC mean at
+the flying start. The named `target_band_learning_rate_v1` controller
 measures approximate KL on the complete rollout after each update epoch. It
 stops further epochs above the configured upper boundary and adjusts the next
 iteration's learning rate: multiply by `0.5` above the band, by `1.1` below the
@@ -238,8 +285,9 @@ not be described as the unpublished original encoding.
 For each current-policy fragment:
 
 1. retain world position, vehicle heading, simulation time, a globally unique
-   actor/episode trajectory ID, reference progress, policy action, value, and
-   log probability;
+   actor/episode trajectory ID, reference progress, reached lateral/heading
+   errors, transition progress reward, policy action, value, and log
+   probability;
 2. interpolate 20 actually observed future positions at `0.25…5.0 s`;
 3. reject targets that cross termination, truncation, or a fragment boundary;
 4. transform future positions into each origin's ego frame;
@@ -247,7 +295,8 @@ For each current-policy fragment:
    exactly the same ego frames;
 6. decode rollout predictions, project every horizon point, and compute the
    discounted sum of reference-progress increments;
-7. add predicted-progress rewards to environment rewards;
+7. add the configured reference and predicted-progress rewards to environment
+   rewards;
 8. compute termination-aware GAE;
 9. update clipped PPO, the value function and the predictor on valid observed
    targets.
@@ -277,8 +326,12 @@ driving quality. Speed, acceleration x/z, world pose, fixed-reference
 projection, track-boundary previews, and the four tyre slip signals have named
 live mappings. The backend and reset/control transports are implemented, but
 their signs, timing and closed-loop driving still require the documented
-low-speed and full-lap validation on the target installation. The 35-epoch BC run passes
-the configured held-out predictor gate, but that is not evidence that its
-reward coefficient is optimal in closed loop. Reward coefficients, safety
+low-speed and full-lap validation on the target installation. The current
+30-epoch steering-corrected BC run passes the configured held-out predictor
+gate. A deterministic live evaluation also confirms a clean pose-and-speed
+reset, but the active BC controller still exits the track at the first curve;
+offline ADE/FDE and action MSE therefore do not establish closed-loop driving
+quality. This is also not evidence that its reward coefficient is optimal in
+closed loop. Reward coefficients, safety
 thresholds, and predictor weighting require controlled experiments rather
 than being inferred from a smoke run.

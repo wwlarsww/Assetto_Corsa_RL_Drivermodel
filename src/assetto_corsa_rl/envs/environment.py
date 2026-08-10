@@ -123,8 +123,13 @@ class AssettoCorsaEnv(gym.Env[FloatArray, FloatArray]):
         self._last_telemetry = transition.telemetry
         self._step_count += 1
 
+        backend_diagnostics = transition.diagnostics or {}
+        reward_progress_start_m = self._last_reference_progress_m
+        reported_reward_start = backend_diagnostics.get("reward_progress_start_m")
+        if isinstance(reported_reward_start, int | float) and np.isfinite(reported_reward_start):
+            reward_progress_start_m = float(reported_reward_start)
         reference_progress_delta_m = wrapped_progress_delta(
-            self._last_reference_progress_m,
+            reward_progress_start_m,
             transition.telemetry.progress_m,
             self.active_reference.track_length_m,
         )
@@ -155,7 +160,8 @@ class AssettoCorsaEnv(gym.Env[FloatArray, FloatArray]):
         info["action_change"] = applied.change.copy()
         info["action_absolute"] = applied.absolute.copy()
         info["reference_progress_delta_m"] = reference_progress_delta_m
-        info["backend"] = transition.diagnostics or {}
+        info["reward_progress_start_m"] = reward_progress_start_m
+        info["backend"] = backend_diagnostics
         return observation, float(reward_terms.total), terminated, truncated, info
 
     def close(self) -> None:

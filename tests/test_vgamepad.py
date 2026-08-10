@@ -56,3 +56,21 @@ def test_vgamepad_steering_sign_is_explicit() -> None:
     assert gamepad.steering == pytest.approx(0.4)
     with pytest.raises(ValueError, match="steering_output_sign"):
         VGamepadControlWriter(gamepad, steering_output_sign=0.0)
+
+
+def test_vgamepad_scales_and_clips_steering_output() -> None:
+    gamepad = _FakeGamepad()
+    writer = VGamepadControlWriter(
+        gamepad,
+        steering_output_sign=1.0,
+        steering_output_gain=1.25,
+    )
+    writer.apply([0.0, 0.4])
+    assert gamepad.steering == pytest.approx(0.5)
+    writer.apply([0.0, -0.9])
+    assert gamepad.steering == pytest.approx(-1.0)
+
+    with pytest.raises(ValueError, match="steering_output_gain"):
+        VGamepadControlWriter(gamepad, steering_output_gain=0.0)
+    with pytest.raises(ValueError, match="steering_output_gain"):
+        VGamepadControlWriter(gamepad, steering_output_gain=float("nan"))

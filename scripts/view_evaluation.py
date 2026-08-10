@@ -18,6 +18,7 @@ import os
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +33,7 @@ from mlflow import MlflowClient
 
 DEFAULT_TRACKING_URI = os.environ.get(
     "MLFLOW_TRACKING_URI",
-    "http://127.0.0.1:5000",
+    "sqlite:///mlflow.db",
 )
 DEFAULT_REFERENCE_TIME_OFFSETS_S = np.arange(1, 21, dtype=np.float64) * 0.25
 DEFAULT_BOUNDARY_PREVIEW_DISTANCES_M = np.asarray(
@@ -129,9 +130,7 @@ def _checkpoint_update(run: Mapping[str, Any]) -> int:
 def _timestamp(value: int | None) -> str:
     if not value:
         return "ohne Zeitstempel"
-    return datetime.fromtimestamp(value / 1000).astimezone().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    return datetime.fromtimestamp(value / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _format_training(run: Mapping[str, Any]) -> str:
@@ -165,16 +164,12 @@ def _choose_artifact(
     preferred_prefix: str = "",
 ) -> str | None:
     priorities = {name.casefold(): index for index, name in enumerate(filenames)}
-    matches = [
-        path for path in paths if Path(path).name.casefold() in priorities
-    ]
+    matches = [path for path in paths if Path(path).name.casefold() in priorities]
     if preferred_prefix:
         preferred = [
             path
             for path in matches
-            if path.replace("\\", "/").startswith(
-                preferred_prefix.rstrip("/") + "/"
-            )
+            if path.replace("\\", "/").startswith(preferred_prefix.rstrip("/") + "/")
         ]
         if preferred:
             matches = preferred
@@ -191,11 +186,7 @@ def _choose_artifact(
 
 
 def _cache_directory(run_id: str) -> Path:
-    directory = (
-        Path(tempfile.gettempdir())
-        / "assetto_corsa_evaluation_viewer"
-        / run_id
-    )
+    directory = Path(tempfile.gettempdir()) / "assetto_corsa_evaluation_viewer" / run_id
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -245,9 +236,7 @@ def _load_evaluation_bundle(
     if selected is None:
         raise FileNotFoundError("Evaluation enthält kein Trajektorienartefakt")
     destination = _cache_directory(run_id)
-    arrays = _load_npz(
-        Path(client.download_artifacts(run_id, selected, dst_path=str(destination)))
-    )
+    arrays = _load_npz(Path(client.download_artifacts(run_id, selected, dst_path=str(destination))))
 
     summary: dict[str, Any] = {}
     summary_artifact = _choose_artifact(paths, ("summary.json",))
@@ -359,10 +348,8 @@ def _canonicalize_static_artifact(
     transform = _scalar_text(result, "coordinate_transform").replace(" ", "")
     metadata_text = _scalar_text(result, "metadata_json")
     if not transform and metadata_text:
-        try:
+        with suppress(json.JSONDecodeError):
             transform = str(json.loads(metadata_text).get("coordinate_transform", ""))
-        except json.JSONDecodeError:
-            pass
         transform = transform.replace(" ", "")
     needs_swap = "[ac_x,ac_z]" in transform
     if not needs_swap:
@@ -407,11 +394,7 @@ def _local_xz_to_world_xz(
     local = np.asarray(local_xz_m, dtype=np.float64)
     forward = np.asarray([math.cos(heading_rad), math.sin(heading_rad)])
     left = np.asarray([-math.sin(heading_rad), math.cos(heading_rad)])
-    return (
-        vehicle_xz_m[None, :]
-        + local[:, 0:1] * left[None, :]
-        + local[:, 1:2] * forward[None, :]
-    )
+    return vehicle_xz_m[None, :] + local[:, 0:1] * left[None, :] + local[:, 1:2] * forward[None, :]
 
 
 def _world_xz_to_local_xz(
@@ -492,8 +475,7 @@ def _project_closed_path(
     offset = position_xz_m[None, :] - start
     fraction = np.zeros(path.shape[0], dtype=np.float64)
     fraction[valid] = np.clip(
-        np.einsum("ij,ij->i", offset[valid], vector[valid])
-        / length_squared[valid],
+        np.einsum("ij,ij->i", offset[valid], vector[valid]) / length_squared[valid],
         0.0,
         1.0,
     )
@@ -509,9 +491,7 @@ def _project_closed_path(
         segment_progress = max(track_length_m - float(distance[index]), 0.0)
     else:
         segment_progress = max(float(distance[index + 1] - distance[index]), 0.0)
-    progress = (
-        float(distance[index]) + fraction[index] * segment_progress
-    ) % track_length_m
+    progress = (float(distance[index]) + fraction[index] * segment_progress) % track_length_m
     return Projection(
         progress_m=progress,
         point_xz_m=projected[index],
@@ -619,9 +599,7 @@ def _add_line(
             mode="lines",
             name=name,
             line=line,
-            hovertemplate=(
-                f"{name}<br>x=%{{x:.2f}} m<br>z=%{{y:.2f}} m<extra></extra>"
-            ),
+            hovertemplate=(f"{name}<br>x=%{{x:.2f}} m<br>z=%{{y:.2f}} m<extra></extra>"),
         )
     )
 
@@ -644,9 +622,7 @@ def _add_points(
             mode="lines+markers" if connect else "markers",
             name=name,
             marker={"size": size, "symbol": symbol},
-            hovertemplate=(
-                f"{name}<br>x=%{{x:.2f}} m<br>y=%{{y:.2f}} m<extra></extra>"
-            ),
+            hovertemplate=(f"{name}<br>x=%{{x:.2f}} m<br>y=%{{y:.2f}} m<extra></extra>"),
         )
     )
 
@@ -844,6 +820,7 @@ def _value_table(
 
 
 def main() -> None:  # noqa: PLR0912, PLR0915
+    """Render the interactive evaluation viewer."""
     st.set_page_config(page_title="Assetto Corsa Evaluation Viewer", layout="wide")
     st.title("Assetto Corsa Evaluation Viewer")
     st.caption("Weltansicht und fahrzeugfeste Agentenansicht mit getrennten Frames")
@@ -877,9 +854,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         index=default_index,
     )
     experiment_id = next(
-        item["experiment_id"]
-        for item in experiments
-        if item["name"] == experiment_name
+        item["experiment_id"] for item in experiments if item["name"] == experiment_name
     )
     all_runs = _list_runs(tracking_uri, experiment_id)
     training_runs = _training_runs(all_runs)
@@ -909,21 +884,17 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     try:
         with st.spinner("Evaluation Artefakte werden geladen …"):
-            arrays, summary, episode_rows, evaluation_artifacts = (
-                _load_evaluation_bundle(
-                    tracking_uri,
-                    evaluation_id,
-                    evaluation_run.get("end_time"),
-                )
+            arrays, summary, episode_rows, evaluation_artifacts = _load_evaluation_bundle(
+                tracking_uri,
+                evaluation_id,
+                evaluation_run.get("end_time"),
             )
-            geometry, geometry_artifact, training_artifacts = (
-                _download_npz_artifact(
-                    tracking_uri,
-                    training_id,
-                    training_run.get("end_time"),
-                    ("track_geometry_v3.npz", "track_geometry.npz"),
-                    "track",
-                )
+            geometry, geometry_artifact, training_artifacts = _download_npz_artifact(
+                tracking_uri,
+                training_id,
+                training_run.get("end_time"),
+                ("track_geometry_v3.npz", "track_geometry.npz"),
+                "track",
             )
             reference, reference_artifact, _ = _download_npz_artifact(
                 tracking_uri,
@@ -952,10 +923,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
                 )
             ):
                 geometry = loaded
-            if any(
-                key in loaded
-                for key in ("world_position_xz_m", "world_position_xy_m")
-            ):
+            if any(key in loaded for key in ("world_position_xz_m", "world_position_xy_m")):
                 reference = loaded
 
     geometry, geometry_axis_fixed = _canonicalize_static_artifact(geometry)
@@ -966,41 +934,25 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     # caching or a generated AI reference cannot hide what the environment saw.
     if "active_reference_world_xy_m" in arrays:
         reference = {
-            "world_position_xy_m": np.asarray(
-                arrays["active_reference_world_xy_m"]
-            ),
-            "track_distance_m": np.asarray(
-                arrays.get("active_reference_track_distance_m", [])
-            ),
-            "speed_mps": np.asarray(
-                arrays.get("active_reference_speed_mps", [])
-            ),
-            "world_heading_rad": np.asarray(
-                arrays.get("active_reference_heading_rad", [])
-            ),
-            "track_length_m": np.asarray(
-                arrays.get("active_reference_track_length_m", np.nan)
-            ),
+            "world_position_xy_m": np.asarray(arrays["active_reference_world_xy_m"]),
+            "track_distance_m": np.asarray(arrays.get("active_reference_track_distance_m", [])),
+            "speed_mps": np.asarray(arrays.get("active_reference_speed_mps", [])),
+            "world_heading_rad": np.asarray(arrays.get("active_reference_heading_rad", [])),
+            "track_length_m": np.asarray(arrays.get("active_reference_track_length_m", np.nan)),
             "coordinate_frame": np.asarray("assetto_corsa_gym_world_xy_v1"),
             "coordinate_transform": np.asarray("world_xy=[ac_z,ac_x]"),
         }
     if "track_centerline_world_xy_m" in arrays:
         geometry = {
-            "centerline_world_xy_m": np.asarray(
-                arrays["track_centerline_world_xy_m"]
-            ),
+            "centerline_world_xy_m": np.asarray(arrays["track_centerline_world_xy_m"]),
             "left_boundary_world_xy_m": np.asarray(
                 arrays.get("track_left_boundary_world_xy_m", [])
             ),
             "right_boundary_world_xy_m": np.asarray(
                 arrays.get("track_right_boundary_world_xy_m", [])
             ),
-            "track_distance_m": np.asarray(
-                arrays.get("track_static_distance_m", [])
-            ),
-            "track_length_m": np.asarray(
-                arrays.get("track_static_length_m", np.nan)
-            ),
+            "track_distance_m": np.asarray(arrays.get("track_static_distance_m", [])),
+            "track_length_m": np.asarray(arrays.get("track_static_length_m", np.nan)),
             "coordinate_frame": np.asarray("assetto_corsa_gym_world_xy_v1"),
             "coordinate_transform": np.asarray("world_xy=[ac_z,ac_x]"),
         }
@@ -1133,9 +1085,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         st.session_state["step"] = 0
         st.session_state["playing"] = False
     maximum_step = episode_indices.size - 1
-    st.session_state["step"] = int(
-        np.clip(st.session_state.get("step", 0), 0, maximum_step)
-    )
+    st.session_state["step"] = int(np.clip(st.session_state.get("step", 0), 0, maximum_step))
 
     controls = st.columns([1, 1, 1, 1, 2, 2])
     if controls[0].button("⏮ Anfang", width="stretch"):
@@ -1155,7 +1105,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     run_every = 1.0 / fps if st.session_state["playing"] else None
 
     @st.fragment(run_every=run_every)
-    def render() -> None:
+    def render() -> None:  # noqa: PLR0912, PLR0915
         if st.session_state["playing"]:
             local_step = int(st.session_state["step"])
             st.progress(
@@ -1173,9 +1123,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
         global_index = int(episode_indices[local_step])
         current_position = positions[global_index]
-        current_heading = (
-            float(headings[global_index]) if global_index < headings.size else 0.0
-        )
+        current_heading = float(headings[global_index]) if global_index < headings.size else 0.0
 
         reference_projection = _project_closed_path(
             static_reference,
@@ -1196,9 +1144,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             total_steps,
         )
         if reference_world is None and reference_projection is not None:
-            reference_world = _reference_preview(
-                reference, reference_projection.progress_m
-            )
+            reference_world = _reference_preview(reference, reference_projection.progress_m)
         left_world = _step_points(
             arrays,
             ("left_boundary_preview_world_xy_m", "left_boundary_preview_world_xz_m"),
@@ -1212,9 +1158,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             total_steps,
         )
         if (left_world is None or right_world is None) and track_projection is not None:
-            left_world, right_world = _boundary_preview(
-                geometry, track_projection.progress_m
-            )
+            left_world, right_world = _boundary_preview(geometry, track_projection.progress_m)
 
         prediction_local_xz = _step_points(
             arrays,
@@ -1234,6 +1178,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915
                 current_position,
                 current_heading,
             )
+        prediction_world_with_origin = (
+            np.vstack((current_position, prediction_world))
+            if prediction_world is not None
+            else None
+        )
         reference_local_xz = _step_points(
             arrays,
             ("reference_preview_local_xz_m",),
@@ -1251,9 +1200,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             total_steps,
         )
         if left_local_xz is None:
-            left_local_xz = _world_xz_to_local_xz(
-                left_world, current_position, current_heading
-            )
+            left_local_xz = _world_xz_to_local_xz(left_world, current_position, current_heading)
         right_local_xz = _step_points(
             arrays,
             ("right_boundary_preview_local_xz_m",),
@@ -1261,9 +1208,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             total_steps,
         )
         if right_local_xz is None:
-            right_local_xz = _world_xz_to_local_xz(
-                right_world, current_position, current_heading
-            )
+            right_local_xz = _world_xz_to_local_xz(right_world, current_position, current_heading)
         prediction_fl = _local_xz_to_vehicle_fl(prediction_local_xz)
         reference_fl = _local_xz_to_vehicle_fl(reference_local_xz)
         left_fl = _local_xz_to_vehicle_fl(left_local_xz)
@@ -1310,7 +1255,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915
                 _add_points(figure, left_world, "Boundary preview left")
                 _add_points(figure, right_world, "Boundary preview right")
             if show["bezier"]:
-                _add_points(figure, prediction_world, "Predicted Bézier line")
+                _add_points(
+                    figure,
+                    prediction_world_with_origin,
+                    "Predicted Bézier line",
+                )
             if show["projection"] and reference_projection is not None:
                 _add_points(
                     figure,
@@ -1366,13 +1315,22 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             left_agent = _vehicle_fl_plot(left_fl)
             right_agent = _vehicle_fl_plot(right_fl)
             prediction_agent = _vehicle_fl_plot(prediction_fl)
+            prediction_agent_with_origin = (
+                np.vstack((np.zeros(2, dtype=np.float64), prediction_agent))
+                if prediction_agent is not None
+                else None
+            )
             if show["reference_preview"]:
                 _add_points(figure, reference_agent, "Reference feature")
             if show["boundary_preview"]:
                 _add_points(figure, left_agent, "Track border feature left")
                 _add_points(figure, right_agent, "Track border feature right")
             if show["bezier"]:
-                _add_points(figure, prediction_agent, "Predicted Bézier line")
+                _add_points(
+                    figure,
+                    prediction_agent_with_origin,
+                    "Predicted Bézier line",
+                )
             figure.add_trace(
                 go.Scattergl(
                     x=[0.0],
@@ -1458,13 +1416,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     with st.expander("Evaluation und Datenstatus"):
         st.write(f"**Koordinatenframe:** `{coordinate_frame}`")
-        st.write(
-            f"**Track Geometrie:** `{geometry_artifact or 'nicht gefunden'}`"
-        )
+        st.write(f"**Track Geometrie:** `{geometry_artifact or 'nicht gefunden'}`")
         st.write(f"**Referenz:** `{reference_artifact or 'nicht gefunden'}`")
-        st.write(
-            "**Lokaler Modellframe:** `[lateral X = left, forward Z = forward]`"
-        )
+        st.write("**Lokaler Modellframe:** `[lateral X = left, forward Z = forward]`")
         st.write("**Agentenframe:** `[forward, left]`")
         if summary:
             st.write("**summary.json**")
@@ -1478,7 +1432,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915
                 [
                     {
                         "Name": name,
-                        "Shape": " × ".join(map(str, value.shape)),
+                        "Shape": " x ".join(map(str, value.shape)),
                         "Dtype": str(value.dtype),
                     }
                     for name, value in sorted(arrays.items())

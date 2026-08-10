@@ -38,6 +38,10 @@ def test_cli_help_explains_the_local_training_boundary(
     arguments = parser.parse_args(["rl-train", "--backend", "assetto-corsa", "--launch-game"])
     assert arguments.launch_game is True
 
+    bc_evaluation = parser.parse_args(["bc-live-evaluate", "--launch-game", "--episodes", "2"])
+    assert bc_evaluation.launch_game is True
+    assert bc_evaluation.episodes == 2
+
     live_arguments = parser.parse_args(
         [
             "live-validate",
@@ -112,6 +116,10 @@ def test_live_rl_training_selects_live_environment(
     class _Writer:
         def __init__(self) -> None:
             self.closed = False
+            self.neutral_calls = 0
+
+        def neutral(self) -> None:
+            self.neutral_calls += 1
 
         def close(self) -> None:
             self.closed = True
@@ -171,15 +179,13 @@ def test_live_rl_training_selects_live_environment(
         "MonitoringConfig",
         SimpleNamespace(from_toml=lambda _path: monitoring_config),
     )
-    monkeypatch.setattr(
-        cli,
-        "create_tracker",
-        lambda selected_config: (
-            expected_tracker
-            if selected_config is monitoring_config
-            else pytest.fail("wrong monitoring config")
-        ),
-    )
+
+    def create_tracker_stub(selected_config: object) -> object:
+        assert selected_config is monitoring_config
+        device_events.append("tracker")
+        return expected_tracker
+
+    monkeypatch.setattr(cli, "create_tracker", create_tracker_stub)
     observed_backends: list[str] = []
 
     def train_stub(
@@ -226,8 +232,9 @@ def test_live_rl_training_selects_live_environment(
     )
     assert observed_backends == ["assetto-corsa"]
     assert launcher_events == ["created", "entered", "stopped", "restored"]
-    assert device_events == ["gamepad", "launcher"]
+    assert device_events == ["tracker", "gamepad", "launcher"]
     assert environment.closed
+    assert writer.neutral_calls == 1
     assert writer.closed
 
 

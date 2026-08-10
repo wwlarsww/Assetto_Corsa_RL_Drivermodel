@@ -1,2 +1,0 @@
-iteration,policy_version,environment_steps,rollout_steps,episodes_completed,environment_reward_mean,predicted_progress_mean_m,shaped_reward_mean,predictor_valid_samples,policy_loss,value_loss,entropy,predictor_loss,approximate_kl,clip_fraction
-1,1,104,104,0,0.7408488988876343,24.903390884399414,0.9898828268051147,84,-0.0032090358436107635,213.59732818603516,1.838176965713501,0.38494639098644257,0.00019132230954710394,0.0

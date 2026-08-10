@@ -198,6 +198,9 @@ def test_motec_parser_and_baseline_reference_builder(
     assert report.empty_bins_before_interpolation == 0
     assert reference.track_distance_m.size == 10
     assert 9.0 < float(reference.speed_mps.min()) < float(reference.speed_mps.max()) < 21.0
+    assert reference.human_mean_speed_mps is not None
+    assert float(reference.human_mean_speed_mps.min()) > 9.0
+    assert float(reference.human_mean_speed_mps.max()) < 21.0
     np.testing.assert_array_equal(reference.lateral_offset_m, np.zeros(10, dtype=np.float32))
     assert reference.world_position_xy_m is not None
     assert not np.allclose(reference.heading_rad, 0.0)

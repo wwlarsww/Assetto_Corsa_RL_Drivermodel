@@ -5,35 +5,151 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 
 from assetto_corsa_rl.config import (
     ACTION_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
+    SUCCESSOR_REFERENCE_TRACKING_METHOD_VARIANT,
     EnvironmentConfig,
     ExperimentConfig,
     ModelConfig,
     PPOConfig,
     ProjectConfig,
+    RewardConfig,
 )
 from assetto_corsa_rl.envs.factory import create_mock_environment
 from assetto_corsa_rl.features.schema import OBSERVATION_FEATURE_NAMES
 from assetto_corsa_rl.training.checkpoints import load_checkpoint
 from assetto_corsa_rl.training.ppo import (
-    _validate_initial_checkpoint,
+    _collect_rollout,
+    _CollectionCursor,
+    _next_learning_rate,
+    _postprocess_rollout,
     build_driver_network,
     train_ppo,
+    validate_initial_checkpoint,
 )
 
 
 def test_legacy_delta_action_checkpoint_is_rejected() -> None:
     with pytest.raises(ValueError, match="not compatible"):
-        _validate_initial_checkpoint(
+        validate_initial_checkpoint(
             {
                 "method_variant": "fixed_reference_v1",
                 "observation_feature_names": list(OBSERVATION_FEATURE_NAMES),
-            }
+            },
+            config=ProjectConfig(),
         )
+
+
+def test_rollout_uses_the_models_bounded_action_density() -> None:
+    base = ProjectConfig()
+    config = replace(
+        base,
+        model=ModelConfig(
+            feature_hidden_sizes=(16,),
+            policy_hidden_sizes=(8,),
+            value_hidden_sizes=(8,),
+            predictor_hidden_sizes=(8,),
+        ),
+    )
+    environment = create_mock_environment(config)
+    model = build_driver_network(config)
+    observation, info = environment.reset(seed=13)
+    try:
+        batch, _ = _collect_rollout(
+            environment,
+            model,
+            _CollectionCursor(observation=observation, info=info, trajectory_id=0),
+            policy_version=0,
+            step_count=16,
+            device=torch.device("cpu"),
+        )
+    finally:
+        environment.close()
+
+    assert np.all(batch.actions > -1.0)
+    assert np.all(batch.actions < 1.0)
+    with torch.no_grad():
+        expected_log_probability = model.action_distribution(
+            torch.as_tensor(batch.observations)
+        ).log_prob(torch.as_tensor(batch.actions))
+    np.testing.assert_allclose(
+        batch.log_probabilities,
+        expected_log_probability.numpy(),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_successor_reference_reward_is_applied_before_gae() -> None:
+    base = ProjectConfig()
+    config = replace(
+        base,
+        model=ModelConfig(
+            feature_hidden_sizes=(16,),
+            policy_hidden_sizes=(8,),
+            value_hidden_sizes=(8,),
+            predictor_hidden_sizes=(8,),
+        ),
+        rewards=RewardConfig(
+            reference_tracking_method_variant=(SUCCESSOR_REFERENCE_TRACKING_METHOD_VARIANT),
+            reference_tracking_penalty_scale=2.0,
+            reference_heading_penalty_scale=1.0,
+        ),
+    )
+    environment = create_mock_environment(config)
+    model = build_driver_network(config)
+    observation, info = environment.reset(seed=13)
+    try:
+        batch, _ = _collect_rollout(
+            environment,
+            model,
+            _CollectionCursor(observation=observation, info=info, trajectory_id=0),
+            policy_version=0,
+            step_count=16,
+            device=torch.device("cpu"),
+        )
+        processed = _postprocess_rollout(
+            config,
+            environment,
+            model,
+            batch,
+            torch.device("cpu"),
+        )
+    finally:
+        environment.close()
+
+    assert processed.reference_heading_error_abs_rad.shape == (16,)
+    assert processed.reference_progress_alignment.shape == (16,)
+    assert np.all(processed.reference_progress_alignment <= 1.0)
+    np.testing.assert_allclose(
+        processed.rewards,
+        batch.rewards + processed.reference_tracking_reward,
+    )
+
+
+def test_target_band_controller_adjusts_the_next_learning_rate() -> None:
+    config = ProjectConfig()
+
+    assert _next_learning_rate(
+        config,
+        current_learning_rate=3e-4,
+        approximate_kl=0.02,
+    ) == pytest.approx(1.5e-4)
+    assert _next_learning_rate(
+        config,
+        current_learning_rate=1e-4,
+        approximate_kl=0.001,
+    ) == pytest.approx(1.1e-4)
+    assert _next_learning_rate(
+        config,
+        current_learning_rate=1e-4,
+        approximate_kl=0.01,
+    ) == pytest.approx(1e-4)
 
 
 def test_short_mock_ppo_run_updates_versioned_policy(tmp_path: Path) -> None:
@@ -107,6 +223,9 @@ def test_short_mock_ppo_run_updates_versioned_policy(tmp_path: Path) -> None:
         "predicted_progress_mean_m",
         "shaped_reward_mean",
         "predictor_valid_samples",
+        "learning_rate",
+        "next_learning_rate",
+        "update_epochs_completed",
         "policy_loss",
         "value_loss",
         "entropy",

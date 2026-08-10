@@ -25,6 +25,9 @@ def _fragment(
             simulation_time_s=np.arange(steps, dtype=np.float32),
             trajectory_id=np.zeros(steps, dtype=np.int64),
             reference_progress_m=np.arange(steps, dtype=np.float32),
+            successor_lateral_offset_m=np.zeros(steps, dtype=np.float32),
+            successor_heading_error_rad=np.zeros(steps, dtype=np.float32),
+            progress_reward=np.ones(steps, dtype=np.float32),
         )
         if with_context
         else None
@@ -105,4 +108,7 @@ def test_trajectory_context_validates_shapes() -> None:
             simulation_time_s=np.zeros(2, dtype=np.float32),
             trajectory_id=np.zeros(2, dtype=np.int64),
             reference_progress_m=np.zeros(2, dtype=np.float32),
+            successor_lateral_offset_m=np.zeros(2, dtype=np.float32),
+            successor_heading_error_rad=np.zeros(2, dtype=np.float32),
+            progress_reward=np.zeros(2, dtype=np.float32),
         )

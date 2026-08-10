@@ -1,50 +1,76 @@
-# Python
+# Python bytecode and tool caches
 __pycache__/
 *.py[cod]
 *.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
 .pytest_cache/
+.pytest_tmp/
 .pytest-tmp/
 .pytest-tmp-*/
+.pytest_temp/
 .pytest-temp/
-.ui-test-tmp/
-.mypy_cache/
+.pyright/
 .ruff_cache/
-.coverage
-htmlcov/
+.test-tmp/
+.test-tmp-*/
+
+# Build and generated documentation
 build/
 dist/
 site/
 
-# Virtual environments and local tooling
-.venv/
-venv/
+# Virtual environments and local configuration
+.env
+.env.*
+!.env.example
+.venv*/
+env*/
+venv*/
 .idea/
 .vscode/*
 !.vscode/settings.json
 .openai/
-*_context/
-*_context.zip
 
-# Runtime artefacts
-runs/
+# Runtime, monitoring and training artefacts
 checkpoints/
-*.log
+mlartifacts/
+mlflow/
+mlflow.db
+mlruns/
+runs/
+*.ckpt
+*.ld
+*.ldx
+*.npy
+*.npz
+*.onnx
+*.pickle
+*.pkl
+*.pt
+*.pth
 
-# Downloaded datasets stay local. Only provenance documentation/manifests are tracked.
+# Downloaded datasets stay local. Only provenance manifests are versioned.
 data/*
 !data/README.md
 !data/manifests/
 data/manifests/*
 !data/manifests/*.json
 
-# Local research material (not part of the public repository)
-Masterarbeit*.pdf
+# Local research material and scratch files
+.update-backups/
+/*_context/
+/*_context.zip
+/*.patch
+/Masterarbeit*.pdf
+*.bak
+*.log
+*.orig
+*.rej
+*.tmp
 
-# OS files
+# Operating-system files
 .DS_Store
 Thumbs.db
-
-# monitoring
-runs/mlflow/
-mlflow.db
-mlruns/

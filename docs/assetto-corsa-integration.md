@@ -21,11 +21,28 @@ content, including the native `models_<layout>.ini` track manifest, moves the
 current per-user `race.ini` to an `.acrl-backup`, writes a temporary
 deterministic session, provides Assetto Corsa's Steam App ID `244210` while
 starting `acs.exe`, and waits for matching live shared-memory identity before
-the controller can be opened. Checking the model manifest prevents Steam's
-DLC preview-only `ui` directories from being mistaken for playable tracks. It
+the controller can be opened. A matching existing session is reused only while
+its physics or graphics packet IDs continue to advance. If matching shared
+memory is frozen, `--launch-game` locates processes by the exact configured
+`acs.exe` path. It gracefully closes and replaces the session only when there
+is exactly one such process. If that process has no closeable window or ignores
+`WM_CLOSE` for 15 seconds, the launcher terminates that same verified process
+and waits for its exit before restarting. It never terminates a healthy process
+or guesses between multiple candidates. A newly launched session must likewise
+publish advancing packets before it is accepted. Checking the model manifest
+prevents Steam's DLC preview-only `ui` directories from being mistaken for
+playable tracks. It
 restores the original `race.ini` and removes a Steam App ID file that it created
 after training. An existing valid Steam App ID file is preserved. A recovery
 backup left by a hard crash is never overwritten; restore it before retrying.
+
+When Steam is not ready yet, the directly started bootstrap `acs.exe` can exit
+before the game process appears. This is treated as a Steam handoff rather than
+an immediate failure. The launcher keeps waiting for up to the configured
+`launch_timeout_s` (120 seconds in the live configuration), adopts exactly one
+delayed process from the same full `acs.exe` path, and retains ownership so that
+the Steam-started game is still closed cleanly after training. Multiple delayed
+processes remain a safety error.
 
 The launcher also requires the selected layout's `ai/fast_lane.ai`. This file,
 not a TOML length or downloaded CSV, supplies the reference centreline, lap
@@ -145,10 +162,76 @@ car, zeros velocity and re-enables user input. The backend starts no episode
 until the matching acknowledgement and configured stable, non-pit frames have
 both arrived. A configured neutral post-reset quiescence lets any reset-induced
 collision callback arrive before the episode collision baseline is recorded.
-The backend then applies the configured `[+1, 0]` initial action (full throttle,
-centred steering) and exposes the same value as the first observation's
-previous action. This is reset synchronisation, not a grace period after an
-agent action.
+The baseline then applies its configured `[+1, 0]` initial action (full
+throttle, centred steering) and exposes the same value as the first
+observation's previous action. This is reset synchronisation, not a grace
+period after an agent action.
+
+The separate named `csp_hotlap_reference_speed_v1` variant gives the episode a
+flying start without changing `csp_hotlap_spawn_v1`. On the first reset of a
+backend process it performs a stationary probe, projects the actual
+`HOTLAP_START` world position onto the fixed reference, and reads the
+interpolated `human_mean_speed_mps` value there. A V2 command sends that bounded
+value to the CSP app. After teleport and repair, CSP aligns body velocity with
+`car.look`, engages a forward gear and enables its automatic shifter. It holds
+the chassis speed for 0.5 s and lets the tyre physics settle the four wheel
+velocities instead of assigning one potentially incorrect wheel sign. Later
+resets reuse the measured start coordinate.
+
+The successor `csp_reference_pose_speed_v2` variant uses a V3 command carrying
+the same human mean speed plus an explicit reference-line position and heading.
+An optional signed `reset_reference_lateral_offset_m` shifts the pose along the
+reference's left normal; negative values start to the right. CSP first performs
+the native Hotlap teleport and repair, then places and settles the requested
+pose before the speed-hold phase. Python requires the requested speed for the
+configured number of low-slip frames and validates lateral and heading errors
+before returning the first observation. Transient shared-memory and tyre-bridge
+timeouts are retried only within the existing bounded reset timeout.
+
+During either moving reset, the Lua app ignores reset-induced collision
+callbacks while the state machine is active and for 1.0 s after its
+acknowledgement. This covers delayed suspension and placement contacts only;
+normal collision callbacks latch immediately afterward. The installed Lua app
+and a rebuilt human reference artefact containing `human_mean_speed_mps` are
+required for both moving variants.
+
+Build the additional mean profile before enabling the variant, then select it
+explicitly in a non-baseline configuration:
+
+```powershell
+.\.venv\Scripts\python.exe -m assetto_corsa_rl build-reference `
+  --config configs\bmw_z4_gt3_monza_baseline.toml
+```
+
+```toml
+[assetto_corsa]
+reset_backend = "csp_reference_pose_speed_v2"
+reset_reference_speed_tolerance_mps = 2.0
+reset_reference_lateral_offset_m = -0.5
+reset_reference_heading_tolerance_rad = 0.05
+reset_max_abs_slip_ratio = 0.2
+reset_slip_stable_frames = 3
+reset_reference_speed_max_attempts = 3
+```
+
+Each moving-reset attempt must independently receive a matching CSP
+acknowledgement and pass the speed/slip checks. V3 pose resets must additionally
+pass lateral and heading validation inside that same retry boundary. This
+allows a short physics/shared-memory disturbance caused by moving or minimising
+the AC window to trigger a new fully acknowledged reset instead of terminating
+training after the first bad frame. The extended experiment permits three
+attempts; persistent misalignment still fails hard. The default remains one
+attempt for the unchanged baseline. It uses a 0.5 m right offset to remain close
+to the demonstrated human start states. The
+live-smoke configuration retains V2, while `bmw_z4_gt3_monza_baseline.toml`
+deliberately retains the stationary thesis baseline.
+
+The live transport also exposes `steering_output_gain` (default `1.0`) as an
+explicit controller calibration. It scales only the X360 steering report and
+clips it to `[-1, 1]`; it does not alter policy observations, BC targets or the
+unchanged thesis baseline. The extended V6 experiment uses `1.2`, selected from
+live reference-heading measurements after applying its temporary linear X360
+profile.
 
 Do not use `python_ext_reset_car_v1` as an episode reset: CSP documents it as
 recovery back to the track. On the validated Monza setup repeated calls moved
@@ -171,7 +254,11 @@ the circuit while keeping the limitation explicit in the recorded metadata.
 : Apply combined pedal and steering, advance exactly one agent control period
   and return the next synchronised frame plus an optional termination reason.
   `TelemetryFrame.progress_m` is the current world position projected onto the
-  prescribed reference line; the environment differences consecutive values.
+  prescribed reference line. The legacy timing differences consecutive
+  returned values. The named `pre_action_progress_baseline_v1` live variant
+  first samples a fresh projection immediately before applying the new action,
+  so inference-time motion under the preceding control is not credited to the
+  newly sampled action.
 
 `close()`
 : Release shared-memory handles, virtual-controller devices, sockets and helper
@@ -250,25 +337,41 @@ apply to `CS.SlipRatio`.
 
 Game pausing, menus and loading screens are not environment transitions. The
 backend emits a step only after a full control period, a fresh live physics
-frame, a fresh slip packet, and fresh collision state. At reset it first waits
-for the acknowledged deterministic reset, stable frames and the configured neutral
-collision-quiescence interval, then records the current collision sequence. A
-callback increment at any point afterward stays
+frame, a fresh slip packet, and fresh collision state. For
+`pre_action_progress_baseline_v1`, the full-period wait begins only after the
+pre-action progress sample and control write. Diagnostics record the timing
+variant, the reward start projection, observation-to-action delay and measured
+action-hold duration. This corrects reward attribution but does not claim that
+the real-time simulator can be paused during neural-network inference. For
+`csp_hotlap_spawn_v1`, reset first waits for stable stationary frames and the
+configured neutral collision-quiescence interval. For
+the V2 reference-speed reset, CSP settles the teleported car before applying
+the reference speed. The V3 pose-and-speed reset adds explicit reference pose
+placement and Python-side pose validation. Both moving paths require
+consecutive in-tolerance speed and low-slip frames, while the Lua bridge
+suppresses only reset-generated collision callbacks for its bounded reset
+window. All paths then record the current collision sequence. A callback
+increment at any point afterward stays
 latched until the next agent step and immediately produces crash termination.
 This deliberately avoids damage thresholds, vehicle width/length, and wall
 intersection calculations. The backend also distinguishes lap completion from
 off-track, stalled and excessive vehicle body-sideslip termination. The
 body-sideslip termination uses the calibrated shared-memory local
-velocity axes and a configurable 20-degree absolute threshold above 5 m/s;
+velocity axes and a configurable absolute threshold above 5 m/s. The baseline
+uses 20 degrees and the extended experiment uses 30 degrees;
 longitudinal tyre slip ratio is not a terminal condition. External timeouts
 are adapter errors, not successful terminal states.
 The live baseline has no ordinary time-limit truncation. Stall detection arms
 after the car first reaches 5 km/h; five consecutive later low-speed frames
 produce `STALLED`. A separate 25-step fallback terminates a car that never
-drives off. The next episode performs the deterministic `HOTLAP_START` reset.
+drives off. The extended experiment records its separate 20 Hz choices: two
+low-speed frames, a 20-step fallback and a 2,400-step safety truncation. The
+next episode performs the deterministic reset.
 
-The deterministic reset explicitly engages first gear after placing the car at
-`HOTLAP_START`. For sessions started by the launcher, the user's `assists.ini`
+The stationary deterministic reset explicitly engages first gear after placing
+the car at `HOTLAP_START`; the reference-speed variant engages a forward gear
+for its flying start and enables CSP's automatic shifter. For sessions started
+by the launcher, the user's `assists.ini`
 is backed up, `AUTO_SHIFTER=1` and `AUTO_CLUTCH=1` are installed before AC
 starts, and the original bytes are restored after shutdown. An attached
 session is never reconfigured behind AC's back; its effective gearbox state is
@@ -279,7 +382,7 @@ and positive reference-line progress.
 
 1. Run `telemetry-diagnose` and retain one raw diagnostic capture.
 2. Run `live-validate --session launch`. It must start the configured session,
-   reproduce the reset pose, report first gear and forward motion under low
+   reproduce the reset pose, report a forward gear and forward motion under low
    throttle, echo all analog controls, complete the connection soak and
    gracefully stop the process it owns.
    To verify the automatic first-to-second upshift explicitly, add

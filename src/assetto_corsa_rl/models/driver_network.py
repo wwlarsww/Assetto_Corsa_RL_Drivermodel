@@ -152,7 +152,12 @@ class DriverNetwork(nn.Module):
             nn.init.orthogonal_(module.weight, gain=nn.init.calculate_gain("tanh"))
             nn.init.zeros_(module.bias)
 
-    def forward(self, observation: Tensor) -> NetworkOutput:
+    def forward(
+        self,
+        observation: Tensor,
+        *,
+        detach_auxiliary_backbone: bool = False,
+    ) -> NetworkOutput:
         """Evaluate every head from the same latent representation."""
 
         if observation.shape[-1] != self.observation_size:
@@ -163,8 +168,9 @@ class DriverNetwork(nn.Module):
         latent = self.feature_extractor(observation)
         action_location = self.policy_head(latent)
         action_mean = torch.tanh(action_location)
-        value = self.value_head(latent).squeeze(-1)
-        trajectory_parameters = self.trajectory_predictor(latent)
+        auxiliary_latent = latent.detach() if detach_auxiliary_backbone else latent
+        value = self.value_head(auxiliary_latent).squeeze(-1)
+        trajectory_parameters = self.trajectory_predictor(auxiliary_latent)
         log_std = self.action_log_std.expand_as(action_mean)
         return NetworkOutput(
             action_location=action_location,

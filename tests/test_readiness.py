@@ -6,8 +6,10 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from assetto_corsa_rl.ac_integration.track_assets import sha256_file
 from assetto_corsa_rl.config import (
     BASELINE_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
@@ -16,6 +18,7 @@ from assetto_corsa_rl.config import (
     ProjectConfig,
 )
 from assetto_corsa_rl.training.readiness import (
+    _bc_reference_compatibility_check,
     _checkpoint_variant_check,
     _collision_bridge_capability_check,
     _hotlap_reset_bridge_capability_check,
@@ -63,6 +66,45 @@ def test_baseline_checkpoint_is_accepted_for_stabilized_ppo(tmp_path: Path) -> N
     assert "BC checkpoint variants match" in check.message
 
 
+def test_bc_reference_compatibility_requires_matching_dataset_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    reference = tmp_path / "reference.npz"
+    reference.write_bytes(b"active-reference")
+    reference_sha256 = sha256_file(reference)
+    metadata = {
+        "schema_version": 6,
+        "reference_feature_contract": "sha256_bound_time_parameterized_fixed_reference_v1",
+        "reference_sha256": reference_sha256,
+        "calibration": "acti_motec_ai_spline_absolute_steering_left_v2",
+        "steering_conversion": "motec_positive_right_to_policy_positive_left_v1",
+    }
+    dataset = tmp_path / "dataset.npz"
+    np.savez_compressed(dataset, metadata_json=np.asarray(json.dumps(metadata)))
+    metrics = tmp_path / "metrics.json"
+    metrics.write_text(json.dumps({"dataset_metadata": metadata}), encoding="utf-8")
+
+    matching = _bc_reference_compatibility_check(
+        reference_path=reference,
+        dataset_path=dataset,
+        metrics_path=metrics,
+    )
+    assert matching.severity == "ok"
+
+    stale_metadata = {**metadata, "reference_sha256": "0" * 64}
+    metrics.write_text(
+        json.dumps({"dataset_metadata": stale_metadata}),
+        encoding="utf-8",
+    )
+    stale = _bc_reference_compatibility_check(
+        reference_path=reference,
+        dataset_path=dataset,
+        metrics_path=metrics,
+    )
+    assert stale.severity == "error"
+    assert "stale reference" in stale.message
+
+
 def test_collision_bridge_capability_requires_latched_callback(tmp_path: Path) -> None:
     path = tmp_path / "bridge.lua"
     path.write_text("-- old bridge\n", encoding="utf-8")
@@ -85,6 +127,96 @@ def test_hotlap_reset_capability_requires_first_gear_engagement(tmp_path: Path) 
     assert _hotlap_reset_bridge_capability_check(path).severity == "error"
     path.write_text(reset_source + "physics.engageGear(0, 1)\n", encoding="utf-8")
     assert _hotlap_reset_bridge_capability_check(path).severity == "ok"
+
+
+def test_reference_speed_reset_capability_requires_velocity_and_wheel_sync(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bridge.lua"
+    source = (
+        "ACRL_HOTLAP_RESET_COMMAND_V2\n"
+        "physics.teleportCarTo(0, ac.SpawnSet.HotlapStart)\n"
+        "physics.resetCarState(0)\n"
+    )
+    path.write_text(source, encoding="utf-8")
+    assert (
+        _hotlap_reset_bridge_capability_check(
+            path,
+            method_variant="csp_hotlap_reference_speed_v1",
+        ).severity
+        == "error"
+    )
+    path.write_text(
+        source
+        + "physics.setWheelAngularVelocity(0, ac.Wheel.All, 0)\n"
+        + "physics.setCarVelocity(0, car.look * startSpeedMps)\n",
+        encoding="utf-8",
+    )
+    assert (
+        _hotlap_reset_bridge_capability_check(
+            path,
+            method_variant="csp_hotlap_reference_speed_v1",
+        ).severity
+        == "error"
+    )
+    path.write_text(
+        source
+        + "ac.getCar(0)\n"
+        + "physics.setWheelAngularVelocity(0, ac.Wheel.All, 0)\n"
+        + "physics.setCarVelocity(0, car.look * startSpeedMps)\n",
+        encoding="utf-8",
+    )
+    assert (
+        _hotlap_reset_bridge_capability_check(
+            path,
+            method_variant="csp_hotlap_reference_speed_v1",
+        ).severity
+        == "error"
+    )
+    path.write_text(
+        source
+        + "ac.getCar(0)\n"
+        + "physics.setWheelAngularVelocity(0, ac.Wheel.All, 0)\n"
+        + "physics.setCarVelocity(0, car.look * startSpeedMps)\n"
+        + "local referenceSpeedHoldDuration = 0.25\n"
+        + "pendingReset.velocityHold = pendingReset.velocityHold + deltaTime\n",
+        encoding="utf-8",
+    )
+    assert (
+        _hotlap_reset_bridge_capability_check(
+            path,
+            method_variant="csp_hotlap_reference_speed_v1",
+        ).severity
+        == "ok"
+    )
+
+
+def test_reference_pose_reset_capability_requires_v3_position_and_heading(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bridge.lua"
+    path.write_text(
+        "ACRL_HOTLAP_RESET_COMMAND_V3\n"
+        "physics.teleportCarTo(0, ac.SpawnSet.HotlapStart)\n"
+        "physics.resetCarState(0)\n"
+        "physics.setCarPosition(0, position, direction)\n"
+        "pendingReset.targetHeadingRad\n"
+        "local placementDirection = -velocityDirection\n"
+        "pendingReset.posePlaced = true\n"
+        "local resetCollisionSuppressionDuration = 1.0\n"
+        "collisionSuppressionRemaining = 0\n"
+        "physics.setWheelAngularVelocity(0, ac.Wheel.All, 0)\n"
+        "physics.setCarVelocity(0, velocity)\n"
+        "pendingReset.velocityHold = 1\n",
+        encoding="utf-8",
+    )
+
+    check = _hotlap_reset_bridge_capability_check(
+        path,
+        method_variant="csp_reference_pose_speed_v2",
+    )
+
+    assert check.severity == "ok"
 
 
 def test_live_readiness_reports_predictor_and_control_blockers(

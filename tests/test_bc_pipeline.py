@@ -7,8 +7,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from conftest import FastLaneFactory
 
+from assetto_corsa_rl.ac_integration.track_assets import sha256_file
 from assetto_corsa_rl.config import (
     AssettoCorsaRuntimeConfig,
     BehavioralCloningConfig,
@@ -21,13 +23,48 @@ from assetto_corsa_rl.config import (
 )
 from assetto_corsa_rl.data import bc_dataset
 from assetto_corsa_rl.data.bc_dataset import (
+    ACTI_MOTEC_CALIBRATION_NAME,
+    MOTEC_STEERING_CONVERSION_NAME,
+    BCDatasetBuildReport,
     BehavioralCloningDataset,
     build_bc_dataset,
     split_session_ids,
 )
 from assetto_corsa_rl.data.motec import MotecHeader
+from assetto_corsa_rl.features.schema import OBSERVATION_FEATURES, OBSERVATION_SIZE
+from assetto_corsa_rl.models.trajectory_contract import (
+    TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT,
+)
 from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
-from assetto_corsa_rl.training.behavioral_cloning import train_behavioral_cloning
+from assetto_corsa_rl.training.behavioral_cloning import (
+    BCTrainingResult,
+    _permute_causal_feedback_features,
+    train_behavioral_cloning,
+)
+
+
+def test_causal_feedback_permutation_preserves_route_context() -> None:
+    observation = torch.arange(3 * OBSERVATION_SIZE, dtype=torch.float32).reshape(
+        3,
+        OBSERVATION_SIZE,
+    )
+    donor = torch.tensor([2, 0, 1], dtype=torch.long)
+
+    augmented = _permute_causal_feedback_features(observation, donor)
+
+    feedback_indices = {
+        feature.index
+        for feature in OBSERVATION_FEATURES
+        if (feature.group == "vehicle_state" and feature.name != "vehicle.speed_mps")
+        or feature.group == "previous_action"
+    }
+    for feature in OBSERVATION_FEATURES:
+        expected = (
+            observation[donor, feature.index]
+            if feature.index in feedback_indices
+            else observation[:, feature.index]
+        )
+        torch.testing.assert_close(augmented[:, feature.index], expected)
 
 
 def _fake_motec_channels() -> dict[str, np.ndarray]:
@@ -118,6 +155,9 @@ def _project_config(tmp_path: Path, fast_lane_factory: FastLaneFactory) -> Proje
             epochs=1,
             batch_size=64,
             predictor_loss_weight=0.01,
+            predictor_target_normalization_method_variant=(
+                TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT
+            ),
             validation_fraction=0.2,
             test_fraction=0.2,
             minimum_speed_mps=1.0,
@@ -154,7 +194,7 @@ def test_session_split_keeps_the_dominant_session_in_training() -> None:
 def _assert_built_bc_dataset(
     config: ProjectConfig,
     dataset: BehavioralCloningDataset,
-    report,
+    report: BCDatasetBuildReport,
 ) -> None:
     assert report.recordings == 3
     assert report.complete_laps == 3
@@ -169,21 +209,44 @@ def _assert_built_bc_dataset(
     )
     assert dataset.train.observations.shape[1] == 77
     assert dataset.train.predictor_valid_mask.any()
-    assert dataset.metadata["schema_version"] == 4
+    assert dataset.metadata["schema_version"] == 6
     assert dataset.metadata["method_variant"] == "ai_spline_absolute_v1"
     assert dataset.metadata["action_method_variant"] == "absolute_bounded_v1"
+    assert dataset.metadata["calibration"] == ACTI_MOTEC_CALIBRATION_NAME
+    assert dataset.metadata["steering_conversion"] == MOTEC_STEERING_CONVERSION_NAME
+    assert dataset.metadata["steering_convention"] == "policy_positive_left_v1"
+    assert dataset.metadata["reference_sha256"] == sha256_file(Path(config.reference.artifact_path))
+    assert dataset.metadata["reference_feature_contract"] == (
+        "sha256_bound_time_parameterized_fixed_reference_v1"
+    )
     assert dataset.metadata["reference_point_count"] == 20
     assert dataset.metadata["predictor_point_count"] == 10
     assert dataset.metadata["predictor_horizon_s"] == pytest.approx(1.0)
-    np.testing.assert_allclose(
-        dataset.metadata["predictor_time_offsets_s"],
-        np.arange(1, 11, dtype=np.float32) * 0.1,
+    predictor_time_offsets_s = np.asarray(
+        dataset.metadata["predictor_time_offsets_s"], dtype=np.float32
     )
+    np.testing.assert_allclose(predictor_time_offsets_s, np.arange(1, 11, dtype=np.float32) * 0.1)
     assert dataset.train.predictor_target_xz_m.shape[1:] == (10, 2)
     assert dataset.metadata["training_augmentation"] == ("ego_left_right_mirror_v1")
-    assert dataset.train.sample_count == (2 * dataset.metadata["unaugmented_train_samples"])
-    assert dataset.metadata["trajectory_codec"] == ("bezier-origin-5x2-10x0p1s-normalized-v1")
+    unaugmented_train_samples = dataset.metadata["unaugmented_train_samples"]
+    assert isinstance(unaugmented_train_samples, int)
+    assert dataset.train.sample_count == (2 * unaugmented_train_samples)
+    assert dataset.metadata["trajectory_codec"] == (
+        "bezier-origin-5x2-bounded-monotonic-10x0p1s-v2"
+    )
     assert dataset.metadata["predictor_coordinate_scale_m"] == pytest.approx(100.0)
+    normalization = dataset.metadata["predictor_target_normalization"]
+    assert isinstance(normalization, dict)
+    assert normalization["method_variant"] == (
+        TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT
+    )
+    scale_m = np.asarray(normalization["scale_m"], dtype=np.float32)
+    assert scale_m.shape == (10, 2)
+    assert np.all(scale_m >= 5.0)
+    np.testing.assert_allclose(dataset.predictor_target_scale_m, scale_m)
+    assert dataset.metadata["predictor_lateral_limit_m"] == pytest.approx(20.0)
+    assert dataset.metadata["predictor_forward_increment_max_m"] == pytest.approx(20.0)
+    assert dataset.metadata["predictor_max_lateral_to_forward_ratio"] == pytest.approx(0.75)
 
     raw_observation = dataset.normalizer.inverse_transform(dataset.train.observations[0])
     assert raw_observation[0] == pytest.approx(12.5)
@@ -194,6 +257,9 @@ def _assert_built_bc_dataset(
     assert np.all(np.isfinite(reference_points_xz))
     assert np.linalg.norm(reference_points_xz[-1]) > 0.0
     assert 0.4 < float(dataset.train.expert_action[0, 0]) < 0.6
+    # The synthetic raw MoTeC steering is initially positive-right. Dataset
+    # targets must convert it to the policy's positive-left convention.
+    assert dataset.validation.expert_action[0, 1] < 0.0
 
 
 def _assert_epoch_metrics_csv(
@@ -246,7 +312,7 @@ def _assert_bc_log_output(caplog: pytest.LogCaptureFixture) -> None:
     assert all(fragment in caplog.text for fragment in expected_fragments)
 
 
-def _assert_bc_summary(result) -> None:
+def _assert_bc_summary(result: BCTrainingResult) -> None:
     assert np.isfinite(result.test.action_mse)
     assert np.isfinite(result.test.predictor_ade_m)
     assert np.isfinite(result.test.predictor_rmse_m)
@@ -257,15 +323,18 @@ def _assert_bc_summary(result) -> None:
     summary = json.loads((result.run_directory / "summary.json").read_text("utf-8"))
     assert summary["predictor_trained_with_bc"] is True
     assert summary["predictor_loss_weight"] == pytest.approx(0.01)
+    assert summary["predictor_target_normalization_method_variant"] == (
+        TRAIN_SPLIT_PREDICTOR_TARGET_NORMALIZATION_METHOD_VARIANT
+    )
     assert len(summary["epoch_history"]) == 1
     assert summary["epoch_history"][0]["epoch"] == 1
     assert summary["epoch_history"][0]["train_joint_loss"] >= 0.0
     assert summary["epoch_history"][0]["validation_joint_loss"] >= 0.0
-    assert result.best_validation_joint_loss >= result.best_validation_action_mse
+    assert result.best_validation_joint_loss >= 0.0
 
 
 def _assert_train_behavioral_cloning_result(
-    result,
+    result: BCTrainingResult,
     config: ProjectConfig,
     caplog: pytest.LogCaptureFixture,
 ) -> None:

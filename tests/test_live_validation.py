@@ -1,22 +1,28 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
+import pytest
 
 from assetto_corsa_rl.ac_integration.live_validation import (
     validate_live_environment,
     write_live_validation_artifacts,
 )
 from assetto_corsa_rl.envs.environment import AssettoCorsaEnv
+from assetto_corsa_rl.references.fixed_reference import ReferenceTrajectory
 
 
 class _LiveEnvironment:
-    def __init__(self, *, reset_drift_m: float = 0.0) -> None:
-        self.active_reference = SimpleNamespace(track_length_m=1000.0)
+    def __init__(self, *, reset_drift_m: float = 0.0, reset_speed_mps: float = 0.0) -> None:
+        self.active_reference = ReferenceTrajectory.constant(
+            track_length_m=1000.0,
+            speed_mps=25.0,
+            human_mean_speed_mps=25.0,
+        )
         self.reset_drift_m = reset_drift_m
+        self.reset_speed_mps = reset_speed_mps
         self.reset_count = 0
         self.packet = 0
         self.progress_m = 100.0
@@ -47,6 +53,7 @@ class _LiveEnvironment:
         return np.zeros(1, dtype=np.float32), self._info(
             progress_m=self.progress_m,
             position_x_m=1.0 + drift,
+            speed_mps=self.reset_speed_mps,
         )
 
     def step(
@@ -120,6 +127,39 @@ def test_live_validation_rejects_recovery_reset_drift() -> None:
     codes = {issue.code for issue in summary.issues}
     assert "position_not_repeatable" in codes
     assert "progress_not_repeatable" in codes
+
+
+def test_live_validation_accepts_reference_speed_reset() -> None:
+    environment = cast(AssettoCorsaEnv, _LiveEnvironment(reset_speed_mps=25.0))
+    summary, _, _ = validate_live_environment(
+        environment,
+        session_origin="attached",
+        reset_method_variant="csp_hotlap_reference_speed_v1",
+        reset_count=2,
+        soak_steps=2,
+        input_hold_steps=1,
+    )
+    assert summary.passed
+
+
+def test_live_validation_allows_one_control_frame_of_moving_reset_spread() -> None:
+    environment = cast(
+        AssettoCorsaEnv,
+        _LiveEnvironment(reset_drift_m=0.6, reset_speed_mps=25.0),
+    )
+    summary, _, _ = validate_live_environment(
+        environment,
+        session_origin="attached",
+        reset_method_variant="csp_hotlap_reference_speed_v1",
+        reset_count=3,
+        soak_steps=2,
+        input_hold_steps=1,
+        control_frequency_hz=20.0,
+    )
+
+    assert summary.reset_position_spread_m == pytest.approx(1.2)
+    assert summary.reset_progress_spread_m == pytest.approx(1.2)
+    assert summary.passed
 
 
 def test_live_validation_can_require_an_automatic_upshift() -> None:

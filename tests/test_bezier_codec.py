@@ -7,9 +7,12 @@ from assetto_corsa_rl.models.bezier import (
     decode_bezier_curve_with_origin,
     decode_bezier_trajectory,
     decode_bezier_trajectory_normalized,
+    decode_control_points,
 )
 from assetto_corsa_rl.models.trajectory_contract import (
     PREDICTOR_COORDINATE_SCALE_M,
+    PREDICTOR_FORWARD_INCREMENT_MAX_M,
+    PREDICTOR_LATERAL_LIMIT_M,
 )
 
 
@@ -51,9 +54,10 @@ def test_anchored_bezier_curve_starts_at_vehicle_origin() -> None:
         complete_curve[:, 1:],
         future_points,
     )
+    control_points = decode_control_points(flat_prediction)
     torch.testing.assert_close(
         future_points[:, -1],
-        flat_prediction.reshape(1, 5, 2)[:, -1] * PREDICTOR_COORDINATE_SCALE_M,
+        control_points[:, -1] * PREDICTOR_COORDINATE_SCALE_M,
     )
 
 
@@ -72,10 +76,30 @@ def test_normalized_and_metre_decoders_use_fixed_scale() -> None:
     )
 
 
-def test_zero_prediction_produces_zero_local_trajectory() -> None:
+def test_zero_prediction_produces_straight_forward_prior() -> None:
     prediction = decode_bezier_trajectory(torch.zeros((2, 10)))
+    expected_forward = torch.arange(1, 11, dtype=torch.float32) * 5.0
 
-    torch.testing.assert_close(prediction, torch.zeros((2, 10, 2)))
+    torch.testing.assert_close(prediction[..., 0], torch.zeros((2, 10)))
+    torch.testing.assert_close(
+        prediction[..., 1],
+        expected_forward.expand(2, -1),
+    )
+
+
+def test_decoder_enforces_bounded_monotonic_geometry() -> None:
+    raw = torch.tensor(
+        [[50.0, -50.0, -50.0, 50.0, 50.0, -10.0, -50.0, 10.0, 50.0, 50.0]],
+        dtype=torch.float32,
+    )
+    control_points = decode_control_points(raw) * PREDICTOR_COORDINATE_SCALE_M
+    prediction = decode_bezier_trajectory(raw)
+
+    assert torch.all(control_points[..., 0].abs() <= PREDICTOR_LATERAL_LIMIT_M + 1e-5)
+    assert torch.all(control_points[..., 1] >= 0.0)
+    assert torch.all(torch.diff(control_points[..., 1], dim=-1) >= -1e-6)
+    assert torch.all(torch.diff(prediction[..., 1], dim=-1) >= -1e-5)
+    assert torch.all(prediction[..., 1] <= PREDICTOR_FORWARD_INCREMENT_MAX_M * 5 + 1e-4)
 
 
 def test_decoder_rejects_non_contract_waypoint_count() -> None:

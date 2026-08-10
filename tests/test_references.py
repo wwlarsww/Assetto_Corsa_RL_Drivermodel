@@ -126,7 +126,11 @@ def test_reference_prediction_geometry_and_time_are_validated() -> None:
 
 
 def test_reference_npz_round_trip_rejects_object_arrays(tmp_path: Path) -> None:
-    reference = ReferenceTrajectory.constant(track_length_m=100.0, speed_mps=20.0)
+    reference = ReferenceTrajectory.constant(
+        track_length_m=100.0,
+        speed_mps=20.0,
+        human_mean_speed_mps=21.5,
+    )
     path = tmp_path / "reference.npz"
     reference.to_npz(path, extra_arrays={"label": np.asarray("fixed")})
     second_path = tmp_path / "reference_second.npz"
@@ -135,6 +139,7 @@ def test_reference_npz_round_trip_rejects_object_arrays(tmp_path: Path) -> None:
     loaded = ReferenceTrajectory.from_npz(path)
     np.testing.assert_allclose(loaded.as_feature_matrix(), reference.as_feature_matrix())
     assert loaded.world_position_xy_m is not None
+    assert loaded.human_mean_speed_at(37.0) == pytest.approx(21.5)
 
     with pytest.raises(ValueError, match="object dtype"):
         reference.to_npz(

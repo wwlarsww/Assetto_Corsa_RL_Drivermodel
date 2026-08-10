@@ -43,6 +43,24 @@ def _validate_world_position(
     return world_position
 
 
+def _validate_optional_speed_profile(
+    value: npt.ArrayLike | None,
+    distance: FloatArray,
+) -> FloatArray | None:
+    if value is None:
+        return None
+    speed = np.asarray(value, dtype=np.float32)
+    if speed.shape != distance.shape:
+        raise ValueError(
+            f"human_mean_speed_mps must have shape {distance.shape}, got {speed.shape}"
+        )
+    if not np.all(np.isfinite(speed)):
+        raise ValueError("human_mean_speed_mps contains non-finite values")
+    if np.any(speed <= 0):
+        raise ValueError("human_mean_speed_mps must be positive")
+    return speed
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceTrajectory:
     """Reference features parameterised over distance around one closed lap.
@@ -58,6 +76,7 @@ class ReferenceTrajectory:
     speed_mps: FloatArray
     track_length_m: float
     world_position_xy_m: FloatArray | None = None
+    human_mean_speed_mps: FloatArray | None = None
     source_track_sha256: str | None = None
     _lap_time_nodes_s: FloatArray = field(init=False, repr=False, compare=False)
     _lap_time_s: float = field(init=False, repr=False, compare=False)
@@ -88,6 +107,10 @@ class ReferenceTrajectory:
             raise ValueError("reference speed_mps must be positive")
 
         world_position = _validate_world_position(self.world_position_xy_m, distance.size)
+        human_mean_speed = _validate_optional_speed_profile(
+            self.human_mean_speed_mps,
+            distance,
+        )
         if self.source_track_sha256 is not None and (
             len(self.source_track_sha256) != 64
             or any(character not in "0123456789abcdef" for character in self.source_track_sha256)
@@ -98,6 +121,7 @@ class ReferenceTrajectory:
         for name, array in arrays.items():
             object.__setattr__(self, name, array)
         object.__setattr__(self, "world_position_xy_m", world_position)
+        object.__setattr__(self, "human_mean_speed_mps", human_mean_speed)
 
         distance_nodes = np.append(distance.astype(np.float64), self.track_length_m)
         speed_nodes = np.append(
@@ -118,6 +142,7 @@ class ReferenceTrajectory:
         speed_mps: float,
         lateral_offset_m: float = 0.0,
         sample_count: int = 256,
+        human_mean_speed_mps: float | None = None,
         source_track_sha256: str | None = None,
     ) -> ReferenceTrajectory:
         """Create a simple closed reference used by the mock backend.
@@ -127,6 +152,8 @@ class ReferenceTrajectory:
             speed_mps: Constant positive reference speed.
             lateral_offset_m: Constant line offset used in mock coordinates.
             sample_count: Number of evenly spaced interpolation nodes.
+            human_mean_speed_mps: Optional arithmetic human mean used only by
+                the named reference-speed reset variant.
             source_track_sha256: Optional source AI-spline digest.
 
         Returns:
@@ -151,8 +178,33 @@ class ReferenceTrajectory:
             world_position_xy_m=np.column_stack(
                 (distance, np.full_like(distance, lateral_offset_m))
             ).astype(np.float32),
+            human_mean_speed_mps=(
+                None
+                if human_mean_speed_mps is None
+                else np.full_like(distance, human_mean_speed_mps)
+            ),
             source_track_sha256=source_track_sha256,
         )
+
+    def human_mean_speed_at(self, progress_m: float) -> float:
+        """Interpolate the arithmetic human speed mean at one lap position.
+
+        This profile is deliberately separate from ``speed_mps``: the latter
+        remains the robust median used by the thesis baseline.
+        """
+
+        if self.human_mean_speed_mps is None:
+            raise ValueError(
+                "reference artifact has no human_mean_speed_mps; rebuild it "
+                "from the human recordings"
+            )
+        if not np.isfinite(progress_m):
+            raise ValueError("progress_m must be finite")
+        value = self._periodic_interpolate(
+            np.asarray([progress_m], dtype=np.float32),
+            self.human_mean_speed_mps,
+        )[0]
+        return float(value)
 
     def preview(
         self,
@@ -404,6 +456,7 @@ class ReferenceTrajectory:
             "speed_mps",
             "track_length_m",
             "world_position_xy_m",
+            "human_mean_speed_mps",
             "source_track_sha256",
         }
         extras = dict(extra_arrays or {})
@@ -421,6 +474,8 @@ class ReferenceTrajectory:
         }
         if self.world_position_xy_m is not None:
             arrays["world_position_xy_m"] = self.world_position_xy_m
+        if self.human_mean_speed_mps is not None:
+            arrays["human_mean_speed_mps"] = self.human_mean_speed_mps
         if self.source_track_sha256 is not None:
             arrays["source_track_sha256"] = np.asarray(self.source_track_sha256)
         for name, value in arrays.items():
@@ -501,6 +556,11 @@ class ReferenceTrajectory:
                 speed_mps=archive["speed_mps"],
                 track_length_m=float(track_length),
                 world_position_xy_m=world_position,
+                human_mean_speed_mps=(
+                    archive["human_mean_speed_mps"]
+                    if "human_mean_speed_mps" in archive.files
+                    else None
+                ),
                 source_track_sha256=source_track_sha256,
             )
 

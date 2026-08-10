@@ -27,6 +27,9 @@ class TrajectoryContext:
     simulation_time_s: FloatArray
     trajectory_id: npt.NDArray[np.int64]
     reference_progress_m: FloatArray
+    successor_lateral_offset_m: FloatArray
+    successor_heading_error_rad: FloatArray
+    progress_reward: FloatArray
 
     def __post_init__(self) -> None:
         positions = np.asarray(self.positions_xy_m, dtype=np.float32)
@@ -34,6 +37,9 @@ class TrajectoryContext:
         times = np.asarray(self.simulation_time_s, dtype=np.float32)
         trajectory_ids = np.asarray(self.trajectory_id, dtype=np.int64)
         progress = np.asarray(self.reference_progress_m, dtype=np.float32)
+        successor_lateral = np.asarray(self.successor_lateral_offset_m, dtype=np.float32)
+        successor_heading = np.asarray(self.successor_heading_error_rad, dtype=np.float32)
+        progress_reward = np.asarray(self.progress_reward, dtype=np.float32)
         if positions.ndim != 2 or positions.shape[1] != 2:
             raise ValueError("positions_xy_m must have shape (steps, 2)")
         step_count = positions.shape[0]
@@ -42,6 +48,9 @@ class TrajectoryContext:
             "simulation_time_s": times.shape,
             "trajectory_id": trajectory_ids.shape,
             "reference_progress_m": progress.shape,
+            "successor_lateral_offset_m": successor_lateral.shape,
+            "successor_heading_error_rad": successor_heading.shape,
+            "progress_reward": progress_reward.shape,
         }.items():
             if shape != (step_count,):
                 raise ValueError(f"{name} must have shape ({step_count},)")
@@ -50,6 +59,9 @@ class TrajectoryContext:
             "vehicle_heading_rad": headings,
             "simulation_time_s": times,
             "reference_progress_m": progress,
+            "successor_lateral_offset_m": successor_lateral,
+            "successor_heading_error_rad": successor_heading,
+            "progress_reward": progress_reward,
         }.items():
             if not np.all(np.isfinite(array)):
                 raise ValueError(f"{name} contains non-finite values")
@@ -58,6 +70,9 @@ class TrajectoryContext:
         object.__setattr__(self, "simulation_time_s", times)
         object.__setattr__(self, "trajectory_id", trajectory_ids)
         object.__setattr__(self, "reference_progress_m", progress)
+        object.__setattr__(self, "successor_lateral_offset_m", successor_lateral)
+        object.__setattr__(self, "successor_heading_error_rad", successor_heading)
+        object.__setattr__(self, "progress_reward", progress_reward)
 
     @property
     def step_count(self) -> int:
@@ -267,6 +282,18 @@ def _concatenate_contexts(contexts: list[TrajectoryContext]) -> TrajectoryContex
         trajectory_id=np.concatenate([context.trajectory_id for context in contexts], axis=0),
         reference_progress_m=np.concatenate(
             [context.reference_progress_m for context in contexts],
+            axis=0,
+        ),
+        successor_lateral_offset_m=np.concatenate(
+            [context.successor_lateral_offset_m for context in contexts],
+            axis=0,
+        ),
+        successor_heading_error_rad=np.concatenate(
+            [context.successor_heading_error_rad for context in contexts],
+            axis=0,
+        ),
+        progress_reward=np.concatenate(
+            [context.progress_reward for context in contexts],
             axis=0,
         ),
     )

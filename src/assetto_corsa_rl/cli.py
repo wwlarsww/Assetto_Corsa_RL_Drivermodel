@@ -77,7 +77,13 @@ from assetto_corsa_rl.envs.factory import (
 from assetto_corsa_rl.experiment import ExperimentRecorder
 from assetto_corsa_rl.policies import MockDriverPolicy
 from assetto_corsa_rl.training.behavioral_cloning import train_behavioral_cloning
-from assetto_corsa_rl.training.ppo import train_ppo
+from assetto_corsa_rl.training.checkpoints import load_checkpoint
+from assetto_corsa_rl.training.evaluation import evaluate_policy
+from assetto_corsa_rl.training.ppo import (
+    validate_initial_checkpoint,
+    build_driver_network,
+    train_ppo,
+)
 from assetto_corsa_rl.training.readiness import (
     TrainingReadinessReport,
     assess_training_readiness,
@@ -222,6 +228,43 @@ def build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - declarative CL
         "--device",
         default="cpu",
         help="PyTorch device, for example cpu or cuda.",
+    )
+    evaluate_bc_live = subparsers.add_parser(
+        "bc-live-evaluate",
+        help="Evaluate the BC checkpoint deterministically in Assetto Corsa.",
+        description=(
+            "Load the configured BC warm start without PPO updates and record "
+            "deterministic live-policy trajectories."
+        ),
+        formatter_class=formatter,
+    )
+    evaluate_bc_live.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/assetto_corsa_real_extended_smoke.toml"),
+        help="TOML configuration defining the BC checkpoint and live session.",
+    )
+    evaluate_bc_live.add_argument(
+        "--device",
+        default="cpu",
+        help="PyTorch device, for example cpu or cuda.",
+    )
+    evaluate_bc_live.add_argument(
+        "--episodes",
+        type=int,
+        default=1,
+        help="Number of deterministic live episodes to record.",
+    )
+    evaluate_bc_live.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Run directory; otherwise use a timestamped runs/bc-live-evaluation path.",
+    )
+    evaluate_bc_live.add_argument(
+        "--launch-game",
+        action="store_true",
+        help="Prepare and launch the configured local AC Hotlap session.",
     )
     rl_ready = subparsers.add_parser(
         "rl-ready",
@@ -865,6 +908,108 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         if metrics_artifact is not None:
             LOGGER.info("Published BC metrics: %s", metrics_artifact)
         return 0
+    if arguments.command == "bc-live-evaluate":
+        config = ProjectConfig.from_toml(arguments.config)
+        if arguments.episodes <= 0:
+            LOGGER.error("--episodes must be positive")
+            return 2
+        if config.track_assets.auto_build:
+            try:
+                bundle = ensure_track_assets(config)
+                LOGGER.info(
+                    "track_assets: geometry=%s reference=%s source_sha256=%s",
+                    bundle.paths.geometry_path,
+                    bundle.paths.reference_path,
+                    bundle.source_sha256,
+                )
+            except (FileNotFoundError, TrackAssetBuildError, OSError, ValueError) as error:
+                LOGGER.error("track assets are not ready: %s", error)
+                return 4
+        report = assess_training_readiness(config, backend="assetto-corsa")
+        _log_readiness(report)
+        if not report.is_ready:
+            return 4
+        evaluation_config = replace(
+            config,
+            evaluation=replace(
+                config.evaluation,
+                enabled=True,
+                episodes=arguments.episodes,
+                deterministic=True,
+                record_trajectories=True,
+            ),
+        )
+        target_device = torch.device(arguments.device)
+        checkpoint_path = Path(evaluation_config.ppo.initial_checkpoint_path)
+        model = build_driver_network(evaluation_config)
+        _state, checkpoint_configuration = load_checkpoint(
+            checkpoint_path,
+            model=model,
+            map_location=target_device,
+        )
+        validate_initial_checkpoint(
+            checkpoint_configuration,
+            config=evaluation_config,
+        )
+        model.to(target_device)
+        model.eval()
+        output_directory = arguments.output or Path(
+            evaluation_config.experiment.output_directory
+        ) / ("bc-live-evaluation-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"))
+        bc_writer: VGamepadControlWriter | None = None
+        bc_launcher: AssettoCorsaSessionLauncher | None = None
+        bc_environment = None
+        try:
+            bc_writer = VGamepadControlWriter(
+                steering_output_sign=(evaluation_config.assetto_corsa.steering_output_sign),
+                steering_output_gain=(evaluation_config.assetto_corsa.steering_output_gain),
+            )
+            bc_launcher = (
+                AssettoCorsaSessionLauncher(
+                    evaluation_config,
+                    controller_index=getattr(bc_writer, "device_index", None),
+                )
+                if arguments.launch_game
+                else None
+            )
+            launch_context = bc_launcher if bc_launcher is not None else nullcontext()
+            with launch_context:
+                try:
+                    bc_environment = create_assetto_corsa_environment(
+                        evaluation_config,
+                        control_writer=bc_writer,
+                    )
+                    result = evaluate_policy(
+                        config=evaluation_config,
+                        model=model,
+                        device=target_device,
+                        training_run_directory=output_directory,
+                        checkpoint_path=checkpoint_path,
+                        checkpoint_update=0,
+                        environment_steps=0,
+                        backend_name="assetto-corsa",
+                        tracker=None,
+                        environment=bc_environment,
+                    )
+                finally:
+                    bc_writer.neutral()
+                    if bc_environment is not None:
+                        bc_environment.close()
+                    if bc_launcher is not None and bc_launcher.stop_owned_session():
+                        LOGGER.info("Stopped the Assetto Corsa session owned by BC evaluation")
+        except AssettoCorsaLaunchError as error:
+            LOGGER.error("cannot launch Assetto Corsa: %s", error)
+            return 2
+        finally:
+            if bc_writer is not None:
+                bc_writer.close()
+        LOGGER.info(
+            "BC live evaluation complete: episodes=%s mean_reward=%.3f artefacts=%s",
+            len(result.episodes),
+            float(result.metrics["eval/reward/mean"]),
+            result.output_directory,
+        )
+        return 0
     if arguments.command == "rl-ready":
         config = ProjectConfig.from_toml(arguments.config)
         if arguments.backend == "assetto-corsa" and config.track_assets.auto_build:
@@ -904,6 +1049,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         try:
             writer = VGamepadControlWriter(
                 steering_output_sign=config.assetto_corsa.steering_output_sign,
+                steering_output_gain=config.assetto_corsa.steering_output_gain,
             )
             if arguments.session != "attach":
                 launcher = AssettoCorsaSessionLauncher(
@@ -924,6 +1070,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 session_origin=session_origin,
                 reset_method_variant=config.assetto_corsa.reset_backend,
                 controller_index=getattr(writer, "device_index", None),
+                control_frequency_hz=config.environment.control_frequency_hz,
                 reset_count=arguments.resets,
                 soak_steps=arguments.soak_steps,
                 input_hold_steps=arguments.input_hold_steps,
@@ -956,8 +1103,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                 launcher.restore_user_configuration()
             if writer is not None:
                 writer.close()
-        if validation_result is None:
-            raise RuntimeError("live validation returned no result")
         live_summary, reset_samples, transport_samples = validation_result
         issues = live_summary.issues
         if lifecycle_issue is not None:
@@ -1056,6 +1201,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
         launch_control_writer = (
             VGamepadControlWriter(
                 steering_output_sign=config.assetto_corsa.steering_output_sign,
+                steering_output_gain=config.assetto_corsa.steering_output_gain,
             )
             if arguments.launch_game
             else None
@@ -1098,11 +1244,18 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: PLR0911, PLR0912, P
                     )
                 finally:
                     try:
-                        if environment is not None:
-                            environment.close()
+                        if launch_control_writer is not None:
+                            launch_control_writer.neutral()
                     finally:
-                        if session_launcher is not None and session_launcher.stop_owned_session():
-                            LOGGER.info("Stopped the Assetto Corsa session owned by training")
+                        try:
+                            if environment is not None:
+                                environment.close()
+                        finally:
+                            if (
+                                session_launcher is not None
+                                and session_launcher.stop_owned_session()
+                            ):
+                                LOGGER.info("Stopped the Assetto Corsa session owned by training")
         except AssettoCorsaLaunchError as error:
             LOGGER.error("cannot launch Assetto Corsa: %s", error)
             return 2

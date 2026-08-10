@@ -21,7 +21,8 @@ training always runs locally; see
 - a two-dimensional absolute action in `[-1, 1]` for combined pedal and
   steering, without a per-step delta limit;
 - progress and safety rewards inside the environment, followed by predicted
-  progress after a rollout; no imitation term is active in the initial variant;
+  progress after a rollout; the named live experiment can additionally gate
+  progress by reached-state line and heading alignment;
 - a two-layer shared feature extractor with Gaussian policy, value and
   auxiliary trajectory-prediction heads;
 - a frozen `ai_spline_absolute_v1` thesis baseline plus the explicitly named
@@ -65,11 +66,19 @@ Exercise the complete post-rollout reward, GAE and PPO path with:
 For a guarded real-time smoke test, `rl-train` with
 `--backend assetto-corsa --launch-game` can prepare and launch the configured Hotlap session after
 all live prerequisites pass. See [docs/training.md](docs/training.md) before
-enabling control. When training finishes or fails, it gracefully closes only
-the AC process it launched itself; an attached pre-existing session is left running.
+enabling control. When training finishes or fails, it gracefully closes the AC
+process it launched itself; an attached healthy session is left running. With
+`--launch-game`, one uniquely identified stale process from the exact configured
+`acs.exe` path can also be replaced. The launcher first requests `WM_CLOSE` and
+uses forced termination only if that exact frozen process cannot close cleanly;
+it never terminates healthy or ambiguous processes. If Steam starts slowly, an
+exited bootstrap process is treated as a handoff and the delayed exact game
+process is awaited for the configured launch timeout and then adopted.
 When the optional `[monitoring]` configuration enables MLflow, `rl-train` logs
-parameters, metrics and artefacts to the configured tracking server. The MLflow
-server is started separately from the learner; see [docs/training.md](docs/training.md).
+parameters, metrics and artefacts directly to the configured tracking store. The
+default local setup uses `sqlite:///mlflow.db`, so no MLflow server or UI process
+is required while training. The UI can be started and stopped independently; see
+[docs/training.md](docs/training.md).
 
 With Assetto Corsa running in an on-track session, validate its direct,
 read-only telemetry transport with:
@@ -88,7 +97,7 @@ Before PPO, validate the write-capable boundary independently of any policy:
 ```
 
 The command checks owned process start/stop, repeatable `HOTLAP_START` resets,
-first-gear engagement and forward motion, raw AC throttle/brake/steering echo,
+forward-gear engagement and motion, raw AC throttle/brake/steering echo,
 unique physics/slip frames and connection continuity. Launched sessions
 temporarily enable AC's automatic shifter and clutch and restore the original
 `assists.ini` afterward. Use `--session attach` to test a matching session that
@@ -99,6 +108,19 @@ An explicit automatic-upshift probe can require second gear with
 `--drive-off-steps 300 --drive-off-throttle 0.5 --minimum-forward-gear 2`.
 It stops accelerating as soon as AC reports the requested gear together with
 forward speed and progress.
+
+After rebuilding BC data/checkpoint provenance, evaluate that checkpoint alone
+before PPO changes it:
+
+```powershell
+.\.venv\Scripts\python.exe -m assetto_corsa_rl bc-live-evaluate `
+  --config configs\assetto_corsa_real_extended_smoke.toml `
+  --device cpu --episodes 1 --launch-game
+```
+
+This uses deterministic BC mean actions and records a closed-loop trajectory;
+it does not perform a PPO update. The episode table records the exact
+termination reason and the summary aggregates reason counts.
 
 See [docs/assetto-corsa-integration.md](docs/assetto-corsa-integration.md) for
 the driving manoeuvres, outputs, exit codes, and remaining signal gaps.
@@ -152,9 +174,11 @@ in [docs/training.md](docs/training.md).
 - episode-safe, ego-frame future trajectory target construction
 - read-only AC 1.14 shared-memory decoder and live telemetry diagnostics
 - pinned BMW Z4 GT3/Monza human-data downloader and SHA-256 manifest
-- strict Assetto Corsa v7 `fast_lane.ai` reader plus a robust human-median
-  speed-profile builder
+- strict Assetto Corsa v7 `fast_lane.ai` reader plus separate robust
+  human-median baseline and arithmetic-human-mean reset speed profiles
 - session-disjoint 77-feature BC export with frozen training-only Z-scores
+- explicit MoTeC-positive-right to policy-positive-left steering conversion
+  with dataset/checkpoint readiness enforcement
 - joint policy/predictor BC warm start with held-out metrics
 - versioned local-file bridge for exact tyre-level slip signals
 - named, deterministic live slip calibration compatible with BC telemetry
@@ -163,10 +187,13 @@ in [docs/training.md](docs/training.md).
 - frame-synchronised live backend with session identity and stale-frame checks
 - AI-spline-derived offline/live reference, length and boundary geometry
 - latched CSP collision events with immediate crash termination
-- acknowledged CSP episode reset with bounded local command protocol
+- acknowledged CSP episode reset with bounded stationary and named
+  human-reference-speed plus reference-pose command variants
 - policy-versioned trajectory fragments and on-policy collector
 - synchronous clipped PPO, termination-aware GAE and atomic checkpoints
 - post-rollout predicted-progress shaping before advantage estimation
+- named successor-state line/heading reward shaping before advantage estimation
+- named pre-action live progress baseline for correct action/reward attribution
 - non-mutating mock/live training preflight reports
 - optional, testable X360 analog control writer with explicit steering sign
 - TOML configuration, deterministic seeding and traceable run artefacts

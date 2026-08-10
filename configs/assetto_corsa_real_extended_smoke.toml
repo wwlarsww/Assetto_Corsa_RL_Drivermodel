@@ -10,11 +10,11 @@ output_directory = "runs"
 [monitoring]
 enabled = true
 backend = "mlflow"
-tracking_uri = "http://127.0.0.1:5000"
+tracking_uri = "sqlite:///mlflow.db"
 experiment_name = "Assetto Corsa PPO"
 run_name = "assetto_corsa_monza_auto_track_assets"
 log_interval_updates = 1
-fail_on_error = true
+fail_on_error = false
 
 [environment]
 control_frequency_hz = 20.0
@@ -23,13 +23,18 @@ control_frequency_hz = 20.0
 mock_track_length_m = 1000.0
 mock_track_half_width_m = 5.0
 initial_speed_mps = 20.0
-termination_method_variant = "any_tyre_armed_stall_v1"
+termination_method_variant = "unrecoverable_progress_stall_v2"
 minimum_speed_mps = 1.3888888889
-# Give the real session five seconds to engage gear and drive away.
-stall_startup_grace_steps = 100
-# Require one continuous second below the minimum speed before termination.
-stall_debounce_steps = 20
-initial_combined_pedal = 1.0
+stall_startup_grace_steps = 20
+# Require continuous steps below the minimum speed before termination.
+stall_debounce_steps = 2
+# End a rolling/spinning gravel episode after one second with less than 2 m
+# net forward progress along the fixed reference.
+progress_stall_window_s = 1.0
+progress_stall_minimum_progress_m = 2.0
+# CSP owns the prescribed flying-start speed; keep the policy's action history
+# neutral at the reset boundary.
+initial_combined_pedal = 0.0
 critical_body_sideslip_angle_deg = 30.0
 minimum_body_sideslip_termination_speed_mps = 5.0
 
@@ -38,10 +43,19 @@ method_variant = "absolute_bounded_v1"
 
 [rewards]
 progress_scale = 1.0
-termination_penalty = -100.0
+termination_penalty = -300.0
 prediction_method_variant = "discounted_progress_increments_v1"
-prediction_progress_scale = 0.01
-prediction_horizon_discount = 0.5
+prediction_progress_scale = 0.5
+# Uniform horizon weighting; 0 would keep only the first predicted point.
+prediction_horizon_discount = 1.0
+# Named successor-state variant: the action keeps positive progress only when
+# the reached state remains close to and aligned with the human reference.
+reference_tracking_method_variant = "successor_progress_alignment_v1"
+reference_tracking_penalty_scale = 2.0
+reference_tracking_free_distance_m = 2.5
+reference_tracking_distance_scale_m = 2.0
+reference_heading_penalty_scale = 1.0
+reference_heading_scale_rad = 0.1745329252
 
 [model]
 feature_hidden_sizes = [512, 512]
@@ -49,7 +63,7 @@ policy_hidden_sizes = [128, 128]
 value_hidden_sizes = [512, 512]
 predictor_hidden_sizes = [128, 128]
 trajectory_output_size = 10
-trajectory_codec = "bezier-origin-5x2-10x0p1s-normalized-v1"
+trajectory_codec = "bezier-origin-5x2-bounded-monotonic-10x0p1s-v2"
 initial_log_std = -0.5
 
 [dataset]
@@ -74,34 +88,52 @@ minimum_reference_speed_mps = 5.0
 
 [behavioral_cloning]
 method_variant = "ai_spline_absolute_v1"
-dataset_artifact_path = "data/processed/bmw_z4_gt3_monza/bc_dataset.npz"
+dataset_artifact_path = "data/processed/bmw_z4_gt3_monza/bc_dataset_predictor_normalized_v5.npz"
 epochs = 30
 batch_size = 512
 learning_rate = 0.0003
 weight_decay = 0.00001
-predictor_loss_weight = 0.01
+# The physical targets are scaled per horizon and axis using only the
+# unaugmented training split. A 5 m floor keeps the auxiliary objective close
+# to the action-loss scale instead of letting low-variance lateral targets
+# dominate the shared backbone.
+predictor_loss_weight = 1.0
+predictor_target_normalization_method_variant = "train_split_per_horizon_axis_std_floor_5m_v2"
+# Named closed-loop stabilisation: steering error dominates pedal error because
+# small high-speed steering biases compound rapidly under behavioural cloning.
+action_loss_method_variant = "steering_weighted_action_mse_v1"
+steering_loss_weight = 20.0
+# Closed-loop BC must initiate a turn before steering-caused acceleration,
+# tyre slip and previous steering are present. A second supervised branch
+# permutes those feedback features across the batch while retaining speed,
+# track boundaries and the future human reference.
+steering_robustness_method_variant = "permuted_causal_feedback_steering_v1"
+steering_robustness_loss_weight = 1.0
 validation_fraction = 0.15
 test_fraction = 0.15
 minimum_speed_mps = 0.1
 mirror_augmentation = true
 
 [ppo]
-method_variant = "ai_spline_absolute_stabilized_v2"
-# Sixteen PPO updates provide a meaningful end-to-end stability test.
-# At 20 Hz, 4096 environment steps correspond to about 205 s of simulator time.
-total_environment_steps = 4096
+method_variant = "ai_spline_absolute_policy_protected_v3"
+# Long-running live campaign; each update collects one 256-step rollout.
+total_environment_steps = 100000000
 rollout_steps = 256
 checkpoint_interval_updates = 4
-update_epochs = 1
+update_epochs = 4
 minibatch_size = 128
-learning_rate = 0.0003
+# A shared BC/PPO backbone made the first live value update move the policy to
+# KL=2.02 at 3e-4. Start this flying-start fine-tune at the controller floor.
+learning_rate = 0.00003
 gamma = 0.99
 gae_lambda = 0.95
 clip_range = 0.2
-value_loss_coefficient = 0.5
-entropy_coefficient = 0.0
-predictor_loss_coefficient = 0.01
-initial_log_std_after_bc = -1.5
+value_loss_coefficient = 1
+entropy_coefficient = 0.0001
+predictor_loss_coefficient = 1
+# The first real flying-start rollout still completed eight episodes with
+# exp(-2.5)=0.082 steering noise. Preserve the BC mean at ~246 km/h initially.
+initial_log_std_after_bc = -3.1
 kl_control_method_variant = "target_band_learning_rate_v1"
 kl_target = 0.01
 kl_tolerance = 0.003
@@ -109,11 +141,11 @@ kl_learning_rate_decrease_factor = 0.5
 kl_learning_rate_increase_factor = 1.1
 minimum_learning_rate = 0.00003
 max_gradient_norm = 0.5
-# Keep predictor shaping disabled because the current BC predictor quality
-# is outside the configured ADE/FDE limits. The predictor loss is still logged.
-use_predicted_progress_reward = false
-initial_checkpoint_path = "data/processed/bmw_z4_gt3_monza/bc_checkpoint.pt"
-initial_checkpoint_metrics_path = "data/processed/bmw_z4_gt3_monza/bc_metrics.json"
+# Keep predictor shaping disabled while isolating the new successor-state
+# reference reward in live diagnosis. Predictor quality and loss remain logged.
+use_predicted_progress_reward = true
+initial_checkpoint_path = "data/processed/bmw_z4_gt3_monza/bc_checkpoint_closed_loop_robust_v6.pt"
+initial_checkpoint_metrics_path = "data/processed/bmw_z4_gt3_monza/bc_metrics_closed_loop_robust_v6.json"
 maximum_initial_predictor_ade_m = 15.0
 maximum_initial_predictor_fde_m = 40.0
 
@@ -132,16 +164,42 @@ installation_directory = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\ass
 # Empty means: Documents/Assetto Corsa/cfg/controls.ini
 controls_configuration_path = ""
 control_backend = "vgamepad"
-reset_backend = "csp_hotlap_spawn_v1"
+# The BC steer map is linear. During --launch-game, back up controls.ini and
+# remove gamma/speed attenuation and retain only temporal smoothing.
+x360_control_profile = "linear_bc_calibrated_x360_v2"
+# Named variant: align to the active reference pose and launch at the
+# arithmetic human mean speed measured at HOTLAP_START.
+reset_backend = "csp_reference_pose_speed_v2"
 crash_termination = "csp_collision_latched_v1"
 telemetry_calibration = "assetto_corsa_gym_world_v1"
+# Ignore motion that happened during policy inference under the previous
+# command; progress starts at a fresh sample immediately before action apply.
+step_timing_method_variant = "pre_action_progress_baseline_v1"
 automatic_shifting = true
 steering_output_sign = -1.0
+# Explicit live-controller calibration. The V6 policy turns in the correct
+# direction, but AC's filtered X360 path under-realises requested curvature.
+steering_output_gain = 1.2
 frame_timeout_s = 5.0
 reset_timeout_s = 20.0
 reset_position_tolerance = 0.25
+# Stay close to demonstrated human start states. A live A/B test with -2.0 m
+# did not improve the first-chicane trajectory.
+reset_reference_lateral_offset_m = -0.5
+# Reject starts whose yaw differs from the active reference by more than ~2.9°.
+reset_reference_heading_tolerance_rad = 0.05
 reset_speed_threshold_mps = 5.0
+reset_reference_speed_tolerance_mps = 2.0
 reset_stable_frames = 5
+# Reject the CSP wheel-speed transient before BC sees its first observation.
+reset_max_abs_slip_ratio = 0.2
+reset_slip_stable_frames = 3
+# A rare CSP tyre-settling transient can lose the prescribed speed after an
+# otherwise successful acknowledgement. Reissue a fresh, fully validated
+# pose/speed reset instead of aborting a long PPO campaign on the first event.
+reset_reference_speed_max_attempts = 3
+# Used by stationary reset variants; moving resets use Lua's bounded 1 s
+# collision-suppression window after acknowledgement.
 reset_collision_quiescence_s = 1.0
 poll_interval_s = 0.001
 launch_timeout_s = 180.0

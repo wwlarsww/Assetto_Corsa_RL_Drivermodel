@@ -7,9 +7,15 @@ import pytest
 
 from assetto_corsa_rl.config import (
     KL_CONTROL_METHOD_VARIANT,
+    PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT,
+    POLICY_PROTECTED_PPO_METHOD_VARIANT,
+    PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT,
     PREDICTION_REWARD_METHOD_VARIANT,
     STABILIZED_PPO_METHOD_VARIANT,
+    STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT,
+    STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT,
     TERMINATION_METHOD_VARIANT,
+    UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
     ActionConfig,
     AssettoCorsaRuntimeConfig,
     BehavioralCloningConfig,
@@ -18,6 +24,7 @@ from assetto_corsa_rl.config import (
     PPOConfig,
     ProjectConfig,
     ReferenceConfig,
+    RewardConfig,
 )
 
 
@@ -25,7 +32,7 @@ def test_load_project_config() -> None:
     config = ProjectConfig.from_toml(Path("configs/mock.toml"))
     assert config.experiment.seed == 769913
     assert config.model.feature_hidden_sizes == (512, 512)
-    assert config.model.trajectory_codec == "bezier-origin-5x2-10x0p1s-normalized-v1"
+    assert config.model.trajectory_codec == "bezier-origin-5x2-bounded-monotonic-10x0p1s-v2"
     assert config.model.trajectory_output_size == 10
     assert config.to_dict()["environment"]["control_frequency_hz"] == 20.0
 
@@ -48,7 +55,11 @@ def test_load_project_config() -> None:
     assert fixed.environment.critical_body_sideslip_angle_deg == pytest.approx(20.0)
     assert fixed.rewards.prediction_progress_scale == pytest.approx(0.01)
     assert fixed.rewards.prediction_horizon_discount == pytest.approx(0.5)
-    assert fixed.ppo.initial_log_std_after_bc == pytest.approx(-1.5)
+    assert fixed.rewards.reference_tracking_penalty_scale == pytest.approx(0.10)
+    assert fixed.rewards.reference_tracking_free_distance_m == pytest.approx(2.5)
+    assert fixed.rewards.reference_tracking_distance_scale_m == pytest.approx(2.0)
+    assert fixed.ppo.entropy_coefficient == pytest.approx(0.01)
+    assert fixed.ppo.initial_log_std_after_bc == pytest.approx(-1.0)
     assert fixed.ppo.kl_target == pytest.approx(0.01)
     assert fixed.ppo.kl_tolerance == pytest.approx(0.003)
     assert not fixed.experiment.truncate_on_max_episode_steps
@@ -97,12 +108,54 @@ def test_removed_control_loss_variant_key_is_rejected(tmp_path: Path) -> None:
             lambda: EnvironmentConfig(initial_combined_pedal=1.1),
             "initial_combined_pedal",
         ),
+        (
+            lambda: EnvironmentConfig(termination_method_variant="unknown"),
+            "termination_method_variant",
+        ),
+        (
+            lambda: EnvironmentConfig(progress_stall_window_s=0.0),
+            "progress_stall_window_s",
+        ),
+        (
+            lambda: EnvironmentConfig(progress_stall_minimum_progress_m=0.0),
+            "progress_stall_minimum_progress_m",
+        ),
         (lambda: ReferenceConfig(mode="unknown"), "reference.mode"),
+        (
+            lambda: RewardConfig(reference_tracking_penalty_scale=-0.1),
+            "reference_tracking_penalty_scale",
+        ),
+        (
+            lambda: RewardConfig(reference_tracking_distance_scale_m=0.0),
+            "reference_tracking_distance_scale_m",
+        ),
         (lambda: ModelConfig(trajectory_codec="unknown"), "trajectory_codec"),
         (lambda: ModelConfig(trajectory_output_size=20), "output_size = 10"),
         (
             lambda: BehavioralCloningConfig(method_variant="unknown"),
             "method_variant",
+        ),
+        (
+            lambda: BehavioralCloningConfig(action_loss_method_variant="unknown"),
+            "action_loss_method_variant",
+        ),
+        (
+            lambda: BehavioralCloningConfig(
+                predictor_target_normalization_method_variant="unknown"
+            ),
+            "predictor_target_normalization_method_variant",
+        ),
+        (
+            lambda: BehavioralCloningConfig(steering_loss_weight=0.0),
+            "steering_loss_weight",
+        ),
+        (
+            lambda: BehavioralCloningConfig(steering_robustness_method_variant="unknown"),
+            "steering_robustness_method_variant",
+        ),
+        (
+            lambda: BehavioralCloningConfig(steering_robustness_loss_weight=0.0),
+            "steering_robustness_loss_weight",
         ),
         (
             lambda: PPOConfig(rollout_steps=10, minibatch_size=11),
@@ -113,6 +166,14 @@ def test_removed_control_loss_variant_key_is_rejected(tmp_path: Path) -> None:
             "steering_output_sign",
         ),
         (
+            lambda: AssettoCorsaRuntimeConfig(steering_output_gain=0.0),
+            "steering_output_gain",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(x360_control_profile="unknown"),
+            "x360_control_profile",
+        ),
+        (
             lambda: AssettoCorsaRuntimeConfig(launch_timeout_s=0.0),
             "launch_timeout_s",
         ),
@@ -121,8 +182,36 @@ def test_removed_control_loss_variant_key_is_rejected(tmp_path: Path) -> None:
             "reset_collision_quiescence_s",
         ),
         (
+            lambda: AssettoCorsaRuntimeConfig(reset_reference_speed_tolerance_mps=0.0),
+            "reset_reference_speed_tolerance_mps",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(reset_reference_heading_tolerance_rad=0.0),
+            "reset_reference_heading_tolerance_rad",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(reset_reference_lateral_offset_m=5.1),
+            "reset_reference_lateral_offset_m",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(reset_max_abs_slip_ratio=0.0),
+            "reset_max_abs_slip_ratio",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(reset_slip_stable_frames=0),
+            "reset_slip_stable_frames",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(reset_reference_speed_max_attempts=0),
+            "reset_reference_speed_max_attempts",
+        ),
+        (
             lambda: AssettoCorsaRuntimeConfig(reset_backend="unknown"),
             "reset_backend",
+        ),
+        (
+            lambda: AssettoCorsaRuntimeConfig(step_timing_method_variant="unknown"),
+            "step_timing_method_variant",
         ),
     ],
 )
@@ -132,3 +221,58 @@ def test_invalid_configuration_is_rejected(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         factory()
+
+
+def test_pre_action_progress_timing_is_an_explicit_runtime_variant() -> None:
+    runtime = AssettoCorsaRuntimeConfig(
+        step_timing_method_variant=PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT
+    )
+    assert runtime.step_timing_method_variant == PRE_ACTION_PROGRESS_BASELINE_METHOD_VARIANT
+
+
+def test_steering_weighted_bc_loss_is_an_explicit_variant() -> None:
+    bc = BehavioralCloningConfig(
+        action_loss_method_variant=STEERING_WEIGHTED_BC_ACTION_LOSS_METHOD_VARIANT,
+        steering_loss_weight=20.0,
+    )
+    assert bc.steering_loss_weight == pytest.approx(20.0)
+
+    straight = BehavioralCloningConfig(
+        action_loss_method_variant=STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT,
+        steering_loss_weight=20.0,
+    )
+    assert straight.action_loss_method_variant == STRAIGHT_STEERING_BC_ACTION_LOSS_METHOD_VARIANT
+
+
+def test_closed_loop_bc_and_policy_protected_ppo_variants_are_accepted() -> None:
+    behavioral_cloning = BehavioralCloningConfig(
+        steering_robustness_method_variant=(
+            PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT
+        ),
+        steering_robustness_loss_weight=1.5,
+    )
+    ppo = PPOConfig(method_variant=POLICY_PROTECTED_PPO_METHOD_VARIANT)
+
+    assert (
+        behavioral_cloning.steering_robustness_method_variant
+        == PERMUTED_FEEDBACK_BC_STEERING_ROBUSTNESS_METHOD_VARIANT
+    )
+    assert behavioral_cloning.steering_robustness_loss_weight == pytest.approx(1.5)
+    assert ppo.method_variant == POLICY_PROTECTED_PPO_METHOD_VARIANT
+
+
+def test_unrecoverable_progress_stall_is_an_explicit_termination_variant() -> None:
+    environment = EnvironmentConfig(
+        termination_method_variant=UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT,
+        progress_stall_window_s=1.0,
+        progress_stall_minimum_progress_m=2.0,
+    )
+
+    assert environment.progress_stall_window_s == pytest.approx(1.0)
+    assert environment.progress_stall_minimum_progress_m == pytest.approx(2.0)
+
+    active = ProjectConfig.from_toml(Path("configs/assetto_corsa_real_extended_smoke.toml"))
+    assert (
+        active.environment.termination_method_variant
+        == UNRECOVERABLE_PROGRESS_STALL_TERMINATION_METHOD_VARIANT
+    )

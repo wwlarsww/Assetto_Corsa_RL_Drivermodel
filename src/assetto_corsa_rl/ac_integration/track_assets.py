@@ -25,7 +25,7 @@ from assetto_corsa_rl.config import ProjectConfig
 _AI_POINT_STRUCT = struct.Struct("<3ffi")
 _AI_POINT_EXTRA_STRUCT = struct.Struct("<9f3ff3f2f")
 _SUPPORTED_AI_VERSION = 7
-_ASSET_SCHEMA = 5
+_ASSET_SCHEMA = 6
 CANONICAL_COORDINATE_FRAME = "assetto_corsa_gym_world_xy_v1"
 SOURCE_COORDINATE_FRAME = "assetto_corsa_native_world_xz"
 
@@ -91,6 +91,14 @@ class TrackAssetBundle:
     reference_sha256: str
     rebuilt_geometry: bool
     rebuilt_reference: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _CompatibleHumanSpeedProfiles:
+    """Human speed profiles aligned to generated AI-spline distances."""
+
+    baseline_median_mps: np.ndarray
+    arithmetic_mean_mps: np.ndarray | None
 
 
 def sha256_file(path: Path) -> str:
@@ -275,10 +283,20 @@ def ensure_track_assets(
             config=config,
         )
 
+    required_reference_arrays = (
+        ("human_mean_speed_mps",)
+        if config.assetto_corsa.reset_backend
+        in {
+            "csp_hotlap_reference_speed_v1",
+            "csp_reference_pose_speed_v2",
+        }
+        else ()
+    )
     reference_valid = not force and _npz_metadata_matches(
         paths.reference_path,
         source_digest=source_digest,
         asset_kind="reference",
+        required_arrays=required_reference_arrays,
     )
     if not reference_valid:
         _write_reference(
@@ -550,10 +568,13 @@ def circular_interpolate(
     query = np.mod(np.asarray(query_m, dtype=np.float64), track_length_m)
     extended_distance = np.concatenate((distance, [track_length_m]))
     if data.ndim == 1:
-        return np.interp(
-            query,
-            extended_distance,
-            np.concatenate((data, [data[0]])),
+        return np.asarray(
+            np.interp(
+                query,
+                extended_distance,
+                np.concatenate((data, [data[0]])),
+            ),
+            dtype=np.float64,
         )
     return np.column_stack(
         [
@@ -650,7 +671,10 @@ def local_xz_to_world_xz(
         raise ValueError("local points must have shape (N, 2)")
     forward = np.asarray([math.cos(heading_rad), math.sin(heading_rad)])
     left = np.asarray([-math.sin(heading_rad), math.cos(heading_rad)])
-    return position[None, :] + points[:, 0:1] * left[None, :] + points[:, 1:2] * forward[None, :]
+    return np.asarray(
+        position[None, :] + points[:, 0:1] * left[None, :] + points[:, 1:2] * forward[None, :],
+        dtype=np.float64,
+    )
 
 
 def local_xz_to_world_xy(
@@ -780,6 +804,7 @@ def _write_reference(
     track_length = float(np.asarray(geometry["track_length_m"]).reshape(-1)[0])
 
     speed = ai_speed
+    human_mean_speed: np.ndarray | None = None
     selected_speed_source = "assetto_corsa_ai_speed"
     human_path_text = config.track_assets.human_reference_artifact_path.strip()
     if human_path_text.casefold() == "auto":
@@ -793,25 +818,36 @@ def _write_reference(
         and human_path_text
     ):
         human_path = Path(human_path_text)
-        human_speed = _compatible_human_speed(
+        human_profiles = _compatible_human_speed(
             human_path,
             target_distance_m=distance,
             target_position_xy_m=position,
             track_length_m=track_length,
             source_sha256=source_sha256,
         )
-        if human_speed is not None:
-            speed = human_speed
+        if human_profiles is not None:
+            speed = human_profiles.baseline_median_mps
+            human_mean_speed = human_profiles.arithmetic_mean_mps
             selected_speed_source = "compatible_human_reference_speed"
 
     minimum_speed = config.track_assets.minimum_reference_speed_mps
     speed = np.maximum(np.asarray(speed, dtype=np.float64), minimum_speed)
+    if human_mean_speed is not None:
+        human_mean_speed = np.maximum(
+            np.asarray(human_mean_speed, dtype=np.float64),
+            minimum_speed,
+        )
     metadata = {
         "asset_kind": "reference",
         "asset_schema": _ASSET_SCHEMA,
-        "method_variant": "assetto_corsa_fast_lane_reference_v2",
+        "method_variant": "assetto_corsa_fast_lane_reference_v3",
         "line_source": "assetto_corsa_fast_lane",
         "speed_source": selected_speed_source,
+        "reset_speed_source": (
+            "compatible_human_arithmetic_mean_speed"
+            if human_mean_speed is not None
+            else "unavailable"
+        ),
         "source_fast_lane_path": str(source_path.resolve()),
         "source_fast_lane_sha256": source_sha256,
         "track_id": config.dataset.track_id,
@@ -820,22 +856,24 @@ def _write_reference(
         "coordinate_frame": CANONICAL_COORDINATE_FRAME,
         "coordinate_transform": "world_xy=[ac_z,ac_x]",
     }
-    _save_npz_atomically(
-        destination,
-        track_distance_m=distance.astype(np.float32),
-        world_position_xy_m=position.astype(np.float32),
-        world_position_xz_m=position.astype(np.float32),
-        world_heading_rad=heading.astype(np.float32),
-        heading_rad=heading.astype(np.float32),
-        speed_mps=speed.astype(np.float32),
-        lateral_offset_m=np.zeros(distance.size, dtype=np.float32),
-        track_length_m=np.asarray(track_length, dtype=np.float64),
-        coordinate_frame=np.asarray(CANONICAL_COORDINATE_FRAME),
-        coordinate_transform=np.asarray("world_xy=[ac_z,ac_x]"),
-        source_track_sha256=np.asarray(source_sha256),
-        source_fast_lane_sha256=np.asarray(source_sha256),
-        metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
-    )
+    arrays: dict[str, Any] = {
+        "track_distance_m": distance.astype(np.float32),
+        "world_position_xy_m": position.astype(np.float32),
+        "world_position_xz_m": position.astype(np.float32),
+        "world_heading_rad": heading.astype(np.float32),
+        "heading_rad": heading.astype(np.float32),
+        "speed_mps": speed.astype(np.float32),
+        "lateral_offset_m": np.zeros(distance.size, dtype=np.float32),
+        "track_length_m": np.asarray(track_length, dtype=np.float64),
+        "coordinate_frame": np.asarray(CANONICAL_COORDINATE_FRAME),
+        "coordinate_transform": np.asarray("world_xy=[ac_z,ac_x]"),
+        "source_track_sha256": np.asarray(source_sha256),
+        "source_fast_lane_sha256": np.asarray(source_sha256),
+        "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
+    }
+    if human_mean_speed is not None:
+        arrays["human_mean_speed_mps"] = human_mean_speed.astype(np.float32)
+    _save_npz_atomically(destination, **arrays)
 
 
 def _compatible_human_speed(
@@ -845,7 +883,7 @@ def _compatible_human_speed(
     target_position_xy_m: np.ndarray,
     track_length_m: float,
     source_sha256: str,
-) -> np.ndarray | None:
+) -> _CompatibleHumanSpeedProfiles | None:
     if not path.is_file():
         return None
     try:
@@ -857,14 +895,20 @@ def _compatible_human_speed(
             return None
         distance = np.asarray(arrays["track_distance_m"], dtype=np.float64)
         speed = np.asarray(arrays["speed_mps"], dtype=np.float64)
-        candidate_position = np.asarray(
-            arrays.get("world_position_xy_m", arrays["world_position_xz_m"]),
-            dtype=np.float64,
+        human_mean_speed = (
+            np.asarray(arrays["human_mean_speed_mps"], dtype=np.float64)
+            if "human_mean_speed_mps" in arrays
+            else None
         )
+        position_key = (
+            "world_position_xy_m" if "world_position_xy_m" in arrays else "world_position_xz_m"
+        )
+        candidate_position = np.asarray(arrays[position_key], dtype=np.float64)
         candidate_length = float(np.asarray(arrays["track_length_m"]).reshape(-1)[0])
         if (
             distance.ndim != 1
             or speed.shape != distance.shape
+            or (human_mean_speed is not None and human_mean_speed.shape != distance.shape)
             or candidate_position.shape != (distance.size, 2)
             or distance.size < 2
             or not math.isclose(candidate_length, track_length_m, rel_tol=0.0, abs_tol=2.0)
@@ -876,23 +920,30 @@ def _compatible_human_speed(
             target_distance_m,
             track_length_m,
         )
-        rms_alignment_error = float(
-            np.sqrt(
-                np.mean(
-                    np.sum(
-                        (aligned_position - target_position_xy_m) ** 2,
-                        axis=1,
-                    )
-                )
-            )
+        squared_distance = np.asarray(
+            np.sum((aligned_position - target_position_xy_m) ** 2, axis=1),
+            dtype=np.float64,
         )
+        rms_alignment_error = float(np.sqrt(np.mean(squared_distance)))
         if not math.isfinite(rms_alignment_error) or rms_alignment_error > 2.0:
             return None
-        return circular_interpolate(
-            distance,
-            speed,
-            target_distance_m,
-            track_length_m,
+        return _CompatibleHumanSpeedProfiles(
+            baseline_median_mps=circular_interpolate(
+                distance,
+                speed,
+                target_distance_m,
+                track_length_m,
+            ),
+            arithmetic_mean_mps=(
+                None
+                if human_mean_speed is None
+                else circular_interpolate(
+                    distance,
+                    human_mean_speed,
+                    target_distance_m,
+                    track_length_m,
+                )
+            ),
         )
     except (KeyError, OSError, ValueError, TypeError):
         return None
@@ -910,9 +961,12 @@ def _normalised_track_distance(
             and np.all(np.diff(values) >= -1e-3)
             and values[-1] > values[0]
         ):
-            return values - values[0]
+            return np.asarray(values - values[0], dtype=np.float64)
     delta = np.diff(position_xy, axis=0)
-    return np.concatenate(([0.0], np.cumsum(np.linalg.norm(delta, axis=1))))
+    return np.asarray(
+        np.concatenate(([0.0], np.cumsum(np.linalg.norm(delta, axis=1)))),
+        dtype=np.float64,
+    )
 
 
 def _track_length(distance: np.ndarray, position_xy: np.ndarray) -> float:
@@ -938,7 +992,7 @@ def _normalised_forward_vectors(
         norms = np.linalg.norm(forward, axis=1)
     if np.any(norms <= 1e-9):
         raise TrackAssetBuildError("AI spline contains degenerate forward vectors")
-    return forward / norms[:, None]
+    return np.asarray(forward / norms[:, None], dtype=np.float64)
 
 
 def _valid_side_widths(left: np.ndarray, right: np.ndarray) -> bool:
@@ -973,7 +1027,7 @@ def _curvature(
             out=np.zeros_like(delta_heading),
             where=np.abs(delta_distance) > 1e-9,
         )
-    return result
+    return np.asarray(result, dtype=np.float64)
 
 
 def _npz_metadata_matches(
@@ -981,6 +1035,7 @@ def _npz_metadata_matches(
     *,
     source_digest: str,
     asset_kind: str,
+    required_arrays: tuple[str, ...] = (),
 ) -> bool:
     if not path.is_file():
         return False
@@ -991,7 +1046,8 @@ def _npz_metadata_matches(
             return False
         metadata = json.loads(metadata_text)
         return bool(
-            metadata.get("asset_kind") == asset_kind
+            all(name in arrays for name in required_arrays)
+            and metadata.get("asset_kind") == asset_kind
             and metadata.get("asset_schema") == _ASSET_SCHEMA
             and metadata.get("source_fast_lane_sha256") == source_digest
         )
