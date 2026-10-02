@@ -1,8 +1,8 @@
 """Read telemetry data from Assetto Corsa shared memory."""
 
-import ctypes #  
+import ctypes
 import mmap 
-
+from assetto_corsa_ai.telemetry import TelemetryFrame
 
 class _PhysicsPage(ctypes.Structure):
     """Describe the relevant part of Assetto Corsa's physics memory layout."""
@@ -22,6 +22,13 @@ class _PhysicsPage(ctypes.Structure):
         ("rpms", ctypes.c_int32),
         ("steerAngle", ctypes.c_float),
         ("speedKmh", ctypes.c_float),
+        # +3 -> Array with x, y, z float values
+        ("velocity", ctypes.c_float * 3),
+        ("accG", ctypes.c_float * 3),
+        # components of the wheel slip
+        # 0 → vorne links,1 → vorne rechts
+        # 2 → hinten links, 3 → hinten rechts
+        ("wheelSlip", ctypes.c_float * 4),
     ]
 
 
@@ -40,8 +47,8 @@ class TelemetryReader:
             access=mmap.ACCESS_READ, 
         )
 
-    def read_speed(self) -> float:
-        """Return the current vehicle speed in kilometres per hour."""
+    def read(self) -> TelemetryFrame:
+        """Return the current vehicle telemetry."""
 
         # Reset the memory cursor because each telemetry frame starts
         # at the beginning of the shared memory region.
@@ -49,11 +56,36 @@ class TelemetryReader:
 
         raw_data = self._memory.read(ctypes.sizeof(_PhysicsPage))
 
-        # Convert the raw bytes into the structure defined above so that
-        # individual telemetry fields can be accessed by name.
+        # Interpret the raw bytes according to Assetto Corsa's memory layout.
         physics = _PhysicsPage.from_buffer_copy(raw_data)
 
-        return float(physics.speedKmh)
+        # Convert Assetto Corsa specific field names into our internal
+        # simulator independent telemetry representation.
+        return TelemetryFrame(
+            speed_kmh=float(physics.speedKmh),
+            gas=float(physics.gas),
+            brake=float(physics.brake),
+            fuel=float(physics.fuel),
+            gear=int(physics.gear),
+            rpm=int(physics.rpms),
+            steering_angle=float(physics.steerAngle),
+            velocity=(
+                float(physics.velocity[0]),
+                float(physics.velocity[1]),
+                float(physics.velocity[2]),
+            ),
+            acceleration_g=(
+                float(physics.accG[0]),
+                float(physics.accG[1]),
+                float(physics.accG[2]),
+            ),
+            wheel_slip=(
+                float(physics.wheelSlip[0]),
+                float(physics.wheelSlip[1]),
+                float(physics.wheelSlip[2]),
+                float(physics.wheelSlip[3]),
+            )
+        )
 
     def close(self) -> None:
         """Close the shared memory connection."""
