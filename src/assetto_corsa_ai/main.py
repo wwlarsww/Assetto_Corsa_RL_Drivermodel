@@ -1,11 +1,25 @@
 """Main entry point for the Assetto Corsa AI."""
 
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
+from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 from time import sleep
 
 
 def main() -> None:
-    """Read and print the current vehicle speed from Assetto Corsa."""
+    
+    # Initialize the static info reader
+    static_reader = StaticInfoReader()
+    static_info = static_reader.read()
+
+    print(f"Car:          {static_info.car_model}")
+    print(f"Track:        {static_info.track_name}")
+    print(f"Configuration:{static_info.track_configuration}")
+    print(f"Max RPM:      {static_info.max_rpm}")
+    print(f"Max Fuel:     {static_info.max_fuel:.1f} L")
+    print(f"Tyre Radius:  {static_info.tyre_radius}")
+    print(f"Track Length: {static_info.track_spline_length:.1f} m")
+    static_reader.close()
+
 
     reader = TelemetryReader()
     try:
