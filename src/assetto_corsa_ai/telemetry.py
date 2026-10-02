@@ -21,3 +21,6 @@ class TelemetryFrame:
 
     local_velocity: tuple[float, float, float ]  # vertical_velocity, longitudinal_velocity, lateral_velocity 
     local_angular_velocity: tuple[float, float, float] # Pitch Rate, Yaw Rate, Roll Rate in rad/s
+
+    car_coordinates: tuple[float, float, float] # X, Y, Z coordinates in world space
+    normalized_track_position: float  # progress of the car on the track (0->1)

@@ -98,6 +98,48 @@ class _PhysicsPage(ctypes.Structure):
     ]
 
 
+class _GraphicsPage(ctypes.Structure):
+    """Describe Assetto Corsa's graphics shared memory layout."""
+
+    _pack_ = 4
+
+    _fields_ = [
+        ("packetId", ctypes.c_int32),
+        ("status", ctypes.c_int32),
+        ("session", ctypes.c_int32),
+        ("currentTime", ctypes.c_wchar * 15),
+        ("lastTime", ctypes.c_wchar * 15),
+        ("bestTime", ctypes.c_wchar * 15),
+        ("split", ctypes.c_wchar * 15),
+        ("completedLaps", ctypes.c_int32),
+        ("position", ctypes.c_int32),  # placement
+        ("iCurrentTime", ctypes.c_int32),
+        ("iLastTime", ctypes.c_int32),
+        ("iBestTime", ctypes.c_int32),
+        ("sessionTimeLeft", ctypes.c_float),
+        ("distanceTraveled", ctypes.c_float),
+        ("isInPit", ctypes.c_int32),
+        ("currentSectorIndex", ctypes.c_int32),
+        ("lastSectorTime", ctypes.c_int32),
+        ("numberOfLaps", ctypes.c_int32),
+        ("tyreCompound", ctypes.c_wchar * 33),
+        ("replayTimeMultiplier", ctypes.c_float),
+        (
+            "normalizedCarPosition",
+            ctypes.c_float,
+        ),  # progress of the car on the track (0->1)
+        ("carCoordinates", ctypes.c_float * 3),
+        ("penaltyTime", ctypes.c_float),
+        ("flag", ctypes.c_int32),
+        ("idealLineOn", ctypes.c_int32),
+        ("isInPitLane", ctypes.c_int32),
+        ("surfaceGrip", ctypes.c_float),
+        ("mandatoryPitDone", ctypes.c_int32),
+        ("windSpeed", ctypes.c_float),
+        ("windDirection", ctypes.c_float),
+    ]
+
+
 class TelemetryReader:
     """Read vehicle telemetry from Assetto Corsa's physics shared memory."""
 
@@ -106,11 +148,18 @@ class TelemetryReader:
         # Assetto Corsa exposes physics data through a named Windows
         # shared memory region. Access is read only because this class
         # is responsible only for receiving telemetry.
-        self._memory = mmap.mmap(
+        self._physics_memory = mmap.mmap(
             fileno=-1,  # anonymous, not backed by a file
             length=ctypes.sizeof(_PhysicsPage),
-            tagname="Local\\acpmf_physics", # named shared memory region
-            access=mmap.ACCESS_READ, 
+            tagname="Local\\acpmf_physics",  # named shared memory region
+            access=mmap.ACCESS_READ,
+        )
+
+        self._graphics_memory = mmap.mmap(
+            fileno=-1,
+            length=ctypes.sizeof(_GraphicsPage),
+            tagname="Local\\acpmf_graphics",
+            access=mmap.ACCESS_READ,
         )
 
     def read(self) -> TelemetryFrame:
@@ -118,12 +167,22 @@ class TelemetryReader:
 
         # Reset the memory cursor because each telemetry frame starts
         # at the beginning of the shared memory region.
-        self._memory.seek(0)
-
-        raw_data = self._memory.read(ctypes.sizeof(_PhysicsPage))
+        self._physics_memory.seek(0)
 
         # Interpret the raw bytes according to Assetto Corsa's memory layout.
-        physics = _PhysicsPage.from_buffer_copy(raw_data)
+        physics_raw_data = self._physics_memory.read(
+            ctypes.sizeof(_PhysicsPage)
+        )
+        # Read the physics data from the shared memory according to the Assetto Corsa memory layout.
+        physics = _PhysicsPage.from_buffer_copy(
+            physics_raw_data
+        )
+        self._graphics_memory.seek(0)
+
+        graphics_raw_data = self._graphics_memory.read(
+            ctypes.sizeof(_GraphicsPage)
+        )
+        graphics = _GraphicsPage.from_buffer_copy(graphics_raw_data)
 
         # Convert Assetto Corsa specific field names into our internal
         # simulator independent telemetry representation.
@@ -155,11 +214,18 @@ class TelemetryReader:
                 float(physics.localAngularVel[0]),
                 float(physics.localAngularVel[1]),
                 float(physics.localAngularVel[2]),
-            )
+            ),
+            # Graphics data is used for world position and normalized track position
+            car_coordinates=(
+                float(graphics.carCoordinates[0]),
+                float(graphics.carCoordinates[1]),
+                float(graphics.carCoordinates[2]),
+            ),
+            normalized_track_position=float(graphics.normalizedCarPosition),
         )
-    
-    
+
     def close(self) -> None:
         """Close the shared memory connection."""
 
-        self._memory.close()
+        self._physics_memory.close()
+        self._graphics_memory.close()
