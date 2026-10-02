@@ -20,9 +20,10 @@ def main() -> None:
                 f"Brake:       {telemetry.brake:7.3f}\n"
                 f"Fuel:        {telemetry.fuel:7.2f}\n"
                 f"Steering:    {telemetry.steering_angle:7.3f}\n"
-                f"Velocity:    {telemetry.velocity}\n"
                 f"Acceleration:{telemetry.acceleration_g}\n"
                 f"Wheel Slip:  {telemetry.wheel_slip}\n"
+                f"Local Vel:   {telemetry.local_velocity}\n"
+                f"Local Ang Vel:{telemetry.local_angular_velocity}\n"
                 "----------------------------------------"
             )
 

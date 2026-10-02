@@ -23,12 +23,78 @@ class _PhysicsPage(ctypes.Structure):
         ("steerAngle", ctypes.c_float),
         ("speedKmh", ctypes.c_float),
         # +3 -> Array with x, y, z float values
-        ("velocity", ctypes.c_float * 3),
-        ("accG", ctypes.c_float * 3),
+        ("velocity", ctypes.c_float * 3), # world coordinates
+        ("accG", ctypes.c_float * 3), # local coordinates
         # components of the wheel slip
         # 0 → vorne links,1 → vorne rechts
         # 2 → hinten links, 3 → hinten rechts
         ("wheelSlip", ctypes.c_float * 4),
+        ("wheelLoad", ctypes.c_float * 4),
+        ("wheelsPressure", ctypes.c_float * 4),
+        ("wheelAngularSpeed", ctypes.c_float * 4),
+        ("tyreWear", ctypes.c_float * 4),
+        ("tyreDirtyLevel", ctypes.c_float * 4),
+        ("tyreCoreTemperature", ctypes.c_float * 4),
+        ("camberRAD", ctypes.c_float * 4),
+        ("suspensionTravel", ctypes.c_float * 4),
+
+        ("drs", ctypes.c_float),
+        ("tc", ctypes.c_float),
+        ("heading", ctypes.c_float),
+        ("pitch", ctypes.c_float),
+        ("roll", ctypes.c_float),
+        ("cgHeight", ctypes.c_float),
+
+        ("carDamage", ctypes.c_float * 5),
+
+        ("numberOfTyresOut", ctypes.c_int32),
+        ("pitLimiterOn", ctypes.c_int32),
+
+        ("abs", ctypes.c_float),
+        ("kersCharge", ctypes.c_float),
+        ("kersInput", ctypes.c_float),
+
+        ("autoShifterOn", ctypes.c_int32),
+
+        ("rideHeight", ctypes.c_float * 2),
+        ("turboBoost", ctypes.c_float),
+        ("ballast", ctypes.c_float),
+        ("airDensity", ctypes.c_float),
+        ("airTemp", ctypes.c_float),
+        ("roadTemp", ctypes.c_float),
+
+        ("localAngularVel", ctypes.c_float * 3),
+
+        ("finalFF", ctypes.c_float),
+        ("performanceMeter", ctypes.c_float),
+
+        ("engineBrake", ctypes.c_int32),
+        ("ersRecoveryLevel", ctypes.c_int32),
+        ("ersPowerLevel", ctypes.c_int32),
+        ("ersHeatCharging", ctypes.c_int32),
+        ("ersIsCharging", ctypes.c_int32),
+
+        ("kersCurrentKJ", ctypes.c_float),
+
+        ("drsAvailable", ctypes.c_int32),
+        ("drsEnabled", ctypes.c_int32),
+
+        ("brakeTemp", ctypes.c_float * 4),
+        ("clutch", ctypes.c_float),
+
+        ("tyreTempI", ctypes.c_float * 4),
+        ("tyreTempM", ctypes.c_float * 4),
+        ("tyreTempO", ctypes.c_float * 4),
+
+        ("isAIControlled", ctypes.c_int32),
+
+        ("tyreContactPoint", (ctypes.c_float * 3) * 4),
+        ("tyreContactNormal", (ctypes.c_float * 3) * 4),
+        ("tyreContactHeading", (ctypes.c_float * 3) * 4),
+
+        ("brakeBias", ctypes.c_float),
+
+        ("localVelocity", ctypes.c_float * 3),
     ]
 
 
@@ -69,11 +135,6 @@ class TelemetryReader:
             gear=int(physics.gear),
             rpm=int(physics.rpms),
             steering_angle=float(physics.steerAngle),
-            velocity=(
-                float(physics.velocity[0]),
-                float(physics.velocity[1]),
-                float(physics.velocity[2]),
-            ),
             acceleration_g=(
                 float(physics.accG[0]),
                 float(physics.accG[1]),
@@ -84,9 +145,20 @@ class TelemetryReader:
                 float(physics.wheelSlip[1]),
                 float(physics.wheelSlip[2]),
                 float(physics.wheelSlip[3]),
+            ),
+            local_velocity=(
+                float(physics.localVelocity[0]),
+                float(physics.localVelocity[1]),
+                float(physics.localVelocity[2]),
+            ),
+            local_angular_velocity=(
+                float(physics.localAngularVel[0]),
+                float(physics.localAngularVel[1]),
+                float(physics.localAngularVel[2]),
             )
         )
-
+    
+    
     def close(self) -> None:
         """Close the shared memory connection."""
 
