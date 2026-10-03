@@ -12,8 +12,9 @@ from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader
 from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 
+
 def main() -> None:
-    """Plot the track spline and live vehicle position."""
+    """Plot track geometry and live vehicle position."""
 
     track_file = Path(
         r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
@@ -22,36 +23,29 @@ def main() -> None:
 
     static_reader = StaticInfoReader()
     static_info = static_reader.read()
-    print(f"Track:        {static_info.track_name}")    
+
+    print(f"Track: {static_info.track_name}")
 
     track_reader = AssettoCorsaTrackReader(track_file)
-    positions = track_reader.read_positions()
+    track_geometry = track_reader.read()
 
-    track_x = [position[0] for position in positions]
-    track_z = [position[2] for position in positions]
+    center_x = [point.position[0] for point in track_geometry.points]
 
-    centerline, left_boundary, right_boundary = track_reader.read_border_lines()
+    center_z = [point.position[2] for point in track_geometry.points]
 
-    center_x = [point[0] for point in centerline]
-    center_z = [point[2] for point in centerline]
+    left_x = [point.left_boundary[0] for point in track_geometry.points]
 
-    left_x = [point[0] for point in left_boundary]
-    left_z = [point[2] for point in left_boundary]
+    left_z = [point.left_boundary[2] for point in track_geometry.points]
 
-    right_x = [point[0] for point in right_boundary]
-    right_z = [point[2] for point in right_boundary]
+    right_x = [point.right_boundary[0] for point in track_geometry.points]
+
+    right_z = [point.right_boundary[2] for point in track_geometry.points]
 
     telemetry_reader = TelemetryReader()
 
     plt.ion()
 
     figure, axis = plt.subplots()
-
-    axis.plot(
-        track_x,
-        track_z,
-        label="Track spline",
-    )
 
     axis.plot(
         center_x,
@@ -79,10 +73,25 @@ def main() -> None:
         label="Vehicle",
     )
 
+    (tyre_marker,) = axis.plot(
+        [],
+        [],
+        marker="x",
+        linestyle="None",
+        markersize=12,
+        markeredgewidth=3,
+        label="Tyre contact points",
+        zorder=20,
+    )
+
     axis.set_xlabel("World X [m]")
     axis.set_ylabel("World Z [m]")
     axis.axis("equal")
-    axis.invert_yaxis() # Invert the y-axis to match the world coordinate system in Assetto Corsa
+
+    # Visualization only: positive Assetto Corsa Z points in the
+    # opposite direction to the conventional plot orientation.
+    axis.invert_yaxis()
+
     axis.legend()
 
     try:
@@ -93,14 +102,21 @@ def main() -> None:
                 [telemetry.car_coordinates[0]],
                 [telemetry.car_coordinates[2]],
             )
+            tyre_marker.set_data(
+                [point[0] for point in telemetry.tyre_contact_points],
+                [point[2] for point in telemetry.tyre_contact_points],
+            )
 
             figure.canvas.draw_idle()
             figure.canvas.flush_events()
-
             plt.pause(0.02)
+
+    except KeyboardInterrupt:
+        pass
 
     finally:
         telemetry_reader.close()
+        static_reader.close()
         plt.close(figure)
 
 

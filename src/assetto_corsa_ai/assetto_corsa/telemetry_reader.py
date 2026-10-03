@@ -215,6 +215,28 @@ class TelemetryReader:
                 float(physics.localAngularVel[1]),
                 float(physics.localAngularVel[2]),
             ),
+            tyre_contact_points=(
+                (
+                    float(physics.tyreContactPoint[0][0]),
+                    float(physics.tyreContactPoint[0][1]),
+                    float(physics.tyreContactPoint[0][2]),
+                ),
+                (
+                    float(physics.tyreContactPoint[1][0]),
+                    float(physics.tyreContactPoint[1][1]),
+                    float(physics.tyreContactPoint[1][2]),
+                ),
+                (
+                    float(physics.tyreContactPoint[2][0]),
+                    float(physics.tyreContactPoint[2][1]),
+                    float(physics.tyreContactPoint[2][2]),
+                ),
+                (
+                    float(physics.tyreContactPoint[3][0]),
+                    float(physics.tyreContactPoint[3][1]),
+                    float(physics.tyreContactPoint[3][2]),
+                ),
+            ),
             # Graphics data is used for world position and normalized track position
             car_coordinates=(
                 float(graphics.carCoordinates[0]),

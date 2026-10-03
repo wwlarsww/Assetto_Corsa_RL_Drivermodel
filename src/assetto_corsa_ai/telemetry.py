@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+Vector3 = tuple[float, float, float]
+
 @dataclass
 class TelemetryFrame:
     """Represent one snapshot of the vehicle telemetry."""
@@ -14,13 +16,14 @@ class TelemetryFrame:
     rpm: int
     steering_angle: float # 1 -> full right, -1 -> full left
 
-    acceleration_g: tuple[float, float, float]  # in local coordinates
+    acceleration_g: Vector3  # in local coordinates
     # 0 → front left, 1 → front right
     # 2 → back left, 3 → back right
     wheel_slip: tuple[float, float, float, float]
+    tyre_contact_points: tuple[Vector3,Vector3,Vector3,Vector3]
+    local_velocity: Vector3  # vertical_velocity, longitudinal_velocity, lateral_velocity
+    
+    local_angular_velocity: Vector3 # Pitch Rate, Yaw Rate, Roll Rate in rad/s
 
-    local_velocity: tuple[float, float, float ]  # vertical_velocity, longitudinal_velocity, lateral_velocity 
-    local_angular_velocity: tuple[float, float, float] # Pitch Rate, Yaw Rate, Roll Rate in rad/s
-
-    car_coordinates: tuple[float, float, float] # X, Y, Z coordinates in world space
+    car_coordinates: Vector3 # X, Y, Z coordinates in world space
     normalized_track_position: float  # progress of the car on the track (0->1)
