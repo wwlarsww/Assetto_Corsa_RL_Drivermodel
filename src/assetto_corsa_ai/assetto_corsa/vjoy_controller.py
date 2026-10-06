@@ -12,13 +12,16 @@ from assetto_corsa_ai.assetto_corsa.vjoy_interface import (
 class AssettoCorsaVJoyController:
     """Apply vehicle actions to Assetto Corsa through vJoy."""
 
-    def __init__(self) -> None:
-        self._vjoy = VJoyInterface(device_id=1)
+    def __init__(
+        self,
+        vjoy: VJoyInterface | None = None,
+    ) -> None:
+        # Use the provided vJoy interface or create a new one for device 1
+        self._vjoy = vjoy or VJoyInterface(device_id=1)
 
+        # Get the axis ranges for steering, throttle, and brake
         self._steering_range = self._vjoy.get_axis_range(VJoyAxis.X)
-
         self._throttle_range = self._vjoy.get_axis_range(VJoyAxis.Y)
-
         self._brake_range = self._vjoy.get_axis_range(VJoyAxis.Z)
 
         self.reset()
