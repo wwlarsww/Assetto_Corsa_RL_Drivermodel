@@ -20,7 +20,9 @@ class TelemetryFrame:
     # 0 → front left, 1 → front right
     # 2 → back left, 3 → back right
     wheel_slip: tuple[float, float, float, float]
+    wheel_angular_speed: tuple[float, float, float, float]
     tyre_contact_points: tuple[Vector3,Vector3,Vector3,Vector3]
+    
     local_velocity: Vector3  # vertical_velocity, longitudinal_velocity, lateral_velocity
     
     local_angular_velocity: Vector3 # Pitch Rate, Yaw Rate, Roll Rate in rad/s

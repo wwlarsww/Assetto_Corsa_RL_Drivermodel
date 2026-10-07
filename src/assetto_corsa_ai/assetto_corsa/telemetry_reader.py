@@ -237,6 +237,13 @@ class TelemetryReader:
                     float(physics.tyreContactPoint[3][2]),
                 ),
             ),
+            wheel_angular_speed=(
+                float(physics.wheelAngularSpeed[0]),
+                float(physics.wheelAngularSpeed[1]),
+                float(physics.wheelAngularSpeed[2]),
+                float(physics.wheelAngularSpeed[3]),
+                
+            ),
             # Graphics data is used for world position and normalized track position
             car_coordinates=(
                 float(graphics.carCoordinates[0]),

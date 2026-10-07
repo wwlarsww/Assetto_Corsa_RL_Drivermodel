@@ -55,6 +55,12 @@ def run_test(
             f"[0]={angular[0]:+7.3f} "
             f"[1]={angular[1]:+7.3f} "
             f"[2]={angular[2]:+7.3f}"
+            f"wheel_slip"
+            f"[0]={telemetry.wheel_slip[0]:+7.3f} "
+            f"[1]={telemetry.wheel_slip[1]:+7.3f} "
+            f"[2]={telemetry.wheel_slip[2]:+7.3f} "
+            f"[3]={telemetry.wheel_slip[3]:+7.3f}"
+
         )
 
         time.sleep(SAMPLE_TIME)
