@@ -60,7 +60,8 @@ The normalized action ranges are:
 | Throttle | `[0.0, 1.0]` | Y |
 | Brake | `[0.0, 1.0]` | Z |
 
-For RL training, the simulator input configuration should remain as linear as possible. Gamma, filters and dead zones are therefore kept neutral where possible.
+For RL training, the simulator input configuration should remain as linear as possible.
+The Agent later uses a combined Brake and Throttle action to control the vehicle speed.
 
 ## Assetto Corsa configuration
 
