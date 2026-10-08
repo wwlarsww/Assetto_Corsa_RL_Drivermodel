@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+Point2D = tuple[float, float]
 
 @dataclass(frozen=True)
 class Observation:
@@ -17,9 +18,9 @@ class Observation:
     rear_slip_angle: float
 
     # Track perception
-    left_boundary: tuple[tuple[float, float], ...]
-    right_boundary: tuple[tuple[float, float], ...]
-    reference_waypoints: tuple[tuple[float, float], ...]
+    left_boundary: tuple[Point2D, ...]
+    right_boundary: tuple[Point2D, ...]
+    reference_waypoints: tuple[Point2D, ...]
 
     # Actually applied controls
     steering: float
