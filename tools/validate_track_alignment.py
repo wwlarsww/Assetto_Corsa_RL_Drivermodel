@@ -1,32 +1,282 @@
-"""Visually validate Assetto Corsa track and vehicle coordinate alignment."""
+"""Visually validate the complete RL observation in Assetto Corsa."""
 
 # Matplotlib leaves some method signatures incomplete (kwargs and context managers).
 # Keep strict checks, but exclude unknown member types in this plotting script.
 # pyright: reportUnknownMemberType=false
 
-from math import hypot, isfinite
+from math import degrees, hypot, isfinite
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.text import Text
 from matplotlib.transforms import Affine2D
 
+from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader
-from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
-from assetto_corsa_ai.track_projection import TrackProjector
+from assetto_corsa_ai.observation import Observation
+from assetto_corsa_ai.observation_builder import ObservationBuilder
+from assetto_corsa_ai.telemetry import TelemetryFrame
+from assetto_corsa_ai.track_perception import TrackPerceptionCalculator
+from assetto_corsa_ai.track_projection import TrackProjection, TrackProjector
+from assetto_corsa_ai.tyre_dynamics import TyreDynamicsCalculator
+
+# Minimum visible lateral range on each side of the vehicle.
+MIN_LATERAL_VIEW_METRES = 20.0
+
+# Minimum forward range shown even when only short-distance points are present.
+MIN_FORWARD_VIEW_METRES = 110.0
 
 
-# Half the visible width and height around the vehicle, in world metres.
-VIEW_RADIUS_METRES = 30.0
+def _vehicle_plot_transform(telemetry: TelemetryFrame) -> Affine2D:
+    """Map world X/Z to the same vehicle frame as the observation points."""
+
+    fl, fr, rl, rr = telemetry.tyre_contact_points
+
+    forward_x = (fl[0] + fr[0] - rl[0] - rr[0]) / 2.0
+    forward_z = (fl[2] + fr[2] - rl[2] - rr[2]) / 2.0
+    right_x = (fr[0] + rr[0] - fl[0] - rl[0]) / 2.0
+    right_z = (fr[2] + rr[2] - fl[2] - rl[2]) / 2.0
+
+    forward_length = hypot(forward_x, forward_z)
+    right_length = hypot(right_x, right_z)
+    if (
+        not isfinite(forward_length)
+        or not isfinite(right_length)
+        or forward_length <= 1e-6
+        or right_length <= 1e-6
+    ):
+        raise ValueError("Could not determine the vehicle frame from tyre contacts.")
+
+    forward_x, forward_z = forward_x / forward_length, forward_z / forward_length
+    right_x, right_z = right_x / right_length, right_z / right_length
+    origin_x = (fl[0] + fr[0] + rl[0] + rr[0]) / 4.0
+    origin_z = (fl[2] + fr[2] + rl[2] + rr[2]) / 4.0
+
+    return Affine2D.from_values(
+        right_x,
+        forward_x,
+        right_z,
+        forward_z,
+        -(origin_x * right_x + origin_z * right_z),
+        -(origin_x * forward_x + origin_z * forward_z),
+    )
+
+
+def _derive_axle_distances(
+    telemetry: TelemetryFrame,
+) -> tuple[float, float]:
+    """Estimate distances from the vehicle reference point to both axles.
+
+    The tyre contact points define the front and rear axle centres.
+    Their position relative to ``car_coordinates`` is projected onto
+    the vehicle's longitudinal axis.
+
+    If the reported vehicle reference point is not located between the
+    axles, half the wheelbase is used for both distances as a fallback.
+    """
+
+    if len(telemetry.tyre_contact_points) != 4:
+        raise ValueError("Expected tyre contact points for exactly four wheels.")
+
+    front_left, front_right, rear_left, rear_right = telemetry.tyre_contact_points
+
+    front_center_x = (front_left[0] + front_right[0]) / 2.0
+    front_center_z = (front_left[2] + front_right[2]) / 2.0
+
+    rear_center_x = (rear_left[0] + rear_right[0]) / 2.0
+    rear_center_z = (rear_left[2] + rear_right[2]) / 2.0
+
+    heading_x = front_center_x - rear_center_x
+    heading_z = front_center_z - rear_center_z
+
+    wheelbase = hypot(
+        heading_x,
+        heading_z,
+    )
+
+    if not isfinite(wheelbase) or wheelbase <= 1e-6:
+        raise ValueError(
+            "Could not determine a valid vehicle wheelbase " "from tyre contact points."
+        )
+
+    forward_x = heading_x / wheelbase
+    forward_z = heading_z / wheelbase
+
+    vehicle_x = telemetry.car_coordinates[0]
+    vehicle_z = telemetry.car_coordinates[2]
+
+    front_axle_distance = (front_center_x - vehicle_x) * forward_x + (
+        front_center_z - vehicle_z
+    ) * forward_z
+
+    rear_axle_distance = (vehicle_x - rear_center_x) * forward_x + (
+        vehicle_z - rear_center_z
+    ) * forward_z
+
+    # car_coordinates should normally lie between both axles.
+    # If this is not the case, use the geometric vehicle centre
+    # as a conservative fallback for this validation tool.
+    if (
+        front_axle_distance <= 0.0
+        or rear_axle_distance <= 0.0
+        or not isfinite(front_axle_distance)
+        or not isfinite(rear_axle_distance)
+    ):
+        print(
+            "Warning: vehicle reference point could not be located "
+            "between the axles."
+        )
+        print("Using half the wheelbase for front and rear axle distance.")
+
+        front_axle_distance = wheelbase / 2.0
+        rear_axle_distance = wheelbase / 2.0
+
+    return (
+        front_axle_distance,
+        rear_axle_distance,
+    )
+
+
+def _plot_coordinates(
+    points: tuple[tuple[float, float], ...],
+) -> tuple[list[float], list[float]]:
+    """Convert observation coordinates into plotting coordinates.
+
+    Observation coordinates are stored as:
+
+        (forward_distance, left_distance)
+
+    The plot uses:
+
+        x = vehicle right
+        y = vehicle forward
+
+    Therefore the lateral coordinate must be negated.
+    """
+
+    x = [-left_distance for _, left_distance in points]
+
+    y = [forward_distance for forward_distance, _ in points]
+
+    return x, y
+
+
+def _update_view(
+    axis: Axes,
+    observation: Observation,
+) -> None:
+    """Adjust the plot limits to keep all observation points visible."""
+
+    all_points = (
+        observation.left_boundary
+        + observation.right_boundary
+        + observation.reference_waypoints
+    )
+
+    if not all_points:
+        return
+
+    plot_x = [-left_distance for _, left_distance in all_points]
+
+    plot_y = [forward_distance for forward_distance, _ in all_points]
+
+    max_lateral = max(
+        MIN_LATERAL_VIEW_METRES,
+        max(abs(value) for value in plot_x) * 1.15,
+    )
+
+    minimum_forward = min(
+        -10.0,
+        min(plot_y) - 10.0,
+    )
+
+    maximum_forward = max(
+        MIN_FORWARD_VIEW_METRES,
+        max(plot_y) + 20.0,
+    )
+
+    axis.set_xlim(
+        -max_lateral,
+        max_lateral,
+    )
+
+    axis.set_ylim(
+        minimum_forward,
+        maximum_forward,
+    )
+
+
+def _update_status(
+    status: Text,
+    observation: Observation,
+    projection: TrackProjection,
+) -> None:
+    """Update textual observation information."""
+
+    left_correct = sum(point[1] > 0.0 for point in observation.left_boundary)
+
+    right_correct = sum(point[1] < 0.0 for point in observation.right_boundary)
+
+    status.set_text(
+        "\n".join(
+            (
+                "VEHICLE STATE",
+                "-------------",
+                f"Speed:        {observation.speed:8.2f} m/s",
+                ("Long. acc.:   " f"{observation.longitudinal_acceleration:+8.3f} g"),
+                ("Lat. acc.:    " f"{observation.lateral_acceleration:+8.3f} g"),
+                ("Yaw rate:     " f"{observation.yaw_rate:+8.3f} rad/s"),
+                "",
+                "TYRE DYNAMICS",
+                "-------------",
+                ("Slip ratio F: " f"{observation.front_slip_ratio:+8.3f}"),
+                ("Slip ratio R: " f"{observation.rear_slip_ratio:+8.3f}"),
+                ("Slip angle F: " f"{observation.front_slip_angle:+8.3f} rad"),
+                ("              " f"{degrees(observation.front_slip_angle):+8.2f} deg"),
+                ("Slip angle R: " f"{observation.rear_slip_angle:+8.3f} rad"),
+                ("              " f"{degrees(observation.rear_slip_angle):+8.2f} deg"),
+                "",
+                "CONTROLS",
+                "-------------",
+                ("Steering:     " f"{observation.steering:+8.3f}"),
+                ("Long. control:" f"{observation.longitudinal_control:+8.3f}"),
+                "",
+                "TRACK",
+                "-------------",
+                ("Track s:      " f"{projection.distance_along_track:8.1f} m"),
+                ("Progress:     " f"{projection.normalized_track_position:8.2%}"),
+                ("Lat. offset:  " f"{projection.lateral_offset:+8.2f} m"),
+                "",
+                (
+                    "Left points:  "
+                    f"{len(observation.left_boundary)} "
+                    f"({left_correct} left)"
+                ),
+                (
+                    "Right points: "
+                    f"{len(observation.right_boundary)} "
+                    f"({right_correct} right)"
+                ),
+                ("Reference:    " f"{len(observation.reference_waypoints)} points"),
+            )
+        )
+    )
 
 
 def main() -> None:
-    """Plot track geometry and live vehicle position and projection onto the AI spline."""
+    """Visualize the complete RL observation in vehicle coordinates."""
 
     track_file = Path(
         r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
         r"\content\tracks\monza\ai\fast_lane.ai"
     )
+
+    # --------------------------------------------------------------
+    # Read static vehicle and track data
+    # --------------------------------------------------------------
 
     static_reader = StaticInfoReader()
     static_info = static_reader.read()
@@ -34,192 +284,281 @@ def main() -> None:
     print(f"Track: {static_info.track_name}")
 
     track_reader = AssettoCorsaTrackReader(track_file)
+
     track_geometry = track_reader.read()
-    # Create a TrackProjector object with the track geometry.
-    # The projector will be used to find the nearest point on the AI spline for the vehicle's position
+
+    # --------------------------------------------------------------
+    # Track projection
+    # --------------------------------------------------------------
+
     projector = TrackProjector(track_geometry)
 
-    # Extract the X and Z coordinates of the track points, left boundaries, and right boundaries for plotting.
-    center_x = [point.position[0] for point in track_geometry.points]
+    print(f"Track length: " f"{projector.track_length:.1f} m")
 
-    center_z = [point.position[2] for point in track_geometry.points]
-
-    left_x = [point.left_boundary[0] for point in track_geometry.points]
-
-    left_z = [point.left_boundary[2] for point in track_geometry.points]
-
-    right_x = [point.right_boundary[0] for point in track_geometry.points]
-
-    right_z = [point.right_boundary[2] for point in track_geometry.points]
-
-    # Include the closing segment, which the projector also searches.
-    center_x.append(center_x[0])
-    center_z.append(center_z[0])
-    left_x.append(left_x[0])
-    left_z.append(left_z[0])
-    right_x.append(right_x[0])
-    right_z.append(right_z[0])
+    # --------------------------------------------------------------
+    # Live telemetry
+    # --------------------------------------------------------------
 
     telemetry_reader = TelemetryReader()
-
-    plt.ion()
-
-    figure, axis = plt.subplots(figsize=(11, 8))
-
-    axis.plot(
-        center_x,
-        center_z,
-        label="AI spline",
-        color="0.65",
-    )
-
-    axis.plot(
-        left_x,
-        left_z,
-        label="Left boundary",
-    )
-
-    axis.plot(
-        right_x,
-        right_z,
-        label="Right boundary",
-    )
-
-    (progress_line,) = axis.plot(
-        [],
-        [],
-        color="tab:purple",
-        linewidth=2.5,
-        label="Spline start to projection",
-        zorder=3,
-    )
-
-    (vehicle_marker,) = axis.plot(
-        [],
-        [],
-        marker="o",
-        linestyle="None",
-        label="Vehicle",
-        color="tab:red",
-        markersize=8,
-        zorder=5,
-    )
-
-    (tyre_marker,) = axis.plot(
-        [],
-        [],
-        marker="x",
-        linestyle="None",
-        markersize=6,
-        markeredgewidth=3,
-        label="Tyre contact points",
-        zorder=20,
-    )
-
-    (projection_marker,) = axis.plot(
-        [],
-        [],
-        marker="D",
-        linestyle="None",
-        color="tab:purple",
-        markersize=7,
-        label="Spline projection",
-        zorder=6,
-    )
-    (projection_line,) = axis.plot(
-        [], [], linestyle="--",
-        color="0.3",
-        label="Vehicle to projection",
-        zorder=4
-    )
-
-    status = figure.text(0.02, 0.02, "", fontsize=10, va="bottom", family="monospace")
-    figure.subplots_adjust(bottom=0.20)
-
-    axis.set_title(f"{static_info.track_name}: vehicle and spline projection")
-    axis.set_xlabel("Vehicle right [m]")
-    axis.set_ylabel("Vehicle forward [m]")
-    # Keep the requested limits while displaying equal world distances.
-    axis.set_aspect("equal", adjustable="box")
-    axis.set_xlim(-VIEW_RADIUS_METRES, VIEW_RADIUS_METRES)
-    axis.set_ylim(-VIEW_RADIUS_METRES, VIEW_RADIUS_METRES)
-
-    # Apply the same display transform to the road and every live marker.
-    # All source data and the projector remain in native world coordinates.
-    view_transform = Affine2D()
-    for line in axis.lines:
-        line.set_transform(view_transform + axis.transData)
-
-    # Retain the last valid orientation if contact points are unavailable.
-    forward_x, forward_z = 0.0, -1.0
-
-    axis.legend()
+    figure: Figure | None = None
 
     try:
+        initial_telemetry = telemetry_reader.read()
+
+        front_axle_distance, rear_axle_distance = _derive_axle_distances(
+            initial_telemetry
+        )
+
+        print("Front axle distance: " f"{front_axle_distance:.3f} m")
+
+        print("Rear axle distance:  " f"{rear_axle_distance:.3f} m")
+
+        # ----------------------------------------------------------
+        # Observation pipeline
+        # ----------------------------------------------------------
+
+        tyre_dynamics_calculator = TyreDynamicsCalculator(
+            front_axle_distance=front_axle_distance,
+            rear_axle_distance=rear_axle_distance,
+        )
+
+        track_perception_calculator = TrackPerceptionCalculator()
+
+        observation_builder = ObservationBuilder(
+            tyre_dynamics_calculator=tyre_dynamics_calculator,
+            track_perception_calculator=track_perception_calculator,
+        )
+
+        # ----------------------------------------------------------
+        # Create live plot
+        # ----------------------------------------------------------
+
+        plt.ion()
+
+        figure, axis = plt.subplots(figsize=(12, 9))
+
+        figure.subplots_adjust(right=0.70)
+
+        # Cache full world boundaries once; only their display frame changes.
+        boundary_transform = Affine2D()
+        for boundary_name, color, label in (
+            ("left_boundary", "tab:blue", "Left track edge"),
+            ("right_boundary", "tab:orange", "Right track edge"),
+        ):
+            boundary = [getattr(point, boundary_name) for point in track_geometry.points]
+            boundary.append(boundary[0])
+            axis.plot(
+                [point[0] for point in boundary],
+                [point[2] for point in boundary],
+                color=color,
+                linewidth=1.2,
+                alpha=0.5,
+                zorder=1,
+                label=label,
+                transform=boundary_transform + axis.transData,
+            )
+
+        # Sampled observation points on the left track boundary.
+        (left_boundary_line,) = axis.plot(
+            [],
+            [],
+            marker="o",
+            linestyle="--",
+            linewidth=1.0,
+            markersize=6,
+            color="tab:blue",
+            zorder=3,
+            label="Left lookahead points",
+        )
+
+        # Sampled observation points on the right track boundary.
+        (right_boundary_line,) = axis.plot(
+            [],
+            [],
+            marker="o",
+            linestyle="--",
+            linewidth=1.0,
+            markersize=6,
+            color="tab:orange",
+            zorder=3,
+            label="Right lookahead points",
+        )
+
+        # Reference trajectory.
+        (reference_line,) = axis.plot(
+            [],
+            [],
+            marker="x",
+            linestyle="-",
+            linewidth=1.5,
+            markersize=5,
+            color="tab:green",
+            zorder=3,
+            label="Reference trajectory",
+        )
+
+        # The observation coordinate system is vehicle-relative,
+        # therefore the vehicle always remains at the origin.
+        axis.plot(
+            0.0,
+            0.0,
+            marker="^",
+            linestyle="None",
+            markersize=12,
+            label="Vehicle",
+            zorder=10,
+        )
+
+        # Vehicle forward direction.
+        axis.plot(
+            [0.0, 0.0],
+            [0.0, 10.0],
+            linestyle="--",
+            linewidth=1.0,
+            label="Vehicle forward",
+        )
+
+        # Vehicle lateral and longitudinal axes.
+        axis.axhline(
+            0.0,
+            linewidth=0.7,
+            color="0.7",
+        )
+
+        axis.axvline(
+            0.0,
+            linewidth=0.7,
+            color="0.7",
+        )
+
+        # Labels for the seven boundary lookahead distances.
+        boundary_labels = [
+            axis.text(
+                0.0,
+                0.0,
+                "",
+                fontsize=8,
+            )
+            for _ in (TrackPerceptionCalculator.DEFAULT_LOOKAHEAD_DISTANCES)
+        ]
+
+        # Observation status panel.
+        status = figure.text(
+            0.72,
+            0.93,
+            "",
+            fontsize=9,
+            va="top",
+            family="monospace",
+        )
+
+        axis.set_title(f"{static_info.track_name}: RL observation validation")
+
+        axis.set_xlabel("Vehicle right [m]")
+
+        axis.set_ylabel("Vehicle forward [m]")
+
+        axis.set_aspect(
+            "equal",
+            adjustable="box",
+        )
+
+        axis.grid(True)
+
+        axis.legend(loc="upper left")
+
+        # ----------------------------------------------------------
+        # Live update
+        # ----------------------------------------------------------
+
         while plt.fignum_exists(figure.number):
             telemetry = telemetry_reader.read()
+
+            # Locate the vehicle on the AI spline.
             projection = projector.project(telemetry.car_coordinates)
-            projection_marker.set_data(
-                [projection.position[0]], [projection.position[2]]
-            )
-            projection_line.set_data(
-                [telemetry.car_coordinates[0], projection.position[0]],
-                [telemetry.car_coordinates[2], projection.position[2]],
-            )
-            # This is progress in sample order, not the vehicle's driven path.
-            # At start/finish the highlighted section resets with progress.
-            progress_line.set_data(
-                center_x[: projection.segment_index + 1] + [projection.position[0]],
-                center_z[: projection.segment_index + 1] + [projection.position[2]],
-            )
-            status.set_text(
-                f"Projected progress: {projection.distance_along_track:.1f} / "
-                f"{projector.track_length:.1f} m "
-                f"({projection.normalized_track_position:.2%})\n"
-                f"AC telemetry progress: {telemetry.normalized_track_position:.2%} | "
-                f"Segment: {projection.segment_index}\n"
-                f"Lateral offset (+left): {projection.lateral_offset:+.2f} m | "
-                f"3D distance to spline: {projection.distance_to_spline:.2f} m\n"
-                f"Lateral margins L/R: {projection.left_clearance:+.2f} / "
-                f"{projection.right_clearance:+.2f} m (negative = beyond edge)"
+
+            # Build the exact observation that will later be
+            # provided to the RL agent.
+            observation = observation_builder.build(
+                telemetry=telemetry,
+                static_info=static_info,
+                track_geometry=track_geometry,
+                current_s=projection.distance_along_track,
             )
 
-            vehicle_marker.set_data(
-                [telemetry.car_coordinates[0]],
-                [telemetry.car_coordinates[2]],
-            )
-            tyre_marker.set_data(
-                [point[0] for point in telemetry.tyre_contact_points],
-                [point[2] for point in telemetry.tyre_contact_points],
+            # ------------------------------------------------------
+            # Convert observation coordinates to plot coordinates
+            # ------------------------------------------------------
+
+            left_x, left_y = _plot_coordinates(observation.left_boundary)
+
+            right_x, right_y = _plot_coordinates(observation.right_boundary)
+
+            reference_x, reference_y = _plot_coordinates(
+                observation.reference_waypoints
             )
 
-            vehicle_x, _, vehicle_z = telemetry.car_coordinates
-            front_left, front_right, rear_left, rear_right = telemetry.tyre_contact_points
-            heading_x = (
-                front_left[0] + front_right[0] - rear_left[0] - rear_right[0]
-            ) / 2.0
-            heading_z = (
-                front_left[2] + front_right[2] - rear_left[2] - rear_right[2]
-            ) / 2.0
-            heading_length = hypot(heading_x, heading_z)
-            if isfinite(heading_length) and heading_length > 1e-6:
-                forward_x = heading_x / heading_length
-                forward_z = heading_z / heading_length
+            # ------------------------------------------------------
+            # Update geometry
+            # ------------------------------------------------------
 
-            right_x_direction, right_z_direction = -forward_z, forward_x
-            view_transform.set_matrix(
-                Affine2D.from_values(
-                    right_x_direction,
-                    forward_x,
-                    right_z_direction,
-                    forward_z,
-                    -(vehicle_x * right_x_direction + vehicle_z * right_z_direction),
-                    -(vehicle_x * forward_x + vehicle_z * forward_z),
-                ).get_matrix()
+            boundary_transform.set_matrix(
+                _vehicle_plot_transform(telemetry).get_matrix()
+            )
+
+            left_boundary_line.set_data(
+                left_x,
+                left_y,
+            )
+
+            right_boundary_line.set_data(
+                right_x,
+                right_y,
+            )
+
+            reference_line.set_data(
+                reference_x,
+                reference_y,
+            )
+
+            # ------------------------------------------------------
+            # Label boundary lookahead distances
+            # ------------------------------------------------------
+
+            for (
+                label,
+                distance,
+                x,
+                y,
+            ) in zip(
+                boundary_labels,
+                TrackPerceptionCalculator.DEFAULT_LOOKAHEAD_DISTANCES,
+                left_x,
+                left_y,
+            ):
+                label.set_position((x, y))
+
+                label.set_text(f"{distance:g} m")
+
+            # ------------------------------------------------------
+            # Status information
+            # ------------------------------------------------------
+
+            _update_status(
+                status=status,
+                observation=observation,
+                projection=projection,
+            )
+
+            # Keep all observed points visible.
+            _update_view(
+                axis=axis,
+                observation=observation,
             )
 
             figure.canvas.draw_idle()
             figure.canvas.flush_events()
+
             plt.pause(0.02)
 
     except KeyboardInterrupt:
@@ -228,7 +567,9 @@ def main() -> None:
     finally:
         telemetry_reader.close()
         static_reader.close()
-        plt.close(figure)
+
+        if figure is not None:
+            plt.close(figure)
 
 
 if __name__ == "__main__":
