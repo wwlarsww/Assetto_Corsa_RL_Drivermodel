@@ -5,9 +5,13 @@
 The project separates Assetto Corsa integration from simulator-independent
 geometry and future reinforcement learning logic.
 
-The current scope covers telemetry, static information, track geometry and
-vehicle position projection. Vehicle control, features, rewards and training
-will be added incrementally.
+The current scope covers telemetry, track geometry and projection, observation
+features, rewards, termination checks, vehicle control and session launch.
+Gymnasium integration and training will be added incrementally.
+
+The session manager prepares and launches AC; the simulator controller handles
+runtime commands through CSP. Telemetry remains a separate read interface.
+See [vehicle control](control.md) for the start/reset concepts and live validation.
 
 
 ## Coordinates and Visualization

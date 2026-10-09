@@ -1,99 +1,101 @@
-# Output / Control Layer
+# Vehicle Control
 
-The output layer converts normalized vehicle actions into simulator-specific
-controller inputs and sends them to Assetto Corsa. 
-Therefore a virtual vJoy device is used (https://sourceforge.net/projects/vjoystick/)
+CSP Custom AI is the current Assetto Corsa control backend. Vehicle control,
+session setup and telemetry have separate responsibilities; RL logic uses
+simulator-independent data.
 
-```mermaid
-flowchart TD
+## Control Path
 
-    VA[Vehicle Action<br/>action.py]
-
-    subgraph ACA["Assetto Corsa Adapters"]
-        VC[Assetto Corsa vJoy Controller<br/>vjoy_controller.py]
-        VI[vJoy Interface<br/>vjoy_interface.py]
-    end
-
-    subgraph CI["Control Interface"]
-        VJOY[vJoy Virtual Device]
-    end
-
-    AC[Assetto Corsa<br/>Simulation / Game]
-
-    VA --> VC
-    VC --> VI
-    VI --> VJOY
-    VJOY --> AC
-```
-
-## Component Responsibilities
-
-### Domain Data
-
-Simulator-independent representation of a vehicle control command.
-
-- **[`VehicleAction`](../src/assetto_corsa_ai/action.py)**  
-  Defines normalized steering, throttle and brake commands.
-
-### Assetto Corsa Adapters
-
-Translate normalized vehicle actions into Assetto Corsa specific controller inputs.
-
-- **[`AssettoCorsaVJoyController`](../src/assetto_corsa_ai/assetto_corsa/vjoy_controller.py)**  
-  Maps `VehicleAction` values to the corresponding vJoy axes.
-
-- **[`VJoyInterface`](../src/assetto_corsa_ai/assetto_corsa/vjoy_interface.py)**  
-  Provides low-level access to the vJoy driver and virtual device.
-
-### Control Interface
-
-- **vJoy Virtual Device**  
-  Exposes the generated steering, throttle and brake inputs as a virtual controller to Assetto Corsa.
-
-## Input Mapping
-
-The normalized action ranges are:
-
-| Action | Range | vJoy axis |
-|---|---:|---|
-| Steering | `[-1.0, 1.0]` | X |
-| Throttle | `[0.0, 1.0]` | Y |
-| Brake | `[0.0, 1.0]` | Z |
-
-For RL training, the simulator input configuration should remain as linear as possible.
-The Agent later uses a combined Brake and Throttle action to control the vehicle speed.
-
-## Assetto Corsa configuration
-
-The vJoy device is configured as a wheel controller in Assetto Corsa.
-For RL training, the input mapping should remain as linear as possible.
-For a linear input mapping:
-
-- Steering Gamma: `1.0`
-- Steering Filter: `0`
-- Steering Speed Sensitivity: `0`
-- Brake Gamma: `1.0`
-
-These settings avoid additional nonlinear input transformations and make the
-simulator response easier to interpret and reproduce.
-
-Automatic clutch and automatic shifting are enabled during the initial
-development phase.
-
-## Steering Range
-
-The steering mapping depends on the relation between the configured virtual wheel range and the steering range of the selected vehicle.
-
-The required steering range is vehicle-dependent.
-
-For the current development vehicle, the virtual wheel range is configured to `640°`, which results in an approximately linear mapping over the full normalized steering range:
+The intended agent control flow is:
 
 ```text
--1.0 → full steering left
- 0.0 → centered
-+1.0 → full steering right
+AgentAction
+    ↓
+action mapping
+    ↓
+VehicleAction
+    ↓
+AssettoCorsaSimulatorController
+    ↓
+CSP Custom AI shared memory
+    ↓
+Assetto Corsa
 ```
 
-A different vehicle may require a different wheel range.
-For now, this value is configured manually in Assetto Corsa / Content Manager.
-In the future, the vehicle steering range could be read from the vehicle specifications and used by the controller to automatically scale the steering command. This would allow the normalized VehicleAction.steering range to remain [-1.0, 1.0] independently of the selected vehicle.
+An `AgentAction` contains steering and a longitudinal input in `[-1, 1]`.
+The action mapping splits the latter into throttle and brake in `[0, 1]`.
+The CSP controller currently accepts these three values through
+`set_controls(steering, throttle, brake)`; the agent/environment loop is
+still to be integrated.
+
+## Responsibilities
+
+| Component | Responsibility |
+| --- | --- |
+| [Session manager](../src/assetto_corsa_ai/assetto_corsa/session_manager.py) | Prepare car, track, assists and CSP permissions; launch and stop the owned AC process. |
+| [Simulator controller](../src/assetto_corsa_ai/assetto_corsa/simulator_controller.py) | Apply controls, teleport, reset an episode, restart the current session and pause. |
+| [Static info reader](../src/assetto_corsa_ai/assetto_corsa/static_info_reader.py) | Read the loaded car and track from memory created by AC. |
+| [Telemetry reader](../src/assetto_corsa_ai/assetto_corsa/telemetry_reader.py) | Read vehicle state for observations and control validation. |
+
+Session launch requires Windows, CSP Custom AI and unpacked track
+`data/surfaces.ini`. The manager prepares the required flags and creates
+`*.before-rl.bak` backups before changing existing INI files. It checks that
+the requested car, track and layout have loaded. Entering the driving state
+is a separate step before connecting the controller.
+
+## Episode Reset
+
+A reset applies the brake, requests a position and forward direction, then
+waits for a readiness callback. The validation tool checks position, heading
+and low speed using telemetry. Success clears the request and releases the
+pedals; timeout or interruption clears the request and leaves the brake applied.
+
+Changing car or track requires the session manager. Restarting the current
+session belongs to the simulator controller. Damage repair through teleport
+has not yet been verified.
+
+## Live Validation
+
+Run [the validation tool](../tools/validate_simulator_control.py) from the
+repository root in the project virtual environment:
+
+```powershell
+# Connect to an existing driving session.
+python tools/validate_simulator_control.py
+
+# Prepare and launch a session, then connect the controller.
+python tools/validate_simulator_control.py --launch --car bmw_z4_gt3 --track monza
+
+# Test session launch without connecting CSP controls.
+python tools/validate_simulator_control.py --launch-only --car bmw_z4_gt3 --track monza
+```
+
+With `--launch`, select Drive/Start in AC, then confirm in the terminal.
+With `--launch-only`, inspect the game first; Enter ends the test.
+The tool stops the AC process it launched when the test ends.
+
+| Commands | Purpose |
+| --- | --- |
+| `s`, `l/r`, `g`, `b`, `n` | Telemetry, steering, throttle, brake and neutral controls. |
+| `save`, `t`, `reset` | Capture a stationary pose, teleport to it or validate an episode reset. |
+| `pit` | Teleport to the pits, correct the heading and verify the result. |
+| `p`, `restart`, `q` | Pause/resume, restart the session and quit. |
+| `debug`, `clear` | Inspect teleport memory or cancel a pending request. |
+
+Session launch at the Hotlap position and the corrected pit teleport were
+confirmed live with **BMW Z4 GT3, Monza and CSP 0.2.11**:
+
+- Hotlap requires `TYPE=4` and `SPAWN_SET=HOTLAP_START`.
+- Static telemetry memory must be created by AC before the reader opens it.
+- The native pit pose faces backwards in this setup. The `pit` test waits
+  for a stationary pose, clears the native request, then rotates the vehicle
+  by 180 degrees at the same position and verifies its heading. This correction
+  lives in the validation tool.
+
+Tests cover session configuration, shared-memory startup, controller commands
+and pit correction, including timeout and interruption. Structure layouts,
+timing and further diagnostics are documented in the source.
+
+For an automated manoeuvre sequence that prints raw acceleration, angular
+velocity and wheel slip, run `python tools/validate_vehicle_dynamics.py`
+with an active driving session.

@@ -25,11 +25,11 @@ Assetto Corsa
 
 ## Current Scope
 
-The current implementation reads live telemetry and static information,
-loads AI spline geometry, and projects vehicle positions onto the track.
+The current implementation reads telemetry, reconstructs track geometry and
+builds observations, rewards and termination checks. CSP vehicle control and
+session launch are available; Gymnasium integration and training will follow.
 
-Controller integration, Gymnasium and reinforcement learning
-will be added later.
+See [vehicle control](docs/control.md) for the architecture and validation tool.
 
 ## Development
 
