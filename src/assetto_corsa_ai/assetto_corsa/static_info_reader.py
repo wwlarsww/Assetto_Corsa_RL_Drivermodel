@@ -1,9 +1,13 @@
 """Read static information from Assetto Corsa shared memory."""
 
 import ctypes
+from ctypes import wintypes
 import mmap
+import os
 
 from assetto_corsa_ai.static_info import SimulatorStaticInfo
+
+_STATIC_MAPPING_NAME = "Local\\acpmf_static"
 
 
 class _StaticPage(ctypes.Structure):
@@ -61,17 +65,48 @@ class StaticInfoReader:
     """Read static vehicle and track information from Assetto Corsa."""
 
     def __init__(self) -> None:
-        """Open the Assetto Corsa static shared memory."""
+        """Defer opening the memory until AC has created it."""
 
-        self._memory = mmap.mmap(
-            fileno=-1,
-            length=ctypes.sizeof(_StaticPage),
-            tagname="Local\\acpmf_static",
-            access=mmap.ACCESS_READ,
-        )
+        self._memory: mmap.mmap | None = None
+        self._closed = False
+
+    @staticmethod
+    def _open_memory() -> mmap.mmap:
+        """Open existing memory without creating a competing AC mapping."""
+
+        if os.name != "nt":
+            raise OSError("Assetto Corsa shared memory is only available on Windows.")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_mapping = kernel32.OpenFileMappingW
+        open_mapping.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+        open_mapping.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        handle = open_mapping(0x0004, False, _STATIC_MAPPING_NAME)  # FILE_MAP_READ
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            # Keep the existing mapping alive until mmap has its own handle.
+            # Calling mmap without this guard can create read-only memory before
+            # AC starts, causing its SharedMemoryWriter to fail during loading.
+            return mmap.mmap(
+                fileno=-1,
+                length=ctypes.sizeof(_StaticPage),
+                tagname=_STATIC_MAPPING_NAME,
+                access=mmap.ACCESS_READ,
+            )
+        finally:
+            close_handle(handle)
 
     def read(self) -> SimulatorStaticInfo:
-        """Read and return static simulator information."""
+        """Read static information; raise FileNotFoundError until AC is available."""
+
+        if self._closed:
+            raise ValueError("Static info reader is closed.")
+        if self._memory is None:
+            self._memory = self._open_memory()
 
         self._memory.seek(0)
 
@@ -97,4 +132,7 @@ class StaticInfoReader:
     def close(self) -> None:
         """Close the static shared memory connection."""
 
-        self._memory.close()
+        if self._memory is not None:
+            self._memory.close()
+            self._memory = None
+        self._closed = True
