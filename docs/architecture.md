@@ -9,9 +9,9 @@ The current scope covers telemetry, track geometry and projection, observation
 features, rewards, termination checks, vehicle control and session launch.
 Gymnasium integration and training will be added incrementally.
 
-The session manager prepares and launches AC; the simulator controller handles
-runtime commands through CSP. Telemetry remains a separate read interface.
-See [vehicle control](control.md) for the start/reset concepts and live validation.
+The [session manager](session_manager.md) prepares and launches AC; the
+[simulator controller](control.md) handles runtime commands through CSP.
+Telemetry remains a separate read interface.
 
 
 ## Coordinates and Visualization

@@ -29,7 +29,8 @@ The current implementation reads telemetry, reconstructs track geometry and
 builds observations, rewards and termination checks. CSP vehicle control and
 session launch are available; Gymnasium integration and training will follow.
 
-See [vehicle control](docs/control.md) for the architecture and validation tool.
+See [vehicle control](docs/control.md) and [session management](docs/session_manager.md)
+for the architecture and validation tools.
 
 ## Development
 
