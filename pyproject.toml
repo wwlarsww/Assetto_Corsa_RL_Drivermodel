@@ -10,7 +10,6 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "matplotlib",
-    "pyvjoystick",
 ]
 
 [tool.setuptools.packages.find]

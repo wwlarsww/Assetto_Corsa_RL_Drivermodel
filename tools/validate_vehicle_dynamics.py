@@ -1,6 +1,6 @@
 """Validate Assetto Corsa vehicle dynamics telemetry.
 
-The script performs simple driving manoeuvres through vJoy and records the
+The script performs simple driving manoeuvres through CSP Custom AI and records the
 raw acceleration and angular velocity components.
 
 The goal is to identify:
@@ -14,15 +14,15 @@ import time
 
 from assetto_corsa_ai.action import VehicleAction
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
-from assetto_corsa_ai.assetto_corsa.vjoy_controller import (
-    AssettoCorsaVJoyController,
+from assetto_corsa_ai.assetto_corsa.simulator_controller import (
+    AssettoCorsaSimulatorController,
 )
 
 SAMPLE_TIME = 0.1
 
 
 def run_test(
-    controller: AssettoCorsaVJoyController,
+    controller: AssettoCorsaSimulatorController,
     telemetry_reader: TelemetryReader,
     action: VehicleAction,
     duration: float,
@@ -35,11 +35,11 @@ def run_test(
     print(label)
     print("=" * 80)
 
-    controller.apply(action)
+    controller.set_controls(action.steering, action.throttle, action.brake)
 
-    end_time = time.time() + duration
+    end_time = time.monotonic() + duration
 
-    while time.time() < end_time:
+    while time.monotonic() < end_time:
         telemetry = telemetry_reader.read()
 
         acc = telemetry.acceleration_g
@@ -67,10 +67,12 @@ def run_test(
 
 
 def main() -> None:
-    controller = AssettoCorsaVJoyController()
-    telemetry_reader = TelemetryReader()
+    controller = AssettoCorsaSimulatorController()
+    telemetry_reader: TelemetryReader | None = None
 
     try:
+        controller.connect()
+        telemetry_reader = TelemetryReader()
         # --------------------------------------------------------------
         # 1. Stationary / neutral
         # --------------------------------------------------------------
@@ -160,8 +162,11 @@ def main() -> None:
         )
 
     finally:
-        controller.close()
-        telemetry_reader.close()
+        try:
+            controller.close()
+        finally:
+            if telemetry_reader is not None:
+                telemetry_reader.close()
 
 
 if __name__ == "__main__":
