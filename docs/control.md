@@ -26,8 +26,9 @@ Assetto Corsa
 An `AgentAction` contains steering and a longitudinal input in `[-1, 1]`.
 The action mapping splits the latter into throttle and brake in `[0, 1]`.
 The controller accepts these three values through
-`set_controls(steering, throttle, brake)`; the agent/environment loop is
-still to be integrated.
+`set_controls(steering, throttle, brake)`;
+[`RacingEnvironment`](racing_environment.md) maps the agent's action and
+submits these controls on each step.
 
 ## Runtime Responsibilities
 
