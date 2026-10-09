@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+import numpy as np
+from numpy.typing import NDArray
+
 Point2D = tuple[float, float]
 
 @dataclass(frozen=True)
@@ -25,3 +28,38 @@ class Observation:
     # Actually applied controls
     steering: float
     longitudinal_control: float
+
+    def to_array(self) -> NDArray[np.float32]:
+        """Return the observation as a flat neural-network input vector."""
+
+        values = [
+            self.speed,
+            self.longitudinal_acceleration,
+            self.lateral_acceleration,
+            self.yaw_rate,
+            self.front_slip_ratio,
+            self.rear_slip_ratio,
+            self.front_slip_angle,
+            self.rear_slip_angle,
+        ]
+
+        for point in self.left_boundary:
+            values.extend(point)
+
+        for point in self.right_boundary:
+            values.extend(point)
+
+        for point in self.reference_waypoints:
+            values.extend(point)
+
+        values.extend(
+            [
+                self.steering,
+                self.longitudinal_control,
+            ]
+        )
+
+        return np.asarray(
+            values,
+            dtype=np.float32,
+        )

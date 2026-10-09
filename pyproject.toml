@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "matplotlib",
+    "gymnasium",
+    "stable-baselines3",
 ]
 
 [tool.setuptools.packages.find]
