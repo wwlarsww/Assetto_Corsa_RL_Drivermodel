@@ -3,6 +3,36 @@
 The observation combines vehicle dynamics, track geometry, reference trajectory
 information, and the currently applied controls.
 
+```mermaid
+flowchart LR
+    T[TelemetryFrame]
+    S[SimulatorStaticInfo]
+    G[TrackGeometry]
+    P[TrackProjection]
+
+    TD[TyreDynamicsCalculator]
+    TP[TrackPerceptionCalculator]
+
+    OB[ObservationBuilder]
+    O[Observation]
+
+    T --> TD
+    S --> TD
+
+    T --> TP
+    G --> TP
+    P --> TP
+    S --> TP
+
+    T --> OB
+    S --> OB
+    TD --> OB
+    TP --> OB
+
+    OB --> O
+```
+
+
 ## 1. Vehicle State
 
 The vehicle-state features describe the current dynamic state of the car.
@@ -103,35 +133,4 @@ longitudinal_control = throttle - brake
 -1.0 = full brake
  0.0 = coast
 +1.0 = full throttle
-```
-
-## Observation Overview
-
-```mermaid
-flowchart LR
-    T[TelemetryFrame]
-    S[SimulatorStaticInfo]
-    G[TrackGeometry]
-    P[TrackProjection]
-
-    TD[TyreDynamicsCalculator]
-    TP[TrackPerceptionCalculator]
-
-    OB[ObservationBuilder]
-    O[Observation]
-
-    T --> TD
-    S --> TD
-
-    T --> TP
-    G --> TP
-    P --> TP
-    S --> TP
-
-    T --> OB
-    S --> OB
-    TD --> OB
-    TP --> OB
-
-    OB --> O
 ```
