@@ -1,17 +1,21 @@
 """Live validation of the complete RL observation."""
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.text import Text
 
 from assetto_corsa_ai.observation import Observation
 
 
 def update_plot(
     observation: Observation,
-    axis,
-    left_line,
-    right_line,
-    reference_line,
-    info_text,
+    axis: Axes,
+    left_line: Line2D,
+    right_line: Line2D,
+    reference_line: Line2D,
+    info_text: Text,
 ) -> None:
     """Update the live observation plot."""
 
@@ -80,28 +84,30 @@ def update_plot(
         )
 
 
-def create_plot():
+def create_plot() -> tuple[Figure, Axes, Line2D, Line2D, Line2D, Text]:
     """Create the live observation visualization."""
 
-    plt.ion()
+    # Matplotlib leaves kwargs and ion's context-manager type incomplete.
+    # Suppress only that library diagnostic at the affected calls.
+    plt.ion()  # pyright: ignore[reportUnknownMemberType]
 
     figure, axis = plt.subplots(figsize=(8, 10))
 
-    (left_line,) = axis.plot(
+    (left_line,) = axis.plot(  # pyright: ignore[reportUnknownMemberType]
         [],
         [],
         "o-",
         label="Left boundary",
     )
 
-    (right_line,) = axis.plot(
+    (right_line,) = axis.plot(  # pyright: ignore[reportUnknownMemberType]
         [],
         [],
         "o-",
         label="Right boundary",
     )
 
-    (reference_line,) = axis.plot(
+    (reference_line,) = axis.plot(  # pyright: ignore[reportUnknownMemberType]
         [],
         [],
         "x-",
@@ -110,7 +116,7 @@ def create_plot():
 
     # Vehicle remains at the origin because all observation
     # coordinates are vehicle-relative.
-    axis.plot(
+    axis.plot(  # pyright: ignore[reportUnknownMemberType]
         0.0,
         0.0,
         marker="^",
@@ -119,22 +125,22 @@ def create_plot():
     )
 
     # Forward-direction indicator.
-    axis.plot(
+    axis.plot(  # pyright: ignore[reportUnknownMemberType]
         [0.0, 0.0],
         [0.0, 8.0],
         "--",
         linewidth=1.0,
     )
 
-    axis.set_xlabel("Lateral distance [m]  ← right | left →")
-    axis.set_ylabel("Forward distance [m]")
+    axis.set_xlabel("Lateral distance [m]  ← right | left →")  # pyright: ignore[reportUnknownMemberType]
+    axis.set_ylabel("Forward distance [m]")  # pyright: ignore[reportUnknownMemberType]
 
-    axis.set_title("RL Observation Validation")
+    axis.set_title("RL Observation Validation")  # pyright: ignore[reportUnknownMemberType]
 
-    axis.grid(True)
-    axis.legend()
+    axis.grid(True)  # pyright: ignore[reportUnknownMemberType]
+    axis.legend()  # pyright: ignore[reportUnknownMemberType]
 
-    info_text = axis.text(
+    info_text = axis.text(  # pyright: ignore[reportUnknownMemberType]
         1.03,
         0.98,
         "",
