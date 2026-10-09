@@ -251,6 +251,13 @@ class TelemetryReader:
                 float(graphics.carCoordinates[2]),
             ),
             normalized_track_position=float(graphics.normalizedCarPosition),
+            car_damage=(
+                float(physics.carDamage[0]),
+                float(physics.carDamage[1]),
+                float(physics.carDamage[2]),
+                float(physics.carDamage[3]),
+                float(physics.carDamage[4]),
+            ),
         )
 
     def close(self) -> None:

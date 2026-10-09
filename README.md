@@ -76,3 +76,15 @@ and rear tyre contact points, so stopping or reversing does not flip the
 view. If the contact points cannot define an orientation, the last valid
 orientation is retained (initially world -Z). Only the display is transformed;
 telemetry and projection calculations keep native world coordinates.
+
+To inspect damage while driving manually:
+
+```powershell
+python tools/validate_damage.py
+```
+
+The tool prints all five raw damage channels, their signed changes since the
+previous sample and the largest positive channel change observed during the run.
+The first sample establishes a baseline. Compare normal driving, light contacts
+and strong impacts to calibrate a future collision threshold; no threshold is
+applied yet. Stop with `Ctrl+C`.

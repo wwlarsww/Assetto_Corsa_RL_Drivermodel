@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 Vector3 = tuple[float, float, float]
+DamageValues = tuple[float, float, float, float, float]
 
 @dataclass
 class TelemetryFrame:
@@ -29,3 +30,6 @@ class TelemetryFrame:
 
     car_coordinates: Vector3 # X, Y, Z coordinates in world space
     normalized_track_position: float  # progress of the car on the track (0->1)
+
+    # Raw damage channels in simulator order; not normalized percentages.
+    car_damage: DamageValues
