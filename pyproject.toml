@@ -12,6 +12,7 @@ dependencies = [
     "matplotlib",
     "gymnasium",
     "stable-baselines3",
+    "torch",
 ]
 
 [tool.setuptools.packages.find]
