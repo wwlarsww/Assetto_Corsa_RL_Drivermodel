@@ -1,15 +1,14 @@
+# Assetto Corsa RL
+
 ## Project Goal
 
-The goal of this project is to build a modular reinforcement learning
-platform for autonomous driving in Assetto Corsa.
-
-The system is developed incrementally with a focus on clear software
-architecture, testability and separation between simulator integration
-and learning logic.
-
+Build a modular reinforcement learning platform for autonomous driving in
+Assetto Corsa. The project grows incrementally, with clear responsibilities,
+testable components and reproducible training runs.
 
 ## System Overview
 
+```text
 Assetto Corsa
     ↓ Telemetry
 Python
@@ -21,23 +20,24 @@ Agent
 RL Environment
     ↓ Steuerbefehl
 Assetto Corsa
-
+```
 
 ## Current Scope
 
-The current implementation reads telemetry, reconstructs track geometry and
-builds observations, rewards and termination checks. CSP vehicle control and
-session launch are available. `RacingEnvironment` provides the Gymnasium
-interface for SB3/PPO training.
+The system reads telemetry, reconstructs track geometry and exposes a Gymnasium
+environment with CSP controls and session management. PPO uses a shared feature
+extractor for policy, value and an auxiliary trajectory predictor. Optional
+future rewards evaluate detached predictions; each run records configuration,
+provenance, metrics and paired model/normalization checkpoints.
 
-See [vehicle control](docs/control.md) and [session management](docs/session_manager.md)
-for the architecture and validation tools.
-
-See [the RL environment](docs/racing_environment.md) for actions, observations
-and episode handling.
-
-See [training runs](docs/agent_training.md) for configuration, metrics and
-paired model/normalization checkpoints.
+| Topic | Documentation | Implementation |
+| --- | --- | --- |
+| System responsibilities | [Architecture](docs/architecture.md) | [Composition root](src/assetto_corsa_ai/main.py) |
+| Simulator input | [Read layer](docs/input.md) | [AC adapters](src/assetto_corsa_ai/assetto_corsa/) |
+| Controls and sessions | [Control](docs/control.md), [sessions](docs/session_manager.md) | [Controller](src/assetto_corsa_ai/assetto_corsa/simulator_controller.py), [session manager](src/assetto_corsa_ai/assetto_corsa/session_manager.py) |
+| Episodes and observations | [Environment](docs/racing_environment.md), [features](docs/observation.md) | [Environment](src/assetto_corsa_ai/RacingEnvironment.py), [builder](src/assetto_corsa_ai/observation_builder.py) |
+| Reward and termination | [Reward](docs/reward.md), [termination](docs/termination.md) | [Reward calculator](src/assetto_corsa_ai/reward.py), [termination checker](src/assetto_corsa_ai/termination.py) |
+| Learning and run records | [Training](docs/agent_training.md), [predictor](docs/predictor.md) | [Agent](src/assetto_corsa_ai/agent.py), [run management](src/assetto_corsa_ai/training_run.py) |
 
 ## Development
 
@@ -48,51 +48,28 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Projection and geometry tests use synthetic tracks and do not require
-Assetto Corsa. See [architecture](docs/architecture.md) for conventions and
-limitations.
+Automated tests use synthetic data and mocked simulator adapters, including
+short PPO updates and checkpoint restoration. They do not require a running
+Assetto Corsa process. Live simulator integration requires Windows and CSP.
 
-The simulator-independent projection API is:
+## Validation and Training
 
-```python
-from assetto_corsa_ai.track_projection import TrackProjector
+| Check | Tool |
+| --- | --- |
+| Following plot of spline, road edges, vehicle and projection | [validate_track_alignment.py](tools/validate_track_alignment.py) |
+| Runtime controls and session launch | [validate_simulator_control.py](tools/validate_simulator_control.py) |
+| Gymnasium/SB3 compatibility and live reset/step | [validate_racing_environment.py](tools/validate_racing_environment.py) |
+| Predictor accuracy and future reward contributions on test/selected data | [validate_predictor.py](tools/validate_predictor.py) |
+| Raw damage for collision calibration | [validate_damage.py](tools/validate_damage.py) |
 
-# track_geometry: TrackGeometry; position: (world_x, world_y, world_z)
-projector = TrackProjector(track_geometry, closed=True)
-projection = projector.project(position)
-print(projection.lateral_offset, projection.normalized_track_position)
-```
-
-With Assetto Corsa running on Monza, the validation tool shows the spline,
-road edges, vehicle, tyre contact points and projection. A purple section
-marks progress from the spline start to the projected point; a dashed line
-connects the actual vehicle position to its projection. The readout shows
-progress in metres and percent, signed lateral margins and Assetto Corsa's
-telemetry progress for comparison. Geometric progress can differ from the
-simulator's value (see the architecture notes).
+Before training, follow the [live environment validation](docs/racing_environment.md#validation).
+Then copy and adjust [the training configuration](configs/training.toml):
 
 ```powershell
-python tools/validate_track_alignment.py
+python -m assetto_corsa_ai.main train --config configs/training.toml
 ```
 
-Adjust `track_file` in the tool to match your local installation and track.
-The plot follows the vehicle with a 60 m by 60 m view. Adjust
-`VIEW_RADIUS_METRES` in the tool for a closer or wider view; smaller values
-zoom in. The vehicle stays centred with its front pointing up; the track
-rotates with the vehicle's orientation. Orientation comes from the front
-and rear tyre contact points, so stopping or reversing does not flip the
-view. If the contact points cannot define an orientation, the last valid
-orientation is retained (initially world -Z). Only the display is transformed;
-telemetry and projection calculations keep native world coordinates.
-
-To inspect damage while driving manually:
-
-```powershell
-python tools/validate_damage.py
-```
-
-The tool prints all five raw damage channels, their signed changes since the
-previous sample and the largest positive channel change observed during the run.
-The first sample establishes a baseline. Compare normal driving, light contacts
-and strong impacts to calibrate a future collision threshold; no threshold is
-applied yet. Stop with `Ctrl+C`.
+Set the step budget and future reward warmup explicitly for each run. Synthetic
+tests establish integration correctness; predictor accuracy still needs real
+driving data. [Training documentation](docs/agent_training.md) explains runs,
+resume and evaluation.

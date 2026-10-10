@@ -1,9 +1,9 @@
 # Racing Environment
 
-[`RacingEnvironment`](../src/assetto_corsa_ai/RacingEnvironment.py) is the
-Gymnasium interface between the agent and Assetto Corsa. It coordinates the
+[RacingEnvironment](../src/assetto_corsa_ai/RacingEnvironment.py) provides the
+Gymnasium boundary between agent and simulator. It coordinates the
 [session manager](session_manager.md), [controller](control.md), telemetry and
-the simulator-independent observation, reward and termination components.
+the observation, reward and termination components.
 
 ```mermaid
 flowchart TD
@@ -19,64 +19,71 @@ flowchart TD
 
 | Interface | Representation |
 | --- | --- |
-| Action | Two values `[steering, longitudinal]` in `[-1, 1]`; positive longitudinal input means throttle, negative means brake. |
-| Observation | Flat `float32` vector from `Observation.to_array()`, retaining physical units. See [observation features](observation.md). |
+| Action | Final `[steering, longitudinal]` controls in `[-1, 1]`; positive longitudinal input means throttle, negative means brake. |
+| Observation | Flat `float32` vector from [Observation.to_array()](../src/assetto_corsa_ai/observation.py), retaining physical units. |
 | Reset | `reset(seed=None, options=None)` returns `(observation, info)`. |
 | Step | `step(action)` returns `(observation, reward, terminated, truncated, info)`. |
 | Close | `close()` releases runtime resources and stops the managed session by default. |
 
-Array-like actions are converted to `float32` before validation. Invalid shapes,
-nonfinite values and values outside `[-1, 1]` raise errors; actions are not clipped.
+Actions and observations are checked for shape and finite values; actions
+outside the range raise an error. Spaces exist before reset and observation
+size stays fixed. [The agent](../src/assetto_corsa_ai/agent.py) handles delta
+actions, normalization and the optional prediction reward wrapper.
+Its [action filter](../src/assetto_corsa_ai/action_wrapper.py) constrains executed
+deltas without changing the base environment's final-control interface.
 
-The action and observation spaces exist before the first reset.
-`observation_size` must match the configured builder and stay fixed across
-scenarios. Observations are validated for shape and finite values; normalization
-belongs in a separate wrapper, such as SB3's `VecNormalize`.
-
-Reset and step `info` also provide `vehicle_position` and `vehicle_forward` in
-world coordinates. Training can use these poses to derive local future targets;
-the environment has no knowledge of neural networks or predictor rewards.
+Reset/step `info` supplies the reference projection and vehicle pose for
+external calculations. The base environment evaluates actual step reward
+and contains no neural-network or predictor logic.
 
 ## Episodes
 
-Reset reuses the session for the same car/track/layout and teleports to the
-episode start. `options` can override `"scenario"` and `"start"`; otherwise the
-configured samplers choose them. A seed reproduces these choices.
+Reset reuses an unchanged session and teleports to the episode start.
+The first observation waits for neutral controls in telemetry so CSP's
+reset brake cannot become the delta policy's initial control baseline.
+Seeded samplers select scenario/start, which `options` can override.
+Each step applies [mapped controls](../src/assetto_corsa_ai/action.py), waits
+for the control interval, reads telemetry and delegates to
+[projection](../src/assetto_corsa_ai/track_projection.py),
+[observation building](../src/assetto_corsa_ai/observation_builder.py),
+[reward](reward.md) and [termination](termination.md).
 
-Each step applies controls, waits for the configured control interval and reads
-telemetry. Track projection then supplies progress and lateral offset for the
-[reward](reward.md), while the builder creates the next observation and the
-termination checker evaluates the episode state.
+Optional rolling starts use [StartConfig](../src/assetto_corsa_ai/episode_start.py)
+to sample 30–60% of the local AI-line speed, with configurable absolute limits.
+The [pre-roll controller](../src/assetto_corsa_ai/reset_preroll.py) teleports
+upstream and follows the line until pose and speed meet the reset tolerances.
+Pre-roll produces no RL transitions; progress, timing and termination state
+start at handoff, retaining the applied controls in the first observation.
+Failed attempts are bounded; explicitly supplied starts are never resampled.
 
-`terminated` marks a domain failure, such as leaving the track or a strong
-collision; `truncated` marks a time or step limit. Either ends the episode and
-applies the brake until the next reset. Errors also invalidate the episode
-and cancel driving.
+`[start]` in the training TOML contains the controller settings. Rolling starts
+are disabled until the raw spline speed unit has been validated; set
+`reference_speed_unit` to `"kmh"` or `"mps"` before enabling them. Archived
+configs without `[start]` retain stationary resets. Validate a configured reset
+without PPO using `python tools/validate_racing_environment.py --config configs/training.toml --steps 0`.
+
+In the run config, `max_episode_time = 0` and `max_episode_steps = 0`
+disable their respective limits.
+
+Domain failures set `terminated`; time or step limits set `truncated`.
+Either ends the episode and applies the brake until reset. Step errors also
+invalidate the episode. Timing, readiness checks and cleanup are documented
+in [the environment source](../src/assetto_corsa_ai/RacingEnvironment.py).
 
 ## Validation
 
-Close AC, then run the live validator from the project virtual environment:
+Close AC and run [the live validator](../tools/validate_racing_environment.py)
+from the project virtual environment:
 
 ```powershell
 python tools/validate_racing_environment.py --check-env --steps 10 --action 0 0.15
 ```
 
-The default factory (`assetto_corsa_ai.main:create_environment`) launches BMW
-Z4 GT3 at Monza. Enter Drive/Start, leave the car stationary, then press Enter
-in the terminal. CSP connects afterwards. Validation captures this pose and
-reuses it for resets; it does not sample random spline starts.
+The default factory launches BMW Z4 GT3 at Monza. Enter Drive/Start, leave the
+car stationary and confirm in the terminal. Validation captures this pose
+and reuses it for resets; training instead samples track starts.
 
-The tool checks the reset/step results and runs SB3's `check_env()`, which also
-performs resets and sampled actions. It reports progress, timing, reward and
-episode status. Exiting releases controls and stops the managed session;
-`--keep-session` leaves AC open.
-
-Use `--ac-directory`, `--documents-directory`, `--car`, `--track` or `--layout`
-to override the defaults. Custom `--factory module:function` callables accept
-zero arguments. Automated tests exercise validation failures and cleanup with
-mocked adapters; live validation remains separate from PPO training.
-
-Further options and API details are documented in the source.
-
-See [PPO training and driving](agent_training.md) for the executable agent,
-checkpoint recovery and axle-distance configuration.
+The tool runs SB3's `check_env()` and a reset/step sequence with sampled or
+specified actions. Exiting stops the managed session; `--keep-session`
+leaves AC open. Overrides and custom factories are described in the linked
+tool. See [training runs](agent_training.md) for PPO execution and checkpoints.

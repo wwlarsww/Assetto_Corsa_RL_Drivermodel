@@ -1,4 +1,8 @@
-## Input/Read Layer
+# Input / Read Layer
+
+The AC adapters translate shared-memory pages and track files into typed domain
+data. Observations, geometry and reward calculations consume those models
+without parsing simulator formats themselves.
 
 ```mermaid
 flowchart TD
@@ -39,45 +43,22 @@ flowchart TD
     TrackReader --> TG
 ```
 
-### Data Sources
+## Data Sources and Adapters
 
-Provide raw simulator and track data.
+| Source | Purpose | Adapter |
+| --- | --- | --- |
+| Physics and graphics shared memory | Runtime vehicle state and world position. | [TelemetryReader](../src/assetto_corsa_ai/assetto_corsa/telemetry_reader.py) |
+| Static shared memory | Vehicle, track and session metadata. | [StaticInfoReader](../src/assetto_corsa_ai/assetto_corsa/static_info_reader.py) |
+| `fast_lane.ai` | Sampled reference line and track widths. | [AssettoCorsaTrackReader](../src/assetto_corsa_ai/assetto_corsa/track_reader.py) |
 
-- **Physics Shared Memory**  
-  Runtime vehicle physics such as speed, steering, throttle, brake, acceleration and wheel data.
+## Domain Data
 
-- **Graphics Shared Memory**  
-  Runtime session and vehicle position information.
+[TelemetryFrame](../src/assetto_corsa_ai/telemetry.py) represents the current
+vehicle state. [SimulatorStaticInfo](../src/assetto_corsa_ai/static_info.py)
+holds session metadata. [TrackGeometry](../src/assetto_corsa_ai/track_geometry.py)
+stores the sampled reference line and boundary information.
 
-- **Static Shared Memory**  
-  Simulator and vehicle metadata that remains mostly constant during a session.
-
-- **`fast_lane.ai`**  
-  Track geometry source used to reconstruct the reference spline and track boundaries.
-
-### Assetto Corsa Adapters
-
-Translate Assetto Corsa specific data formats into internal project models.
-
-- **[`TelemetryReader`](../src/assetto_corsa_ai/assetto_corsa/telemetry_reader.py)**  
-  Reads physics and graphics shared memory and creates a `TelemetryFrame`.
-
-- **[`StaticInfoReader`](../src/assetto_corsa_ai/assetto_corsa/static_info_reader.py)**  
-  Reads static shared memory and creates `StaticInfo`.
-
-- **[`TrackReader`](../src/assetto_corsa_ai/assetto_corsa/track_reader.py)**  
-  Parses `fast_lane.ai` and creates `TrackGeometry`.
-
-### Domain Data
-
-Simulator-independent representations used by the rest of the application.
-
-- **[`TelemetryFrame`](../src/assetto_corsa_ai/telemetry.py)**  
-  Represents the current vehicle state.
-
-- **[`StaticInfo`](../src/assetto_corsa_ai/static_info.py)**  
-  Contains vehicle, track and simulator metadata.
-
-- **[`TrackGeometry`](../src/assetto_corsa_ai/track_geometry.py)**  
-  Represents the sampled track geometry including centerline and boundaries.
-   
+Memory layouts, field mappings and file parsing remain in the linked adapters.
+[TrackProjector](../src/assetto_corsa_ai/track_projection.py) derives progress
+and lateral offset from geometry; [observation construction](observation.md)
+then combines vehicle and track features.

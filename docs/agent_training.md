@@ -1,28 +1,42 @@
-# Training runs
+# Training Runs
 
-`PPOAgent` handles PPO and observation normalization. `main.py` composes the
-environment and training callbacks. `TrainingRun` only manages files; it has
-no model architecture or PPO logic.
+[PPOAgent](../src/assetto_corsa_ai/agent.py) manages PPO, normalization and model
+loading. [main.py](../src/assetto_corsa_ai/main.py) composes the environment,
+agent and callbacks. [TrainingRun](../src/assetto_corsa_ai/training_run.py)
+manages experiment files.
 
-Before training, validate the live simulator with
-[`validate_racing_environment.py`](../tools/validate_racing_environment.py).
-Close AC before launching a run, select Drive, then confirm in the terminal.
+## Running an Experiment
+
+First complete [live environment validation](racing_environment.md#validation).
+Close AC before launch; select Drive/Start and confirm in the terminal when
+requested. Copy and adjust [configs/training.toml](../configs/training.toml):
 
 ```powershell
 python -m assetto_corsa_ai.main train --config configs/training.toml
 python -m assetto_corsa_ai.main drive --model-directory runs/<run_name>/final --episodes 5
 ```
 
-Copy and edit [`configs/training.toml`](../configs/training.toml) for each
-experiment. It contains all training settings: scenario and assists, environment
-timing/reset/perception, reward/termination, PPO, normalization, shared feature
-extractor and policy/value heads, seed, budget and checkpoint interval. Unknown
-or missing settings fail before AC starts. Training accepts no parameter
-overrides from the CLI or environment variables. The exact TOML is preserved
-in the run. The template requests 4096 steps; PPO collects complete rollouts,
-so a different budget may be exceeded to finish its last rollout.
+The TOML is the sole source of training settings, including environment,
+network, PPO, predictor, reward and normalization.
+[TrainingConfig](../src/assetto_corsa_ai/training_config.py) validates it before
+AC starts. The template enables delta actions and the
+[auxiliary predictor](predictor.md). `training.total_timesteps` sets the total
+step budget; [future reward warmup](reward.md#future-predictor-reward) is configured separately.
 
-Each invocation, including resumed training, creates a new directory:
+The policy adds deltas to current controls. `ppo.initial_action_std` sets the
+initial Gaussian exploration scale; it remains learnable during training.
+`[action]` limits executed steering/longitudinal changes per step and defines
+the longitudinal deadband. At 50 ms, limits of 0.05/0.10 correspond to at most
+1.0/2.0 control units per second. Small longitudinal commands settle to neutral
+without exceeding those limits. [The action filter](../src/assetto_corsa_ai/action_wrapper.py)
+keeps PPO's original samples and likelihoods intact.
+Physical observation features are normalized; the two controls keep their
+existing scale in delta mode. Architecture and normalization are implemented
+in [racing_policy.py](../src/assetto_corsa_ai/racing_policy.py).
+
+## Run Records and Checkpoints
+
+Each invocation, including resume, creates a unique directory under `runs/`:
 
 ```text
 runs/<YYYYMMDD_HHMMSS_track_car_random-id>/
@@ -30,7 +44,7 @@ runs/<YYYYMMDD_HHMMSS_track_car_random-id>/
 ├── metadata.json
 ├── metrics.csv
 ├── checkpoints/
-│   └── step_010000/
+│   └── step_004096/
 │       ├── model.zip
 │       └── vecnormalize.pkl
 └── final/
@@ -38,39 +52,39 @@ runs/<YYYYMMDD_HHMMSS_track_car_random-id>/
     └── vecnormalize.pkl
 ```
 
-Config, metadata and completed snapshots are written once; existing artifacts
-are never replaced. Metrics append episode rows with raw rewards and separate
-PPO update rows. Unavailable losses stay empty, including `predictor_loss`.
-Metadata records Git commit/dirty status, timezone-aware start time and software
-versions, without duplicating training parameters. A dirty Git status signals
-that the commit alone does not capture the working implementation.
+The exact config and automatically collected Git/software provenance are
+written once. A dirty Git status means the recorded commit alone cannot
+reconstruct the implementation. Completed snapshots are never overwritten.
+All policy, value, predictor and shared-extractor weights belong to
+`model.zip`; `vecnormalize.pkl` must accompany it.
 
-To resume, set `training.resume_from` to a completed checkpoint or `final/` in
-a new TOML and run `train --config` again. Settings must match the source run;
-the additional timestep budget, checkpoint interval and verbosity may change.
-Weights, optimizer state, normalization and step counter are restored; an
-unfinished rollout and random-generator state are not restored. Checkpoints
-are counted from the start of the new invocation and named by total steps.
-Ctrl+C retains completed checkpoints. `final/` is saved after successful training.
+`training.checkpoint_interval_updates = 4` saves after every fourth completed
+PPO phase, after optimization. A phase collects `ppo.n_steps` steps and then
+optimizes that rollout; `n_epochs` does not determine the checkpoint cadence.
+Zero disables periodic checkpoints; successful training still writes `final/`.
+Directory names retain the total step count. The completed-phase counter is
+saved in `model.zip`, continues across resume and appears in `metrics.csv`.
 
-The shared extractor, policy/value heads and enabled predictor head are included in `model.zip`;
-`vecnormalize.pkl` is saved alongside it for every snapshot. Evaluation freezes
-normalization statistics. Existing `models/` bundles remain loadable for
-evaluation; new training always uses runs, which are ignored by Git.
+[Training callbacks](../src/assetto_corsa_ai/training_callbacks.py) append raw
+episode rewards and separate PPO update rows to `metrics.csv`. Update rows
+include predictor loss/accuracy, raw reward component means and future weight
+scale. Unavailable values remain empty; field definitions live in
+[training_run.py](../src/assetto_corsa_ai/training_run.py).
 
-The template enables the [auxiliary trajectory predictor](predictor.md) and
-delta actions. Both objectives train one shared extractor with one optimizer;
-predictor loss, valid horizon count and forward/lateral MAE join `metrics.csv`.
-Delta controls retain their existing `[-1, 1]` scale in VecNormalize; physical
-features are normalized. The policy adds its delta to the observed controls
-before SB3 clips the final action. `action_mode = "absolute"` is also supported.
+## Resume and Evaluation
 
-The template enables [future prediction reward](reward.md) with 20,000 warmup
-steps and a 30,000-step linear ramp. Its initial 4096-step run therefore trains
-the auxiliary predictor without adding future reward. The schedule follows
-total model timesteps across resume; disabling the extension leaves step
-rewards unchanged. Raw reward component means, weight scale and prediction
-diagnostics join the PPO update rows in `metrics.csv`, before normalization.
+Set `training.resume_from` to a completed checkpoint or `final/` in a new
+TOML. Settings must match the source run; the additional budget, checkpoint
+interval and verbosity may change. Loading restores weights, optimizer,
+normalization and total timesteps, so warmup/ramp continue at the saved step.
+An unfinished rollout and random-generator state are not restored.
+Archived configs remain readable: legacy action behavior is preserved and
+step-based checkpoint intervals round up to whole PPO phases. Older models
+without the phase counter start a new checkpoint cadence at zero.
 
-Selected trajectory export is reserved for later and disabled. No full
-rollouts, `architecture.txt` or separate predictor weights are saved.
+PPO completes whole rollouts, so it may exceed the requested budget.
+Interrupted runs retain completed checkpoints; `final/` is saved after
+successful training. Evaluation freezes normalization statistics. Resume
+compatibility and snapshot loading are defined in
+[training_config.py](../src/assetto_corsa_ai/training_config.py) and
+[agent.py](../src/assetto_corsa_ai/agent.py).

@@ -2,34 +2,36 @@
 
 ## Overview
 
-The project separates Assetto Corsa integration from simulator-independent
-geometry and future reinforcement learning logic.
+The project separates Assetto Corsa integration, simulator-independent domain
+calculations and learning. [The composition root](../src/assetto_corsa_ai/main.py)
+builds the environment and agent from [the run configuration](../configs/training.toml).
+The [README data flow](../README.md#system-overview) shows the simulator/agent loop.
 
-The current scope covers telemetry, track geometry and projection, observation
-features, rewards, termination checks, vehicle control, session launch and a
-Gymnasium environment. Training will be added incrementally.
+| Responsibility | Concept | Code |
+| --- | --- | --- |
+| Read simulator data | [Read layer](input.md) translates shared memory and track files into domain models. | [AC adapters](../src/assetto_corsa_ai/assetto_corsa/) |
+| Write controls | [Controller](control.md) sends runtime CSP commands. | [simulator_controller.py](../src/assetto_corsa_ai/assetto_corsa/simulator_controller.py) |
+| Own the session | [Session manager](session_manager.md) launches AC and switches scenarios. | [session_manager.py](../src/assetto_corsa_ai/assetto_corsa/session_manager.py) |
+| Derive state | Geometry, [observations](observation.md), [reward](reward.md) and [termination](termination.md) stay in dedicated components. | [track_projection.py](../src/assetto_corsa_ai/track_projection.py), [observation_builder.py](../src/assetto_corsa_ai/observation_builder.py), [reward.py](../src/assetto_corsa_ai/reward.py), [termination.py](../src/assetto_corsa_ai/termination.py) |
+| Coordinate episodes | [Gymnasium environment](racing_environment.md) manages reset, step, timing and cleanup. | [RacingEnvironment.py](../src/assetto_corsa_ai/RacingEnvironment.py) |
+| Learn and predict | [PPO and the auxiliary predictor](predictor.md) share one feature extractor and optimizer. | [agent.py](../src/assetto_corsa_ai/agent.py), [racing_policy.py](../src/assetto_corsa_ai/racing_policy.py), [racing_ppo.py](../src/assetto_corsa_ai/racing_ppo.py) |
+| Record experiments | [Training runs](agent_training.md) preserve config, provenance, metrics and paired snapshots. | [training_run.py](../src/assetto_corsa_ai/training_run.py), [training_callbacks.py](../src/assetto_corsa_ai/training_callbacks.py) |
 
-The [session manager](session_manager.md) prepares and launches AC; the
-[simulator controller](control.md) handles runtime commands through CSP.
-Telemetry remains a separate read interface.
-
-[`RacingEnvironment`](racing_environment.md) coordinates these components into
-episodes. Its Gymnasium boundary converts NumPy actions into `AgentAction`
-and `Observation` into a fixed NumPy vector; domain calculations stay in their
-dedicated components.
-
+The environment contains no neural-network logic. The optional
+[future reward wrapper](../src/assetto_corsa_ai/reward_wrapper.py) consumes a
+detached prediction during collection and combines it with the actual step
+reward before monitoring and normalization. The auxiliary loss uses actual
+future positions from the current rollout; rewards remain fixed during updates.
 
 ## Coordinates and Visualization
 
-Telemetry and geometry retain Assetto Corsa's native world coordinates
-`(x, y, z)`. Projection operates in 3D; coordinate transformations belong
-at explicit system boundaries.
+Telemetry and [track geometry](../src/assetto_corsa_ai/track_geometry.py) retain
+AC world coordinates `(x, y, z)`. The [projector](../src/assetto_corsa_ai/track_projection.py)
+measures 3D polyline progress and signed lateral offset on the AI reference line.
+Its geometric progress can differ from AC's spline metadata. Observation
+waypoints and predicted trajectories use vehicle-relative `(forward, left)` metres.
 
-[`tools/validate_track_alignment.py`](../tools/validate_track_alignment.py)
-visually compares the vehicle position with its spline projection and
-displays progress and edge margins. Its zoomed X/Z view follows the vehicle,
-with the vehicle's front always pointing up.
-
-Translation and rotation affect only the display. They do not change
-telemetry, track geometry or projection results. Implementation details and
-configuration are documented in the respective source files.
+[Track alignment validation](../tools/validate_track_alignment.py) follows the
+vehicle in a zoomed X/Z view with its front pointing up. Display rotation and
+translation leave telemetry and projection calculations unchanged. Sampling,
+frame conversion and projection details are documented in the linked code.

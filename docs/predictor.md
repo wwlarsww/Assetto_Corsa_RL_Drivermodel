@@ -1,9 +1,11 @@
-# Auxiliary trajectory predictor
+# Auxiliary Trajectory Predictor
 
-The predictor learns future positions in metres, expressed as `(forward, left)`
-relative to the vehicle pose at the observation. Horizon times, head sizes and
-loss weight come from `[predictor]` in the run's TOML; the template predicts
-10 points from 0.1 to 1.0 seconds.
+The predictor estimates future vehicle positions in local `(forward, left)`
+metres relative to the observation's pose. [The run config](../configs/training.toml)
+sets head sizes, horizons and loss weight. The template predicts ten points
+from 0.1 to 1.0 seconds.
+
+## Shared Model and Training
 
 ```mermaid
 flowchart TD
@@ -23,43 +25,48 @@ flowchart TD
     L --> U[One optimizer updates all heads and shared extractor]
 ```
 
-`RacingPPO` extends SB3 collection with pose recording and its PPO update with
-the auxiliary loss. SB3 still owns rollouts, GAE, clipping and serialization.
-Targets use only the current rollout. Each horizon has a mask: missing future
-steps and points beyond an episode end are excluded, while shorter valid
-horizons still train. The actual terminal endpoint is usable; the auto-reset
-pose belongs to a different episode. Horizons must match the configured
-control grid; timings currently use nominal control steps.
+[RacingActorCriticPolicy](../src/assetto_corsa_ai/racing_policy.py) evaluates
+policy, value and predictor from the same feature tensor.
+[RacingPPO](../src/assetto_corsa_ai/racing_ppo.py) adds masked SmoothL1 supervision
+to PPO using the same optimizer. The predictor head learns through this
+supervised loss; the shared extractor also receives PPO gradients.
 
-`RacingActorCriticPolicy` evaluates all three heads from the same feature
-tensor. All weights and the common optimizer state live in `model.zip`;
-matching normalization statistics remain in `vecnormalize.pkl`.
-`PPOAgent.predict_trajectory(raw_observation)` returns detached local points
-for inspection. With `[reward.future_prediction].enabled`, the action's shared
-features also produce a detached snapshot. `FutureRewardWrapper` projects it
-onto the active reference line and adds the [future reward](reward.md) before
-Monitor and VecNormalize. Rewards stay fixed during PPO updates; actual future
-poses remain supervised targets only. Disabling the extension preserves the
-existing step reward and auxiliary loss.
+Targets use actual future poses from the current rollout, transformed into
+the originating vehicle frame. Each horizon has its own validity mask:
+missing future points and points beyond episode boundaries are excluded,
+while shorter valid horizons still train. Horizon indices use the nominal
+control grid. Target transforms and loss are defined in
+[predictor.py](../src/assetto_corsa_ai/predictor.py).
+
+All heads and optimizer state are saved together with the
+[training run's paired normalization snapshot](agent_training.md).
+
+## Reward Boundary
+
+[PPOAgent.predict_trajectory()](../src/assetto_corsa_ai/agent.py) returns detached
+local points for inspection. During collection, the action's shared features
+also produce one detached snapshot for the optional
+[future reward wrapper](../src/assetto_corsa_ai/reward_wrapper.py).
+It projects predicted points onto the active reference line and adds
+[look-ahead reward](reward.md) before monitoring and normalization.
+Actual future poses remain supervised targets only; stored rewards stay
+fixed throughout PPO updates.
+
+## Validation
+
+[validate_predictor.py](../tools/validate_predictor.py) compares predictions
+with test/selected trajectories and prints errors, reference projections,
+per-horizon reward contributions and the total reward:
 
 ```powershell
-# Test data and a fresh, untrained model; checks plumbing, not learned accuracy.
+# Fresh, untrained model on synthetic data; inspect the full reward weight.
 python tools/validate_predictor.py --training-step 50000 --plot
 
-# Inspect a trained run using its own config and normalization.
+# Saved model with its own config and normalization.
 python tools/validate_predictor.py --checkpoint runs/<run_name>/final --plot
 ```
 
-`--data selected.npz` accepts raw `observations` shaped `(steps, envs, features)`,
-`vehicle_positions`, `vehicle_forwards` and `next_vehicle_positions` shaped
-`(steps, envs, 3)`, and boolean `episode_ends` shaped `(steps, envs)`.
-Endpoint positions must precede auto-reset. `--sample` selects a starting step;
-the tool inspects environment 0 and prints predictions, targets, coordinate
-errors, masked loss, each reference projection and all reward terms. With
-`--data`, supply the matching `--reference-line path/to/fast_lane.ai`; synthetic
-validation uses an independent test reference. `--training-step` inspects the
-configured warmup/ramp (otherwise the saved model timestep is used).
-`--save-plot trajectory.png` exports the comparison.
-No rollout data is saved automatically. Game-free tests cover geometry,
-masking, shared gradients, short PPO training and checkpoint restoration;
-prediction accuracy still needs validation on real driving data.
+Selected NPZ data requires its matching `--reference-line fast_lane.ai`.
+Data format, sample selection and plot export are documented in the tool.
+No simulator process is started. Synthetic tests establish integration
+correctness; prediction accuracy still needs validation on real driving data.
