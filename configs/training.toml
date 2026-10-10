@@ -1,0 +1,101 @@
+# Copy this file for an experiment. The exact contents are preserved in its run.
+[environment]
+car = "bmw_z4_gt3"
+track = "monza"
+track_layout = ""
+skin = ""
+abs_mode = 1
+traction_control_mode = 1
+control_interval = 0.05
+max_episode_time = 120.0
+max_episode_steps = 0 # 0 disables the step limit
+reset_position_tolerance = 1.0
+reset_heading_tolerance_degrees = 5.0
+reset_speed_tolerance_kmh = 1.0
+reset_timeout = 5.0
+reset_poll_interval = 0.05
+start_sampler = "uniform_track_point"
+front_axle_distance = 0.0 # 0 estimates the offset from live tyre positions
+rear_axle_distance = 0.0
+minimum_speed = 1.0
+lookahead_distances = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0]
+reference_distances = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0]
+
+[simulator]
+assetto_corsa_directory = 'C:\Program Files (x86)\Steam\steamapps\common\assettocorsa'
+documents_directory = "" # Resolve the Windows Documents folder
+startup_timeout = 45.0
+drive_ready_timeout = 15.0
+poll_interval = 0.1
+car_index = 0
+activation_timeout = 3.0
+pulse_duration = 0.02
+
+[reward]
+performance_weight = 1.0
+style_weight = 1.0
+style_sigma = 1.0
+off_track_penalty = -100.0
+stuck_penalty = -100.0
+collision_penalty = -100.0
+
+[termination]
+stuck_time = 4.0
+minimum_progress = 2.0
+
+[ppo]
+learning_rate = 0.0003
+gamma = 0.99
+gae_lambda = 0.95
+clip_range = 0.2
+clip_range_vf = 0.0 # 0 disables value clipping
+normalize_advantage = true
+n_steps = 1024
+batch_size = 256
+n_epochs = 10
+ent_coef = 0.0
+vf_coef = 0.5
+max_grad_norm = 0.5
+use_sde = false
+sde_sample_freq = -1
+target_kl = 0.0 # 0 disables early stopping by KL
+stats_window_size = 100
+
+[normalization]
+normalize_observations = true
+normalize_reward = false
+clip_observations = 10.0
+clip_reward = 10.0
+normalization_epsilon = 0.00000001
+
+[network]
+feature_layers = [512, 512]
+feature_dim = 512
+policy_layers = [128, 128]
+value_layers = [128, 128]
+activation = "tanh"
+ortho_init = true
+log_std_init = 0.0
+optimizer = "adam"
+optimizer_epsilon = 0.00001
+optimizer_betas = [0.9, 0.999]
+optimizer_weight_decay = 0.0
+optimizer_amsgrad = false
+
+[predictor]
+enabled = false # Auxiliary predictor is not implemented yet
+layers = [128, 128]
+prediction_points = 10
+output_dimensions = 2
+loss_weight = 0.1
+
+[training]
+seed = 42
+total_timesteps = 4096
+checkpoint_interval = 10000
+device = "auto"
+verbose = 1
+resume_from = "" # Previous run's checkpoints/step_XXXXXX or final directory
+
+[trajectories]
+enabled = false # Reserved for selected debug/evaluation trajectories
