@@ -316,7 +316,7 @@ def test_failed_load_closes_environment(
 def test_failed_model_creation_closes_environment(
     environment: MemoryRacingEnvironment, config: PPOConfig, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(module, "PPO", Mock(side_effect=RuntimeError("model creation failed")))
+    monkeypatch.setattr(module, "RacingPPO", Mock(side_effect=RuntimeError("model creation failed")))
     with pytest.raises(RuntimeError, match="model creation failed"):
         PPOAgent(environment, config=config)
     assert environment.close_calls == 1

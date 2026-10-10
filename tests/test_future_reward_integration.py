@@ -113,7 +113,7 @@ def test_predicted_reward_is_frozen_before_normalization_and_logged_per_update(
         last.load_state_dict({"weight": torch.zeros_like(last.weight), "bias": constant.flatten()})
         before = {name: value.detach().clone() for name, value in policy.named_parameters()}
         probe = Probe()
-        agent.learn(32, callback=CallbackList([TrainingRunCallback(run, 32), probe]))
+        agent.learn(32, callback=CallbackList([TrainingRunCallback(run, 1), probe]))
         future_calculator = FuturePredictorRewardCalculator(config.reward.future_prediction, calculator(config))
         for index, info in enumerate(probe.infos):
             origin = environment.reference_projector.project(tuple(data.positions[index, 0]))
@@ -235,7 +235,7 @@ def test_component_means_are_attached_to_the_matching_update_not_the_next_rollou
     try:
         agent.model.set_logger(logger)
         probe = Probe()
-        agent.learn(64, callback=CallbackList([TrainingRunCallback(run, 32), probe]))
+        agent.learn(64, callback=CallbackList([TrainingRunCallback(run, 1), probe]))
         with (run.directory / "metrics.csv").open(newline="") as stream:
             rows = [row for row in csv.DictReader(stream) if row["policy_loss"]]
         assert [int(row["step"]) for row in rows] == [32, 64]

@@ -83,7 +83,7 @@ def test_network_and_predictor_layer_sizes_come_from_config() -> None:
         agent.close()
 
 
-def test_delta_actions_add_current_controls_before_final_clipping() -> None:
+def test_delta_actions_limit_execution_and_preserve_sample_likelihoods() -> None:
     config = small_config()
     data = synthetic_rollout(config)
     agent = create_agent(ValidationEnvironment(data), config)
@@ -98,9 +98,9 @@ def test_delta_actions_add_current_controls_before_final_clipping() -> None:
             })
         observation = data.observations[0, 0].copy()
         observation[-2:] = [0.3, 0.4]
-        np.testing.assert_allclose(agent.predict(observation), [0.8, 0.15], atol=1e-6)
+        np.testing.assert_allclose(agent.predict(observation), [0.35, 0.3], atol=1e-6)
         observation[-2:] = [0.9, -0.9]
-        np.testing.assert_allclose(agent.predict(observation), [1.0, -1.0])
+        np.testing.assert_allclose(agent.predict(observation), [0.95, -1.0], atol=1e-6)
         normalized = agent.vec_env.normalize_obs(observation)
         assert isinstance(normalized, np.ndarray)
         tensor = torch.as_tensor(normalized).unsqueeze(0)

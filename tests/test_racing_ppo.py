@@ -28,8 +28,9 @@ def test_short_predictor_training_logs_and_restores_all_heads(tmp_path: Path) ->
     try:
         agent.model.set_logger(logger)
         before = {name: value.detach().clone() for name, value in agent.model.policy.named_parameters()}
-        agent.learn(64, callback=TrainingRunCallback(run, 32))
+        agent.learn(64, callback=TrainingRunCallback(run, 1))
         assert isinstance(agent.model, RacingPPO)
+        assert agent.model.completed_policy_updates == 2
         assert isinstance(agent.model.rollout_buffer, RacingRolloutBuffer)
         with (run.directory / "metrics.csv").open(newline="") as stream:
             rows = [row for row in csv.DictReader(stream) if row["predictor_loss"]]
@@ -48,8 +49,10 @@ def test_short_predictor_training_logs_and_restores_all_heads(tmp_path: Path) ->
             np.testing.assert_array_equal(restored.predict(observation), action)
             assert isinstance(restored.model, RacingPPO)
             assert restored.model.predictor_config == config.predictor
+            assert restored.model.completed_policy_updates == 2
             restored.learn(32, reset_num_timesteps=False)
             assert getattr(restored.model, "num_timesteps") == 96
+            assert restored.model.completed_policy_updates == 3
             assert restored.model.logger.name_to_value["train/predictor_valid_samples"] > 0
         finally:
             restored.close()

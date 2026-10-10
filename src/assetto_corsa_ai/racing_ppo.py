@@ -120,6 +120,8 @@ class _PoseCallback(BaseCallback):
 
 
 class RacingPPO(PPO):
+    num_timesteps: int
+
     def __init__(
         self, policy: str | type[ActorCriticPolicy], env: GymEnv | str,
         *, predictor_config: PredictorConfig | None = None,
@@ -127,6 +129,9 @@ class RacingPPO(PPO):
         control_interval: float | None = None, **kwargs: Any,
     ) -> None:
         self.predictor_config = predictor_config
+        # SB3's _n_updates counts epochs; this counts completed PPO phases.
+        # It is serialized with model.zip and continues across resume.
+        self.completed_policy_updates = 0
         # Persist reward settings with the policy, so load/resume reinstalls
         # the runtime wrapper. The auxiliary PPO update itself is unchanged.
         self.future_reward_config = future_reward_config
@@ -160,6 +165,7 @@ class RacingPPO(PPO):
     def train(self) -> None:
         if not self.predictor_config or not self.predictor_config.enabled:
             super().train()
+            self._record_completed_update()
             return
         if not isinstance(self.policy, RacingActorCriticPolicy) or not isinstance(self.rollout_buffer, RacingRolloutBuffer):
             raise RuntimeError("Auxiliary PPO needs the shared racing policy and rollout buffer.")
@@ -250,3 +256,8 @@ class RacingPPO(PPO):
         self.logger.record("train/predictor_loss", auxiliary_sum / valid_visits if valid_visits else 0.0)
         self.logger.record("train/predictor_forward_mae", forward_error / valid_visits if valid_visits else 0.0)
         self.logger.record("train/predictor_lateral_mae", lateral_error / valid_visits if valid_visits else 0.0)
+        self._record_completed_update()
+
+    def _record_completed_update(self) -> None:
+        self.completed_policy_updates += 1
+        self.logger.record("train/policy_updates", self.completed_policy_updates)

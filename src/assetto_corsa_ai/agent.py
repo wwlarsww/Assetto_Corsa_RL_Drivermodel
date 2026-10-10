@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import json
-from math import isfinite
+from math import isfinite, log
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,6 +33,8 @@ from assetto_corsa_ai.predictor import PredictorConfig
 from assetto_corsa_ai.future_reward import FuturePredictionRewardConfig
 from assetto_corsa_ai.reward_wrapper import FutureRewardWrapper
 from assetto_corsa_ai.racing_policy import ActionAwareVecNormalize, RacingActorCriticPolicy
+from assetto_corsa_ai.action import ActionConfig, AgentAction
+from assetto_corsa_ai.action_wrapper import ActionFilterWrapper
 from assetto_corsa_ai.racing_ppo import RacingPPO
 
 
@@ -107,10 +109,20 @@ class PPOConfig:
     device: str = "auto"
     tensorboard_log: str | None = None
     delta_actions: bool = False
+    initial_action_std: float = 1.0
+    max_steering_delta: float = 0.0
+    max_longitudinal_delta: float = 0.0
+    longitudinal_deadband: float = 0.0
+
+    def action_config(self) -> ActionConfig:
+        return ActionConfig(self.max_steering_delta, self.max_longitudinal_delta, self.longitudinal_deadband)
 
     def validate(self) -> None:
         """Validate configuration values that would otherwise fail later."""
 
+        self.action_config().validate()
+        if not isfinite(self.initial_action_std) or self.initial_action_std <= 0.0:
+            raise ValueError("initial_action_std must be finite and positive.")
         if not isfinite(self.learning_rate) or self.learning_rate <= 0.0:
             raise ValueError("learning_rate must be positive.")
         if type(self.n_steps) is not int or self.n_steps <= 1:
@@ -196,8 +208,8 @@ class PPOAgent:
         try:
             auxiliary = predictor_config is not None and predictor_config.enabled
             custom_policy = auxiliary or self._config.delta_actions
-            model_type = RacingPPO if custom_policy else PPO
             options = dict(policy_kwargs or {})
+            options["log_std_init"] = log(self._config.initial_action_std)
             extra: dict[str, Any] = {}
             if custom_policy:
                 options.update(
@@ -208,7 +220,7 @@ class PPOAgent:
                 )
                 extra.update(predictor_config=predictor_config, control_interval=control_interval,
                              future_reward_config=future_reward_config)
-            self._model = model_type(
+            self._model = RacingPPO(
                 policy=RacingActorCriticPolicy if custom_policy else "MlpPolicy",
                 env=self._vec_env,
                 learning_rate=self._config.learning_rate,
@@ -234,7 +246,7 @@ class PPOAgent:
                 policy_kwargs=options,
                 **extra,
             )
-            self._acting_environment = self._install_future_reward(self._vec_env, self._model, environment)
+            self._acting_environment = self._install_future_reward(self._vec_env, self._model)
         except BaseException as error:
             _close_after_failure(self._vec_env, error)
             self._closed = True
@@ -350,6 +362,13 @@ class PPOAgent:
             action_space.high,
         ).astype(np.float32, copy=False)
 
+        if self._config.delta_actions:
+            constrained = self._config.action_config().constrain(
+                AgentAction(float(action[0]), float(action[1])),
+                AgentAction(float(raw_observation[-2]), float(raw_observation[-1])),
+            )
+            action = np.asarray([constrained.steering, constrained.longitudinal], dtype=np.float32)
+
         return action
 
     def predict_trajectory(self, observation: FloatArray) -> FloatArray:
@@ -455,7 +474,7 @@ class PPOAgent:
     ) -> "PPOAgent":
 
         base_env = cls._make_base_vec_env(
-            environment
+            environment, config
         )
 
         try:
@@ -467,7 +486,7 @@ class PPOAgent:
             model = model_type.load(  # pyright: ignore[reportUnknownMemberType]
                 model_path, env=vec_env, device=config.device,
             )
-            acting_environment = cls._install_future_reward(vec_env, model, environment)
+            acting_environment = cls._install_future_reward(vec_env, model)
         except BaseException as error:
             _close_after_failure(base_env, error)
             raise
@@ -484,20 +503,20 @@ class PPOAgent:
 
     @staticmethod
     def _install_future_reward(
-        vec_env: VecNormalize, model: PPO, environment: RacingEnvironment,
+        vec_env: VecNormalize, model: PPO,
     ) -> gym.Env[FloatArray, FloatArray]:
         settings = getattr(model, "future_reward_config", None)
-        if not isinstance(settings, FuturePredictionRewardConfig) or not settings.enabled:
-            return environment
-        policy = model.policy
-        if not isinstance(policy, RacingActorCriticPolicy) or not policy.prediction_points:
-            raise ValueError("Future reward requires the saved shared trajectory policy.")
         base = vec_env.unwrapped
         if not isinstance(base, DummyVecEnv) or base.num_envs != 1:
             raise ValueError("Future reward currently supports one live racing environment.")
         monitor = base.envs[0]
         if not isinstance(monitor, Monitor):
             raise ValueError("Future reward must be installed before Monitor.")
+        if not isinstance(settings, FuturePredictionRewardConfig) or not settings.enabled:
+            return monitor.env
+        policy = model.policy
+        if not isinstance(policy, RacingActorCriticPolicy) or not policy.prediction_points:
+            raise ValueError("Future reward requires the saved shared trajectory policy.")
         policy.configure_reward_capture(True)
 
         def snapshot() -> tuple[FloatArray, int]:
@@ -506,7 +525,7 @@ class PPOAgent:
             assert isinstance(step, int)
             return prediction[0].cpu().numpy().astype(np.float32), step
 
-        wrapped = FutureRewardWrapper(environment, settings, snapshot)
+        wrapped = FutureRewardWrapper(monitor.env, settings, snapshot)
         monitor.env = wrapped
         return wrapped
 
@@ -540,7 +559,7 @@ class PPOAgent:
         environment: RacingEnvironment,
     ) -> VecNormalize:
         base_env = self._make_base_vec_env(
-            environment
+            environment, self._config
         )
 
         try:
@@ -561,14 +580,19 @@ class PPOAgent:
 
     @staticmethod
     def _make_base_vec_env(
-        environment: RacingEnvironment,
+        environment: RacingEnvironment, config: PPOConfig,
     ) -> DummyVecEnv:
         """Wrap the single live simulator instance for Stable-Baselines3."""
 
+        acting_environment: gym.Env[FloatArray, FloatArray] = environment
+        action_config = config.action_config()
+        if config.delta_actions and any((action_config.max_steering_delta, action_config.max_longitudinal_delta,
+                                         action_config.longitudinal_deadband)):
+            acting_environment = ActionFilterWrapper(environment, action_config)
         return DummyVecEnv(
             [
                 lambda: Monitor(
-                    environment
+                    acting_environment
                 )
             ]
         )

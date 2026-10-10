@@ -10,6 +10,7 @@ from assetto_corsa_ai import main as application
 from assetto_corsa_ai.static_info import SimulatorStaticInfo
 from assetto_corsa_ai.training_config import TrainingConfig
 from test_agent import MemoryRacingEnvironment
+from config_helpers import replace_setting
 
 
 def test_layout_does_not_fall_back_to_other_geometry(tmp_path: Path) -> None:
@@ -55,17 +56,19 @@ def test_training_checkpoint_resume_and_drive(tmp_path: Path, monkeypatch: pytes
     import json
 
     template = (Path(__file__).resolve().parents[1] / "configs/training.toml").read_text()
-    content = template.replace('device = "auto"', 'device = "cpu"').replace("verbose = 1", "verbose = 0")
+    content = replace_setting(template, "device", 'device = "cpu"')
+    content = replace_setting(content, "verbose", "verbose = 0")
+    content = replace_setting(content, "enabled", "enabled = false", section="reward.future_prediction")
     for before, after in (
         ("n_steps = 1024", "n_steps = 4"), ("batch_size = 256", "batch_size = 2"),
         ("n_epochs = 10", "n_epochs = 1"), ("total_timesteps = 4096", "total_timesteps = 4"),
-        ("checkpoint_interval = 10000", "checkpoint_interval = 4"),
+        ("checkpoint_interval_updates = 4", "checkpoint_interval_updates = 1"),
         ("feature_layers = [512, 512]", "feature_layers = [8]"),
         ("feature_dim = 512", "feature_dim = 8"),
         ("policy_layers = [128, 128]", "policy_layers = [8]"),
         ("value_layers = [128, 128]", "value_layers = [8]"),
     ):
-        content = content.replace(before, after)
+        content = replace_setting(content, before.split("=", 1)[0].strip(), after)
     config_file = tmp_path / "training.toml"
     config_file.write_text(content)
     common = ["--config", str(config_file), "--runs-directory", str(tmp_path / "runs")]
@@ -119,12 +122,14 @@ def test_missing_model_closes_environment(tmp_path: Path) -> None:
     assert environment.close_calls == 1
 
 
+@pytest.mark.parametrize("time_limit,step_limit", [(0.0, 0), (120.0, 0), (0.0, 5)])
 def test_training_configuration_is_not_overridden_by_environment_variables(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, time_limit: float, step_limit: int,
 ) -> None:
     config = TrainingConfig.load(Path(__file__).resolve().parents[1] / "configs/training.toml")
     config = replace(config, environment=replace(
         config.environment, front_axle_distance=1.2, rear_axle_distance=1.8,
+        max_episode_time=time_limit, max_episode_steps=step_limit,
         control_interval=0.1, lookahead_distances=(10.0, 20.0), reference_distances=(5.0,),
     ))
     monkeypatch.setenv("FRONT_AXLE_DISTANCE", "9.9")
@@ -143,6 +148,8 @@ def test_training_configuration_is_not_overridden_by_environment_variables(
     options["observation_builder_factory"](Mock(), Mock())
     dynamics.assert_called_once_with(1.2, 1.8, minimum_speed=config.environment.minimum_speed)
     assert options["control_interval"] == 0.1
+    assert options["max_episode_time"] == (time_limit or None)
+    assert options["max_episode_steps"] == (step_limit or None)
     assert options["observation_size"] == 20
     assert options["seed"] == config.training.seed
     estimator.assert_not_called()

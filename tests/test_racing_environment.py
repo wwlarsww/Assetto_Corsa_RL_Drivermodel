@@ -250,6 +250,21 @@ def test_limits_truncate_without_terminal_penalty_and_require_reset(harness: Har
     assert env.step(action(0.0, 0.0))[3] is False
 
 
+def test_disabled_time_limit_keeps_episode_active_until_domain_failure(harness: Harness) -> None:
+    env = harness.create(max_episode_time=None)
+    env.reset(options={"start": START})
+    for delay in (121.0, 3600.0):
+        harness.clock.now += delay
+        _, _, terminated, truncated, info = env.step(action(0.0, 0.0))
+        assert not terminated and not truncated
+        assert info["episode_time"] > 120.0
+
+    harness.checker.check.return_value = TerminationResult(True, TerminationReason.OFF_TRACK)
+    _, _, terminated, truncated, _ = env.step(action(0.0, 0.0))
+    assert terminated and not truncated
+    harness.simulator.set_controls.assert_called_with(steering=0.0, throttle=0.0, brake=1.0)
+
+
 @pytest.mark.parametrize("reason", list(TerminationReason))
 def test_domain_termination_brakes_and_applies_terminal_reward(harness: Harness, reason: TerminationReason) -> None:
     def collision_check(frame: TelemetryFrame) -> bool:

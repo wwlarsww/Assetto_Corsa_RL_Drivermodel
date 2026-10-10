@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from math import isfinite
+from math import exp, isfinite
 from pathlib import Path
 import re
 import tomllib
 from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 from assetto_corsa_ai.agent import PPOConfig
+from assetto_corsa_ai.action import ActionConfig
 from assetto_corsa_ai.future_reward import FuturePredictionRewardConfig
 from assetto_corsa_ai.predictor import PredictorConfig, horizon_indices
 
@@ -76,7 +77,6 @@ class NetworkConfig:
     value_layers: tuple[int, ...]
     activation: str
     ortho_init: bool
-    log_std_init: float
     optimizer: str
     optimizer_epsilon: float
     optimizer_betas: tuple[float, ...]
@@ -88,7 +88,7 @@ class NetworkConfig:
 class TrainingSettings:
     seed: int
     total_timesteps: int
-    checkpoint_interval: int
+    checkpoint_interval_updates: int
     device: str
     verbose: int
     resume_from: str
@@ -102,6 +102,7 @@ class TrajectoryConfig:
 @dataclass(frozen=True)
 class PPOSettings:
     learning_rate: float
+    initial_action_std: float
     gamma: float
     gae_lambda: float
     clip_range: float
@@ -163,6 +164,7 @@ def _section(data: dict[str, Any], name: str, cls: type[Section]) -> Section:
 @dataclass(frozen=True)
 class TrainingConfig:
     environment: EnvironmentConfig
+    action: ActionConfig
     simulator: SimulatorConfig
     reward: RewardConfig
     termination: TerminationConfig
@@ -181,6 +183,7 @@ class TrainingConfig:
     @classmethod
     def from_toml(cls, content: str) -> TrainingConfig:
         data = tomllib.loads(content)
+        _upgrade_legacy_config(data)
         sections = get_type_hints(cls)
         sections.pop("toml_text")
         if set(data) != set(sections):
@@ -191,7 +194,7 @@ class TrainingConfig:
 
     def agent_config(self) -> PPOConfig:
         return PPOConfig(
-            **asdict(self.ppo), **asdict(self.normalization),
+            **asdict(self.ppo), **asdict(self.normalization), **asdict(self.action),
             seed=self.training.seed, device=self.training.device,
             verbose=self.training.verbose, tensorboard_log=None,
             delta_actions=self.environment.action_mode == "delta",
@@ -201,7 +204,7 @@ class TrainingConfig:
         self.agent_config().validate()
         env, sim, net, train = self.environment, self.simulator, self.network, self.training
         for name, value in (
-            ("control_interval", env.control_interval), ("max_episode_time", env.max_episode_time),
+            ("control_interval", env.control_interval),
             ("reset_position_tolerance", env.reset_position_tolerance),
             ("reset_timeout", env.reset_timeout), ("reset_poll_interval", env.reset_poll_interval),
             ("minimum_speed", env.minimum_speed), ("startup_timeout", sim.startup_timeout),
@@ -209,14 +212,16 @@ class TrainingConfig:
             ("activation_timeout", sim.activation_timeout), ("pulse_duration", sim.pulse_duration),
             ("style_sigma", self.reward.style_sigma), ("stuck_time", self.termination.stuck_time),
             ("feature_dim", net.feature_dim), ("optimizer_epsilon", net.optimizer_epsilon),
-            ("total_timesteps", train.total_timesteps), ("checkpoint_interval", train.checkpoint_interval),
+            ("total_timesteps", train.total_timesteps),
             ("prediction_points", self.predictor.prediction_points),
             ("output_dimensions", self.predictor.output_dimensions),
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive.")
         for name, value in (
-            ("max_episode_steps", env.max_episode_steps), ("front_axle_distance", env.front_axle_distance),
+            ("max_episode_time", env.max_episode_time), ("max_episode_steps", env.max_episode_steps),
+            ("checkpoint_interval_updates", train.checkpoint_interval_updates),
+            ("front_axle_distance", env.front_axle_distance),
             ("rear_axle_distance", env.rear_axle_distance), ("seed", train.seed),
             ("reset_speed_tolerance_kmh", env.reset_speed_tolerance_kmh),
             ("minimum_progress", self.termination.minimum_progress),
@@ -276,11 +281,36 @@ class TrainingConfig:
 
     def require_compatible_resume(self, previous: TrainingConfig) -> None:
         """Only the new budget, checkpoint cadence and runtime verbosity may change."""
-        for name in ("environment", "simulator", "reward", "termination", "ppo", "normalization", "network", "predictor", "trajectories"):
+        for name in ("environment", "action", "simulator", "reward", "termination", "ppo", "normalization", "network", "predictor", "trajectories"):
             if getattr(self, name) != getattr(previous, name):
                 raise ValueError(f"Resuming with different [{name}] settings is unsupported.")
         if self.training.seed != previous.training.seed or self.training.device != previous.training.device:
             raise ValueError("Resuming requires the saved training seed and device.")
+
+
+def _upgrade_legacy_config(data: dict[str, Any]) -> None:
+    """Read archived configs without editing their immutable TOML files."""
+    network, ppo, training = data.get("network"), data.get("ppo"), data.get("training")
+    if isinstance(network, dict) and "log_std_init" in network and isinstance(ppo, dict):
+        network, ppo = cast(dict[str, Any], network), cast(dict[str, Any], ppo)
+        if "initial_action_std" in ppo or "action" in data:
+            raise ValueError("Use ppo.initial_action_std instead of network.log_std_init.")
+        old_log_std = cast(float, _typed_value(network.pop("log_std_init"), float, "network.log_std_init"))
+        try:
+            ppo["initial_action_std"] = exp(old_log_std)
+        except OverflowError as error:
+            raise ValueError("network.log_std_init must produce a finite initial_action_std.") from error
+        # Previous runs executed unrestricted deltas and had no deadband.
+        data["action"] = {"max_steering_delta": 0.0, "max_longitudinal_delta": 0.0, "longitudinal_deadband": 0.0}
+    if isinstance(training, dict) and "checkpoint_interval" in training:
+        training = cast(dict[str, Any], training)
+        if "checkpoint_interval_updates" in training:
+            raise ValueError("Specify only checkpoint_interval_updates, not checkpoint_interval.")
+        interval = cast(int, _typed_value(training.pop("checkpoint_interval"), int, "checkpoint_interval"))
+        rollout_steps = _section(data, "ppo", PPOSettings).n_steps
+        if interval < 0 or rollout_steps <= 0:
+            raise ValueError("Legacy checkpoint_interval must be non-negative and n_steps positive.")
+        training["checkpoint_interval_updates"] = (interval + rollout_steps - 1) // rollout_steps
 
 
 def checkpoint_config_path(directory: Path) -> Path:

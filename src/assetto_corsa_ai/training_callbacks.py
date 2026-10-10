@@ -9,6 +9,7 @@ from stable_baselines3.common.vec_env import VecNormalize
 
 from assetto_corsa_ai.training_run import MetricValue, TrainingRun
 from assetto_corsa_ai.reward import Reward
+from assetto_corsa_ai.racing_ppo import RacingPPO
 
 
 class RunMetricsWriter(KVWriter):
@@ -23,6 +24,11 @@ class RunMetricsWriter(KVWriter):
     ) -> None:
         del key_excluded
         names = {
+            "requested_longitudinal_abs": "controls/requested_longitudinal_abs",
+            "applied_throttle": "controls/applied_throttle",
+            "applied_brake": "controls/applied_brake",
+            "observed_longitudinal_abs": "controls/observed_longitudinal_abs",
+            "policy_updates": "train/policy_updates",
             "policy_loss": "train/policy_gradient_loss",
             "value_loss": "train/value_loss",
             "entropy_loss": "train/entropy_loss",
@@ -46,7 +52,7 @@ class RunMetricsWriter(KVWriter):
         row: dict[str, MetricValue] = {"step": step}
         for column, name in names.items():
             if name in key_values:
-                row[column] = int(key_values[name]) if column == "predictor_valid_samples" else float(key_values[name])
+                row[column] = int(key_values[name]) if column in ("predictor_valid_samples", "policy_updates") else float(key_values[name])
         self.run.append_metrics(row)
 
     def close(self) -> None:
@@ -54,30 +60,42 @@ class RunMetricsWriter(KVWriter):
 
 
 class TrainingRunCallback(BaseCallback):
-    """Record raw Monitor episode rewards and save matching model/statistics."""
+    """Save paired checkpoints after completed PPO updates, never during collection."""
 
-    def __init__(self, run: TrainingRun, interval: int) -> None:
+    def __init__(self, run: TrainingRun, interval_updates: int) -> None:
+        if type(interval_updates) is not int or interval_updates < 0:
+            raise ValueError("interval_updates must be a non-negative integer.")
         super().__init__()
         self.run = run
-        self.interval = interval
+        self.interval_updates = interval_updates
         self.episodes = 0
-        self._last_checkpoint_step = 0
+        self._last_recorded_update = 0
         self._reward_samples: dict[str, list[float]] = {}
         self._pending_reward_metrics: dict[str, float] = {}
 
     def _on_training_start(self) -> None:
-        self._last_checkpoint_step = self.num_timesteps
+        if not isinstance(self.model, RacingPPO):
+            raise ValueError("Training run checkpoints require RacingPPO's completed-update counter.")
+        self._last_recorded_update = self.model.completed_policy_updates
 
     def _on_rollout_start(self) -> None:
-        # The previous PPO update has now finished. Flush its losses at that
-        # update's step instead of labelling them with the next rollout's step.
-        if "train/policy_gradient_loss" in self.logger.name_to_value:
-            self._record_reward_metrics()
-            self.logger.dump(self.num_timesteps)
+        # SB3 calls this after the previous update, before collecting again.
+        self._finish_policy_update()
         self._reward_samples = {}
 
     def _on_step(self) -> bool:
         for info in self.locals["infos"]:
+            if all(name in info for name in ("requested_action", "applied_action", "observed_action")):
+                requested = float(info["requested_action"][1])
+                applied = float(info["applied_action"][1])
+                observed = float(info["observed_action"][1])
+                for name, value in {
+                    "requested_longitudinal_abs": abs(requested),
+                    "applied_throttle": max(applied, 0.0),
+                    "applied_brake": max(-applied, 0.0),
+                    "observed_longitudinal_abs": abs(observed),
+                }.items():
+                    self._reward_samples.setdefault(f"controls/{name}", []).append(value)
             reward = info.get("reward")
             if isinstance(reward, Reward):
                 values = {f"reward/{name}": float(getattr(reward, name)) for name in (
@@ -97,12 +115,6 @@ class TrainingRunCallback(BaseCallback):
                     "episode_reward": float(episode["r"]),
                     "episode_length": int(episode["l"]),
                 })
-        if self.num_timesteps - self._last_checkpoint_step >= self.interval:
-            normalizer = self.model.get_vec_normalize_env()
-            if not isinstance(normalizer, VecNormalize):
-                raise RuntimeError("Training snapshots require VecNormalize.")
-            self.run.save_checkpoint(self.num_timesteps, self.model, normalizer)
-            self._last_checkpoint_step = self.num_timesteps
         return True
 
     def _on_rollout_end(self) -> None:
@@ -118,6 +130,20 @@ class TrainingRunCallback(BaseCallback):
         self._pending_reward_metrics = {}
 
     def _on_training_end(self) -> None:
-        # SB3 logs before its PPO update. Flush the final update as well.
+        self._finish_policy_update()
+
+    def _finish_policy_update(self) -> None:
+        assert isinstance(self.model, RacingPPO)
+        updates = self.model.completed_policy_updates
+        if updates == self._last_recorded_update:
+            return
+        # Flush and save the final update too. A cancelled partial rollout
+        # never increments the model counter and cannot create a checkpoint.
         self._record_reward_metrics()
-        self.logger.dump(self.num_timesteps)
+        self.logger.dump(self.model.num_timesteps)
+        if self.interval_updates and updates % self.interval_updates == 0:
+            normalizer = self.model.get_vec_normalize_env()
+            if not isinstance(normalizer, VecNormalize):
+                raise RuntimeError("Training snapshots require VecNormalize.")
+            self.run.save_checkpoint(self.model.num_timesteps, self.model, normalizer)
+        self._last_recorded_update = updates

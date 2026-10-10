@@ -27,6 +27,9 @@ METRIC_FIELDS = (
     "performance_step", "performance_prediction", "style_step", "style_prediction",
     "termination_penalty", "total_reward", "future_weight_scale",
     "mean_predicted_progress", "mean_abs_lateral_offset",
+    "policy_updates",
+    "requested_longitudinal_abs", "applied_throttle", "applied_brake",
+    "observed_longitudinal_abs",
 )
 MetricValue = int | float | None
 

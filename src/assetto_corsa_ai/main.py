@@ -377,7 +377,7 @@ def create_training_environment(config: TrainingConfig) -> RacingEnvironment:
             traction_control_mode=AssistMode(settings.traction_control_mode),
         ),
         start_sampler=RacingEnvironment.uniform_track_point_start,
-        control_interval=settings.control_interval, max_episode_time=settings.max_episode_time,
+        control_interval=settings.control_interval, max_episode_time=settings.max_episode_time or None,
         max_episode_steps=settings.max_episode_steps or None,
         reset_position_tolerance=settings.reset_position_tolerance,
         reset_heading_tolerance_degrees=settings.reset_heading_tolerance_degrees,
@@ -467,7 +467,6 @@ def create_agent(environment: RacingEnvironment, config: TrainingConfig) -> PPOA
             },
             "net_arch": {"pi": list(network.policy_layers), "vf": list(network.value_layers)},
             "activation_fn": activation, "ortho_init": network.ortho_init,
-            "log_std_init": network.log_std_init,
             "optimizer_class": Adam, "optimizer_kwargs": {
                 "eps": network.optimizer_epsilon, "betas": network.optimizer_betas,
                 "weight_decay": network.optimizer_weight_decay,
@@ -507,7 +506,7 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
             if config.training.verbose:
                 logger.output_formats.append(HumanOutputFormat(sys.stdout))
             agent.model.set_logger(logger)
-            callback = TrainingRunCallback(run, config.training.checkpoint_interval)
+            callback = TrainingRunCallback(run, config.training.checkpoint_interval_updates)
             agent.learn(
                 config.training.total_timesteps, callback=callback,
                 reset_num_timesteps=not bool(config.training.resume_from),

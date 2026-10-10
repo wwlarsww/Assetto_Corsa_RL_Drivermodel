@@ -1,19 +1,21 @@
 # Copy this file for an experiment. The exact contents are preserved in its run.
+# start the training with: python -m assetto_corsa_ai.main train --config configs/training.toml
+
 [environment]
 car = "bmw_z4_gt3"
 track = "monza"
 track_layout = ""
 skin = ""
-abs_mode = 1
-traction_control_mode = 1
-control_interval = 0.05
-max_episode_time = 120.0
+abs_mode = 1 # 0 = off, 1 = on, 2 = on with ABS light
+traction_control_mode = 1 # 0 = off, 1 = on, 2 = on with TC light
+control_interval = 0.05 # Control interval in seconds (0.05s = 50ms)
+max_episode_time = 0 # Maximum episode time in seconds (0 disables the time limit)
 max_episode_steps = 0 # 0 disables the step limit
-reset_position_tolerance = 1.0
-reset_heading_tolerance_degrees = 5.0
-reset_speed_tolerance_kmh = 1.0
-reset_timeout = 5.0
-reset_poll_interval = 0.05
+reset_position_tolerance = 1.0 # Tolerance for position reset in meters
+reset_heading_tolerance_degrees = 5.0 # Tolerance for heading reset in degrees
+reset_speed_tolerance_kmh = 1.0 # Tolerance for speed reset in km/h
+reset_timeout = 5.0 # Timeout for reset in seconds
+reset_poll_interval = 0.05 # Poll interval for reset in seconds
 start_sampler = "uniform_track_point"
 action_mode = "delta" # Policy adds deltas; the environment receives final controls
 front_axle_distance = 0.0 # 0 estimates the offset from live tyre positions
@@ -22,15 +24,20 @@ minimum_speed = 1.0
 lookahead_distances = [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0]
 reference_distances = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0]
 
+[action]
+max_steering_delta = 0.05 # Maximum steering change per control step
+max_longitudinal_delta = 0.10 # Maximum throttle/brake change per control step
+longitudinal_deadband = 0.05 # Small longitudinal commands settle to neutral
+
 [simulator]
 assetto_corsa_directory = 'C:\Program Files (x86)\Steam\steamapps\common\assettocorsa'
 documents_directory = "" # Resolve the Windows Documents folder
-startup_timeout = 45.0
-drive_ready_timeout = 15.0
-poll_interval = 0.1
-car_index = 0
-activation_timeout = 3.0
-pulse_duration = 0.02
+startup_timeout = 45.0 # Timeout for the simulator to start in seconds
+drive_ready_timeout = 15.0 # Timeout for the simulator to be ready to drive in seconds
+poll_interval = 0.1 # Poll interval for the simulator in seconds
+car_index = 0 # Index of the car to use in the simulator (0 = first car)
+activation_timeout = 3.0 # Timeout for the simulator to activate in seconds
+pulse_duration = 0.02 # Duration of the pulse to send to the simulator in seconds
 
 [reward]
 performance_weight = 1.0
@@ -45,66 +52,66 @@ enabled = true
 performance_weight = 0.05
 style_weight = 0.05
 horizon_discount = 0.95
-warmup_steps = 20000 # Only auxiliary training during warmup
-ramp_steps = 30000
+warmup_steps = 0 # Only auxiliary training during warmup
+ramp_steps = 0 # Ramp up the auxiliary loss weight over this many steps
 
 [termination]
-stuck_time = 4.0
-minimum_progress = 2.0
+stuck_time = 3.0 # Time in seconds to consider the car stuck (0 disables stuck termination)
+minimum_progress = 1.0 # Minimum progress in meters per step to avoid termination (0 disables minimum progress termination)
 
 [ppo]
-learning_rate = 0.0003
-gamma = 0.99
-gae_lambda = 0.95
-clip_range = 0.2
+initial_action_std = 0.20 # Initial Gaussian standard deviation; learned during training
+learning_rate = 0.0003 # Learning rate for the optimizer (0 disables learning rate)
+gamma = 0.99 # Discount factor for the reward calculation (0 disables discounting)
+gae_lambda = 0.95 # Lambda parameter for Generalized Advantage Estimation (0 disables GAE)
+clip_range = 0.2 # 0 disables clipping
 clip_range_vf = 0.0 # 0 disables value clipping
-normalize_advantage = true
-n_steps = 1024
-batch_size = 256
-n_epochs = 10
-ent_coef = 0.0
-vf_coef = 0.5
-max_grad_norm = 0.5
-use_sde = false
-sde_sample_freq = -1
+normalize_advantage = true # Whether to normalize advantages (0 disables advantage normalization)
+n_steps = 1024 # Number of steps to run for each environment per update
+batch_size = 256 # Number of samples per minibatch
+n_epochs = 10 # Number of epochs to update the policy
+ent_coef = 0.0 # Entropy coefficient for the loss calculation (0 disables entropy regularization)
+vf_coef = 0.5 # Value function coefficient for the loss calculation (0 disables value function regularization)
+max_grad_norm = 0.5 # Maximum norm for gradient clipping (0 disables gradient clipping)
+use_sde = false # Whether to use State Dependent Exploration (SDE) for exploration (0 disables SDE)
+sde_sample_freq = -1 # -1 disables SDE sampling
 target_kl = 0.0 # 0 disables early stopping by KL
-stats_window_size = 100
+stats_window_size = 100 # Window size for computing running statistics (0 disables running statistics)
 
 [normalization]
-normalize_observations = true
-normalize_reward = false
-clip_observations = 10.0
-clip_reward = 10.0
-normalization_epsilon = 0.00000001
+normalize_observations = true # Whether to normalize observations (0 disables observation normalization)
+normalize_reward = false # Whether to normalize rewards (0 disables reward normalization)
+clip_observations = 10.0 # Whether to clip normalized observations (0 disables observation clipping)
+clip_reward = 10.0 # Whether to clip normalized rewards (0 disables reward clipping)
+normalization_epsilon = 0.00000001 # Epsilon for normalization (0 disables normalization epsilon)
 
 [network]
-feature_layers = [512, 512]
-feature_dim = 512
-policy_layers = [128, 128]
-value_layers = [128, 128]
-activation = "tanh"
-ortho_init = true
-log_std_init = 0.0
-optimizer = "adam"
-optimizer_epsilon = 0.00001
-optimizer_betas = [0.9, 0.999]
-optimizer_weight_decay = 0.0
-optimizer_amsgrad = false
+feature_layers = [512, 512] # List of feature layer sizes
+feature_dim = 512 # Size of the feature vector output by the feature extractor
+policy_layers = [128, 128] # List of policy layer sizes
+value_layers = [128, 128] # List of value layer sizes
+activation = "tanh" # Activation function for the network (tanh, relu, leaky_relu, elu, selu, gelu)
+ortho_init = true # Whether to use orthogonal initialization for the network weights
+optimizer = "adam" # Optimizer to use for training (adam, rmsprop, sgd)
+optimizer_epsilon = 0.00001 # Epsilon for the optimizer (0 disables optimizer epsilon)
+optimizer_betas = [0.9, 0.999] # Betas for the optimizer (0 disables optimizer betas)
+optimizer_weight_decay = 0.0 # Weight decay for the optimizer (0 disables optimizer weight decay)
+optimizer_amsgrad = false # Whether to use AMSGrad for the optimizer (0 disables AMSGrad)
 
 [predictor]
-enabled = true
-layers = [128, 128]
-prediction_points = 10
-output_dimensions = 2
-loss_weight = 0.1
-horizons_seconds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+enabled = true # Whether to enable the future prediction auxiliary task (shared feature extractor)
+layers = [128, 128] # List of predictor layer sizes
+prediction_points = 10 # Number of future points to predict
+output_dimensions = 2 # Number of output dimensions for the predictor (2 = x, y coordinates)
+loss_weight = 0.1 # Weight of the predictor loss in the total loss
+horizons_seconds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] # List of future horizons in seconds for the predictor to predict
 
 [training]
-seed = 42
-total_timesteps = 4096
-checkpoint_interval = 10000
-device = "auto"
-verbose = 1
+seed = 42 # Random seed for reproducibility
+total_timesteps = 100000000 # Total number of timesteps to train the model
+checkpoint_interval_updates = 4 # Save after every fourth completed PPO phase; 0 disables checkpoints
+device = "auto" # Device to use for training (auto, cpu, cuda, cuda:0, cuda:1, etc.)
+verbose = 1 # Verbosity level (0 = silent, 1 = info, 2 = debug)
 resume_from = "" # Previous run's checkpoints/step_XXXXXX or final directory
 
 [trajectories]
