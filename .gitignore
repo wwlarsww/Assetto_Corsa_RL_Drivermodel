@@ -8,3 +8,4 @@ build/
 pyrightconfig.json
 .vscode/
 *.log
+runs/
