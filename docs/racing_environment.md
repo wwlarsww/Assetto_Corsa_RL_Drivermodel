@@ -51,6 +51,28 @@ and cancel driving.
 
 ## Validation
 
-The tests run the Gymnasium and SB3 environment checkers and a short PPO
-training/prediction cycle with mocked simulator adapters. Live AC validation
-is still required; API details and configuration are documented in the source.
+Close AC, then run the live validator from the project virtual environment:
+
+```powershell
+python tools/validate_racing_environment.py --check-env --steps 10 --action 0 0.15
+```
+
+The default factory (`assetto_corsa_ai.main:create_environment`) launches BMW
+Z4 GT3 at Monza. Enter Drive/Start, leave the car stationary, then press Enter
+in the terminal. CSP connects afterwards. Validation captures this pose and
+reuses it for resets; it does not sample random spline starts.
+
+The tool checks the reset/step results and runs SB3's `check_env()`, which also
+performs resets and sampled actions. It reports progress, timing, reward and
+episode status. Exiting releases controls and stops the managed session;
+`--keep-session` leaves AC open.
+
+Use `--ac-directory`, `--documents-directory`, `--car`, `--track` or `--layout`
+to override the defaults. Custom `--factory module:function` callables accept
+zero arguments. Automated tests exercise validation failures and cleanup with
+mocked adapters; live validation remains separate from PPO training.
+
+Further options and API details are documented in the source.
+
+See [PPO training and driving](agent_training.md) for the executable agent,
+checkpoint recovery and axle-distance configuration.

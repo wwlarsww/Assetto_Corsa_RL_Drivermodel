@@ -28,13 +28,16 @@ Assetto Corsa
 The current implementation reads telemetry, reconstructs track geometry and
 builds observations, rewards and termination checks. CSP vehicle control and
 session launch are available. `RacingEnvironment` provides the Gymnasium
-interface for future SB3/PPO training.
+interface for SB3/PPO training.
 
 See [vehicle control](docs/control.md) and [session management](docs/session_manager.md)
 for the architecture and validation tools.
 
 See [the RL environment](docs/racing_environment.md) for actions, observations
 and episode handling.
+
+See [training runs](docs/agent_training.md) for configuration, metrics and
+paired model/normalization checkpoints.
 
 ## Development
 
