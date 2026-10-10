@@ -382,7 +382,7 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             poll_interval=self._reset_poll_interval,
         )
 
-        telemetry = self._read_telemetry()
+        telemetry = self._wait_for_neutral_telemetry()
 
         projection = self._project(
             telemetry
@@ -731,6 +731,22 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             )
 
         return self._telemetry_reader.read()
+
+    def _wait_for_neutral_telemetry(self) -> TelemetryFrame:
+        """Confirm reset controls before exposing the first observation."""
+        deadline = time.monotonic() + self._reset_timeout
+        while True:
+            telemetry = self._read_telemetry()
+            # CSP releases the reset brake asynchronously. Using the previous
+            # frame would start the residual policy from full brake again.
+            if all(abs(value) <= 1e-4 for value in (
+                telemetry.gas, telemetry.brake, telemetry.steering_angle,
+            )):
+                return telemetry
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise RuntimeError("Reset controls did not become neutral in simulator telemetry.")
+            time.sleep(min(self._reset_poll_interval, remaining))
 
     def _project(
         self,

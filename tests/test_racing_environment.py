@@ -175,6 +175,33 @@ def test_reset_connects_after_launch_and_reuses_same_session(harness: Harness) -
     assert harness.checker.reset.call_count == 2
 
 
+@pytest.mark.parametrize("field", ["brake", "gas", "steering_angle"])
+def test_reset_waits_for_neutral_controls_before_building_observation(harness: Harness, field: str) -> None:
+    stale = replace(telemetry(), **{field: 1.0})
+    fresh = telemetry()
+    harness.reader.read.side_effect = [stale, stale, fresh]
+    env = harness.create()
+    env.reset(options={"start": START})
+    assert harness.clock.now == pytest.approx(0.1)
+    assert harness.builder.build.call_args.kwargs["telemetry"] == fresh
+    assert harness.reader.read.call_count == 3
+    harness.reader.read.side_effect = None
+    env.step(action(0.0, 0.1))
+    assert harness.checker.check.call_args.kwargs["dt"] == pytest.approx(0.05)
+
+
+def test_reset_rejects_permanently_stale_brake_telemetry(harness: Harness) -> None:
+    harness.reader.read.return_value = replace(telemetry(), brake=1.0)
+    env = harness.create(reset_timeout=0.1)
+    with pytest.raises(RuntimeError, match="controls did not become neutral"):
+        env.reset(options={"start": START})
+    harness.builder.build.assert_not_called()
+    harness.simulator.close.assert_called_once()
+    harness.reader.close.assert_called_once()
+    with pytest.raises(RuntimeError, match="No active episode"):
+        env.step(action(0.0, 0.1))
+
+
 def test_switch_releases_old_runtime_before_reloading_track(harness: Harness) -> None:
     env = harness.create()
     env.reset(options={"start": START})
