@@ -41,13 +41,18 @@ class MemoryRacingEnvironment(RacingEnvironment):
         gym.Env.reset(self, seed=seed)
         self.reset_calls += 1
         self._episode_steps = 0
-        return self.raw_observation(), {}
+        return self.raw_observation(), {
+            "vehicle_position": (0.0, 0.0, 0.0), "vehicle_forward": (1.0, 0.0, 0.0),
+        }
 
     def step(self, action: ArrayLike) -> tuple[FloatArray, float, bool, bool, dict[str, Any]]:
         assert self.action_space.contains(np.asarray(action, dtype=np.float32))
         self.step_calls += 1
         self._episode_steps += 1
-        return self.raw_observation(), 7.5, False, self._episode_steps == 3, {}
+        return self.raw_observation(), 7.5, False, self._episode_steps == 3, {
+            "vehicle_position": (float(self._episode_steps), 0.0, 0.0),
+            "vehicle_forward": (1.0, 0.0, 0.0),
+        }
 
     def close(self, *, stop_session: bool = True) -> None:
         self.close_calls += 1

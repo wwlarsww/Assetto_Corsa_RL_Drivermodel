@@ -399,6 +399,8 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             "step_count": self._step_count,
             "episode_time": self._episode_time,
             "session_changed": session_changed,
+            "vehicle_position": telemetry.car_coordinates,
+            "vehicle_forward": self._vehicle_forward(telemetry),
         }
 
         return observation, info
@@ -544,6 +546,8 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             termination=termination,
             dt=dt,
         )
+        info["vehicle_position"] = telemetry.car_coordinates
+        info["vehicle_forward"] = self._vehicle_forward(telemetry)
 
         return (
             observation,
