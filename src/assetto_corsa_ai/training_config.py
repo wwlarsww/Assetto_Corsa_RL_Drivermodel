@@ -11,6 +11,7 @@ from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 from assetto_corsa_ai.agent import PPOConfig
 from assetto_corsa_ai.action import ActionConfig
+from assetto_corsa_ai.episode_start import StartConfig
 from assetto_corsa_ai.future_reward import FuturePredictionRewardConfig
 from assetto_corsa_ai.predictor import PredictorConfig, horizon_indices
 
@@ -165,6 +166,7 @@ def _section(data: dict[str, Any], name: str, cls: type[Section]) -> Section:
 class TrainingConfig:
     environment: EnvironmentConfig
     action: ActionConfig
+    start: StartConfig
     simulator: SimulatorConfig
     reward: RewardConfig
     termination: TerminationConfig
@@ -201,6 +203,7 @@ class TrainingConfig:
         )
 
     def validate(self) -> None:
+        self.start.validate()
         self.agent_config().validate()
         env, sim, net, train = self.environment, self.simulator, self.network, self.training
         for name, value in (
@@ -281,7 +284,7 @@ class TrainingConfig:
 
     def require_compatible_resume(self, previous: TrainingConfig) -> None:
         """Only the new budget, checkpoint cadence and runtime verbosity may change."""
-        for name in ("environment", "action", "simulator", "reward", "termination", "ppo", "normalization", "network", "predictor", "trajectories"):
+        for name in ("environment", "action", "start", "simulator", "reward", "termination", "ppo", "normalization", "network", "predictor", "trajectories"):
             if getattr(self, name) != getattr(previous, name):
                 raise ValueError(f"Resuming with different [{name}] settings is unsupported.")
         if self.training.seed != previous.training.seed or self.training.device != previous.training.device:
@@ -290,6 +293,9 @@ class TrainingConfig:
 
 def _upgrade_legacy_config(data: dict[str, Any]) -> None:
     """Read archived configs without editing their immutable TOML files."""
+    # Archived runs predate rolling starts and retain their stationary reset.
+    if "start" not in data:
+        data["start"] = asdict(StartConfig())
     network, ppo, training = data.get("network"), data.get("ppo"), data.get("training")
     if isinstance(network, dict) and "log_std_init" in network and isinstance(ppo, dict):
         network, ppo = cast(dict[str, Any], network), cast(dict[str, Any], ppo)

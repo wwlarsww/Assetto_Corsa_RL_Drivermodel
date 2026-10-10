@@ -378,6 +378,7 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument("--ac-directory", type=Path, help="AC installation directory (default factory only).")
+    parser.add_argument("--config", type=Path, help="Validate the TOML-configured environment, including reset pre-roll.")
     parser.add_argument("--documents-directory", type=Path, help="AC user configuration directory (default factory only).")
     parser.add_argument("--car", help="Car ID (default factory: bmw_z4_gt3).")
     parser.add_argument("--track", help="Track ID (default factory: monza).")
@@ -492,7 +493,14 @@ def main() -> None:
     if args.factory == DEFAULT_FACTORY:
         factory_options["drive_ready_check"] = confirm_driving
         factory_options["start_sampler"] = captured_start_sampler()
-    env = factory(**factory_options)
+    if args.config is not None:
+        if args.factory != DEFAULT_FACTORY or any(name not in ("drive_ready_check", "start_sampler") for name in factory_options):
+            raise SystemExit("--config cannot be combined with factory or scenario overrides.")
+        from assetto_corsa_ai.main import create_training_environment
+        from assetto_corsa_ai.training_config import TrainingConfig
+        env = create_training_environment(TrainingConfig.load(args.config))
+    else:
+        env = factory(**factory_options)
     if not isinstance(env, RacingEnvironment):
         raise TypeError("Factory must return a RacingEnvironment.")
 

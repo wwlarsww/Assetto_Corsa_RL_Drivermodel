@@ -29,6 +29,24 @@ max_steering_delta = 0.05 # Maximum steering change per control step
 max_longitudinal_delta = 0.10 # Maximum throttle/brake change per control step
 longitudinal_deadband = 0.05 # Small longitudinal commands settle to neutral
 
+[start]
+enabled = false # Enable after validating the AI-file speed unit and live pre-roll
+reference_speed_unit = "unvalidated" # Set to "kmh" or "mps" after validation
+reference_speed_factor_min = 0.30
+reference_speed_factor_max = 0.60
+min_speed_kmh = 20.0
+max_speed_kmh = 120.0
+max_attempts = 3
+timeout = 20.0
+acceleration_estimate_mps2 = 3.0
+settling_time = 1.0
+min_preroll_distance = 10.0
+max_preroll_distance = 250.0
+lookahead_distance = 8.0
+lookahead_time = 0.4
+steering_gain = 1.0
+speed_gain = 0.1
+
 [simulator]
 assetto_corsa_directory = 'C:\Program Files (x86)\Steam\steamapps\common\assettocorsa'
 documents_directory = "" # Resolve the Windows Documents folder

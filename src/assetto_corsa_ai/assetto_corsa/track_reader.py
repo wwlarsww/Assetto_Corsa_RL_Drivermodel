@@ -94,6 +94,7 @@ class AssettoCorsaTrackReader:
                         side_right=side_right,
                         normal=normal,
                         forward=forward,
+                        reference_speed=float(values[0]),
                     )
                 )
 

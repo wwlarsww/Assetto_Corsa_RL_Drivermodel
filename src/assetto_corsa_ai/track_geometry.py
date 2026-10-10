@@ -31,6 +31,7 @@ class TrackPoint:
 
     normal: Vector3
     forward: Vector3
+    reference_speed: float | None = None # Raw AI-file speed; unit must be validated by the caller.
 
     @property
     def left_boundary(self) -> Vector3:

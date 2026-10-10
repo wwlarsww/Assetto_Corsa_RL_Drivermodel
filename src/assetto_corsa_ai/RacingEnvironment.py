@@ -18,7 +18,6 @@ shared-memory details. Those remain in their dedicated adapters.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from math import cos, dist, hypot, isfinite, radians
 import time
 from typing import Any
@@ -48,14 +47,8 @@ from assetto_corsa_ai.termination import (
 )
 from assetto_corsa_ai.track_geometry import TrackGeometry
 from assetto_corsa_ai.track_projection import TrackProjection, TrackProjector
-
-
-@dataclass(frozen=True)
-class EpisodeStart:
-    """Vehicle pose used to start a new episode."""
-
-    position: Vector3
-    forward: Vector3
+from assetto_corsa_ai.episode_start import EpisodeStart, StartConfig
+from assetto_corsa_ai.reset_preroll import PreRollError, ResetPreRollController
 
 
 TelemetryReaderFactory = Callable[[], TelemetryReader]
@@ -121,6 +114,7 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
         default_scenario: SimulatorScenario | None = None,
         scenario_sampler: ScenarioSampler | None = None,
         start_sampler: StartSampler | None = None,
+        start_config: StartConfig | None = None,
         strong_collision_check: StrongCollisionCheck | None = None,
         control_interval: float = 0.05,
         max_episode_time: float | None = 120.0,
@@ -200,6 +194,10 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             if start_sampler is not None
             else self.uniform_track_point_start
         )
+        self._start_config = start_config or StartConfig()
+        self._start_config.validate()
+        if start_sampler is None and self._start_config.enabled:
+            self._start_sampler = self._start_config.sample
 
         self._strong_collision_check = strong_collision_check
 
@@ -370,19 +368,33 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             )
         )
 
+        preroll = ResetPreRollController(self._track_geometry, self._start_config)
+        telemetry: TelemetryFrame | None = None
+        for attempt in range(self._start_config.max_attempts):
+            try:
+                spawn, approach_distance = (preroll.approach(episode_start)
+                    if episode_start.target_speed_kmh > 0 else (episode_start, 0.0))
+                self._simulator.reset_episode(
+                    spawn.position, spawn.forward, is_ready=self._reset_readiness_check(spawn),
+                    timeout=self._reset_timeout, poll_interval=self._reset_poll_interval,
+                )
+                telemetry = self._wait_for_neutral_telemetry()
+                if episode_start.target_speed_kmh > 0:
+                    telemetry = preroll.run(episode_start, approach_distance,
+                        simulator=self._simulator, read=self._read_telemetry,
+                        forward=self._vehicle_forward, interval=self._control_interval,
+                        position_tolerance=self._reset_position_tolerance,
+                        heading_tolerance_degrees=self._reset_heading_tolerance_degrees,
+                        speed_tolerance_kmh=self._reset_speed_tolerance_kmh)
+                break
+            except PreRollError:
+                if start is not None or attempt + 1 == self._start_config.max_attempts:
+                    raise
+                episode_start = self._start_sampler(self._track_geometry, self.np_random)
+
+        # Pre-roll is reset work: initialise RL state only at handoff.
+        assert telemetry is not None
         self._termination_checker.reset()
-
-        self._simulator.reset_episode(
-            episode_start.position,
-            episode_start.forward,
-            is_ready=self._reset_readiness_check(
-                episode_start
-            ),
-            timeout=self._reset_timeout,
-            poll_interval=self._reset_poll_interval,
-        )
-
-        telemetry = self._wait_for_neutral_telemetry()
 
         projection = self._project(
             telemetry

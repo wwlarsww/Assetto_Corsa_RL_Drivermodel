@@ -376,7 +376,7 @@ def create_training_environment(config: TrainingConfig) -> RacingEnvironment:
             abs_mode=AssistMode(settings.abs_mode),
             traction_control_mode=AssistMode(settings.traction_control_mode),
         ),
-        start_sampler=RacingEnvironment.uniform_track_point_start,
+        start_sampler=config.start.sample, start_config=config.start,
         control_interval=settings.control_interval, max_episode_time=settings.max_episode_time or None,
         max_episode_steps=settings.max_episode_steps or None,
         reset_position_tolerance=settings.reset_position_tolerance,
