@@ -34,6 +34,33 @@ def horizon_indices(horizons: tuple[float, ...], control_interval: float) -> tup
     return tuple(int(value) for value in rounded)
 
 
+def horizontal_vehicle_axes(forwards: NDArray[np.float64]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Shared XZ basis for supervised targets and the inverse reward transform."""
+    if forwards.shape[-1] != 3 or not np.isfinite(forwards).all():
+        raise ValueError("Vehicle forward must contain finite 3D vectors.")
+    direction = forwards[..., (0, 2)]
+    lengths = np.linalg.norm(direction, axis=-1, keepdims=True)
+    if np.any(lengths <= 1e-9):
+        raise ValueError("Vehicle forward must have a non-zero horizontal direction.")
+    direction = direction / lengths
+    return direction, np.stack((direction[..., 1], -direction[..., 0]), axis=-1)
+
+
+def trajectory_to_world(
+    prediction: NDArray[np.float32], position: NDArray[np.float64], forward: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Invert local (forward, left) coordinates using the observation's pose."""
+    if prediction.ndim != 2 or prediction.shape[1] != 2 or not len(prediction) or not np.isfinite(prediction).all():
+        raise ValueError("Prediction must contain finite (horizons, 2) local points.")
+    if position.shape != (3,) or forward.shape != (3,) or not np.isfinite(position).all():
+        raise ValueError("Vehicle pose must contain finite 3D vectors.")
+    direction, left = horizontal_vehicle_axes(forward)
+    world = np.broadcast_to(position, (len(prediction), 3)).copy()
+    world[:, (0, 2)] += prediction[:, :1] * direction + prediction[:, 1:] * left
+    # The predictor has no height output; preserve the originating pose's Y.
+    return world
+
+
 def build_trajectory_targets(
     positions: NDArray[np.float64], forwards: NDArray[np.float64],
     next_positions: NDArray[np.float64], dones: NDArray[np.bool_],
@@ -54,12 +81,7 @@ def build_trajectory_targets(
         raise ValueError("Horizon offsets must be positive integers.")
     if not all(np.isfinite(values).all() for values in (positions, forwards, next_positions)):
         raise ValueError("Rollout poses must be finite.")
-    direction = forwards[..., (0, 2)]
-    lengths = np.linalg.norm(direction, axis=-1, keepdims=True)
-    if np.any(lengths <= 1e-9):
-        raise ValueError("Vehicle forward must have a non-zero horizontal direction.")
-    direction = direction / lengths
-    left = np.stack((direction[..., 1], -direction[..., 0]), axis=-1)
+    direction, left = horizontal_vehicle_axes(forwards)
     steps, environments = positions.shape[:2]
     targets = np.zeros((steps, environments, len(offsets), 2), dtype=np.float32)
     mask = np.zeros((steps, environments, len(offsets)), dtype=np.bool_)

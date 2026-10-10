@@ -13,8 +13,7 @@ from assetto_corsa_ai.termination import (
 class Reward:
     """Reward breakdown for one agent step.
 
-    Prediction-based reward terms are reserved for the future auxiliary
-    trajectory predictor and remain zero until that component is added.
+    Prediction terms are supplied by the optional rollout reward wrapper.
     """
 
     total: float
@@ -61,14 +60,7 @@ def calculate_progress_delta(
 class RewardCalculator:
     """Calculate performance, imitation and termination rewards.
 
-    Current formulation:
-
-        r_t =
-            r_performance_step
-            + lambda_style * r_style_step
-            + termination_penalty
-
-    Future formulation:
+    Formulation:
 
         r_t =
             r_performance_step
@@ -146,7 +138,7 @@ class RewardCalculator:
             lateral_offset=lateral_offset,
         )
 
-        # Reserved for the future auxiliary trajectory predictor.
+        # The base environment always evaluates only the actual step.
         performance_prediction = 0.0
         style_prediction = 0.0
 
@@ -154,21 +146,41 @@ class RewardCalculator:
             reason=termination.reason,
         )
 
-        total = (
-            performance_step
-            + performance_prediction
-            + self._style_weight * (style_step + style_prediction)
-            + termination_penalty
-        )
-
-        return Reward(
-            total=total,
+        return self._compose(
             performance_step=performance_step,
             style_step=style_step,
             performance_prediction=performance_prediction,
             style_prediction=style_prediction,
             termination_penalty=termination_penalty,
         )
+
+    def with_prediction(
+        self, step: Reward, *, performance_prediction: float, style_prediction: float,
+    ) -> Reward:
+        """Compose detached future terms without recomputing actual step terms."""
+        if performance_prediction == 0.0 and style_prediction == 0.0:
+            return step
+        return self._compose(
+            performance_step=step.performance_step, style_step=step.style_step,
+            performance_prediction=performance_prediction,
+            style_prediction=style_prediction, termination_penalty=step.termination_penalty,
+        )
+
+    def _compose(
+        self, *, performance_step: float, style_step: float,
+        performance_prediction: float, style_prediction: float, termination_penalty: float,
+    ) -> Reward:
+        return Reward(
+            total=(performance_step + performance_prediction
+                   + self._style_weight * (style_step + style_prediction) + termination_penalty),
+            performance_step=performance_step, style_step=style_step,
+            performance_prediction=performance_prediction, style_prediction=style_prediction,
+            termination_penalty=termination_penalty,
+        )
+
+    def style_score(self, lateral_offset: float) -> float:
+        """Common, unweighted Gaussian proximity score for step and prediction."""
+        return math.exp(-(lateral_offset**2) / (2.0 * self._style_sigma**2))
 
     def _performance_step_reward(
         self,
@@ -192,7 +204,7 @@ class RewardCalculator:
             0 < reward <= 1
         """
 
-        return math.exp(-(lateral_offset**2) / (2.0 * self._style_sigma**2))
+        return self.style_score(lateral_offset)
 
     def _termination_penalty(
         self,
