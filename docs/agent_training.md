@@ -53,13 +53,18 @@ unfinished rollout and random-generator state are not restored. Checkpoints
 are counted from the start of the new invocation and named by total steps.
 Ctrl+C retains completed checkpoints. `final/` is saved after successful training.
 
-The shared extractor and both heads are included in `model.zip`;
+The shared extractor, policy/value heads and enabled predictor head are included in `model.zip`;
 `vecnormalize.pkl` is saved alongside it for every snapshot. Evaluation freezes
 normalization statistics. Existing `models/` bundles remain loadable for
 evaluation; new training always uses runs, which are ignored by Git.
 
-The auxiliary predictor and selected trajectory export are reserved for later.
-Both are explicitly disabled in TOML; enabling either currently fails rather
-than silently omitting it. No rollouts, `architecture.txt` or separate predictor
-weights are saved. Network sizes and activation come from TOML; implementation
-details live in the code identified by Git.
+The template enables the [auxiliary trajectory predictor](predictor.md) and
+delta actions. Both objectives train one shared extractor with one optimizer;
+predictor loss, valid horizon count and forward/lateral MAE join `metrics.csv`.
+Delta controls retain their existing `[-1, 1]` scale in VecNormalize; physical
+features are normalized. The policy adds its delta to the observed controls
+before SB3 clips the final action. `action_mode = "absolute"` is also supported.
+
+Future prediction reward stays disabled and its existing reward terms stay
+zero. Selected trajectory export is reserved for later and disabled. No full
+rollouts, `architecture.txt` or separate predictor weights are saved.

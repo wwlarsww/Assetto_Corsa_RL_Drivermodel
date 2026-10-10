@@ -33,6 +33,10 @@ The action and observation spaces exist before the first reset.
 scenarios. Observations are validated for shape and finite values; normalization
 belongs in a separate wrapper, such as SB3's `VecNormalize`.
 
+Reset and step `info` also provide `vehicle_position` and `vehicle_forward` in
+world coordinates. Training can use these poses to derive local future targets;
+the environment has no knowledge of neural networks or predictor rewards.
+
 ## Episodes
 
 Reset reuses the session for the same car/track/layout and teleports to the
