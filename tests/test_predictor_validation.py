@@ -1,6 +1,7 @@
 """Test-data validation, detached inference, plots and selected NPZ loading."""
 
 from pathlib import Path
+from dataclasses import replace
 from unittest.mock import Mock
 
 import numpy as np
@@ -79,4 +80,39 @@ def test_default_cli_is_explicitly_untrained_and_never_launches_ac(
     assert "UNTRAINED" in output
     assert "Synthetic test data" in output
     assert "Total predictor loss" in output
+    assert "projected s" in output and "progress contribution" in output
+    assert "performance_prediction:" in output and "total_reward:" in output
     manager.assert_not_called()
+
+
+def test_future_reward_never_uses_actual_later_targets_and_keeps_all_predicted_horizons() -> None:
+    config = small_config()
+    config = replace(config, reward=replace(config.reward, future_prediction=replace(
+        config.reward.future_prediction, enabled=True, warmup_steps=0, ramp_steps=0,
+    )))
+    data = validation.synthetic_rollout(config)
+    agent = create_agent(validation.ValidationEnvironment(data), config)
+    try:
+        first = validation.validate_sample(agent, data, config, 0)
+        moved_positions, moved_endpoints = data.positions.copy(), data.next_positions.copy()
+        moved_positions[1:] += (100, 0, 50)
+        moved_endpoints[1:] += (100, 0, 50)
+        changed = replace(data, positions=moved_positions, next_positions=moved_endpoints)
+        second = validation.validate_sample(agent, changed, config, 0)
+        assert second.loss != first.loss
+        np.testing.assert_array_equal(first.future_reward.projected_s, second.future_reward.projected_s)
+        np.testing.assert_array_equal(first.future_reward.lateral_offsets, second.future_reward.lateral_offsets)
+        assert first.reward == second.reward
+        near_end = validation.validate_sample(agent, data, config, 30)
+        assert near_end.mask.sum() == 1
+        assert len(near_end.future_reward.projected_s) == 10
+        assert (near_end.future_reward.style_contributions > 0).all()
+    finally:
+        agent.close()
+
+
+def test_selected_live_rollout_requires_its_reference_line(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        validation.main(["--data", "selected.npz"])
+    assert error.value.code == 2
+    assert "matching --reference-line" in capsys.readouterr().err

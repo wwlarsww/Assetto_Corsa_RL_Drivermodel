@@ -2,13 +2,13 @@
 
 The default prints predictions from a fresh, untrained TOML-driven model using
 synthetic data. --checkpoint loads a run snapshot and its VecNormalize instead.
-No AC process, live driving, reward changes or persistent rollout capture.
+No AC process, live driving or persistent rollout capture.
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,9 +18,15 @@ from numpy.typing import ArrayLike, NDArray
 import torch
 
 from assetto_corsa_ai.agent import PPOAgent
+from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader
+from assetto_corsa_ai.future_reward import FuturePredictorRewardCalculator, FutureReward
 from assetto_corsa_ai.main import create_agent
 from assetto_corsa_ai.predictor import build_trajectory_targets, horizon_indices, masked_predictor_loss
 from assetto_corsa_ai.RacingEnvironment import FloatArray, RacingEnvironment
+from assetto_corsa_ai.reward import Reward, RewardCalculator, calculate_progress_delta
+from assetto_corsa_ai.termination import TerminationResult
+from assetto_corsa_ai.track_geometry import TrackGeometry, TrackPoint
+from assetto_corsa_ai.track_projection import TrackProjector
 from assetto_corsa_ai.training_config import TrainingConfig, checkpoint_config_path
 
 
@@ -86,11 +92,18 @@ def synthetic_rollout(config: TrainingConfig, steps: int = 64) -> RolloutData:
 class ValidationEnvironment(RacingEnvironment):
     """A test-data Gymnasium adapter, independent of AC, for policy loading."""
 
-    def __init__(self, data: RolloutData) -> None:
+    def __init__(
+        self, data: RolloutData, *, projector: TrackProjector | None = None,
+        reward_calculator: RewardCalculator | None = None,
+    ) -> None:
         gym.Env.__init__(self)
         self.data = data
         self.index = 0
         self.controls = np.zeros(2, dtype=np.float32)
+        self._track_projector = projector if projector is not None else synthetic_reference()
+        self._reward_calculator = reward_calculator if reward_calculator is not None else RewardCalculator(
+            performance_weight=0.0, style_weight=0.0,
+        )
         self.action_space = gym.spaces.Box(-1, 1, shape=(2,), dtype=np.float32)
         self.observation_space = gym.spaces.Box(-np.inf, np.inf, shape=(data.observations.shape[-1],), dtype=np.float32)
 
@@ -105,6 +118,7 @@ class ValidationEnvironment(RacingEnvironment):
         self.controls[:] = 0
         return self._observation(), {
             "vehicle_position": self.data.positions[0, 0], "vehicle_forward": self.data.forwards[0, 0],
+            "projection": self.reference_projector.project(tuple(self.data.positions[0, 0])),
         }
 
     def step(self, action: ArrayLike) -> tuple[FloatArray, float, bool, bool, dict[str, Any]]:
@@ -115,13 +129,30 @@ class ValidationEnvironment(RacingEnvironment):
         self.controls[:] = controls
         ended = bool(self.data.episode_ends[index, 0])
         self.index = min(index + 1, len(self.data.observations) - 1)
-        return self._observation(), 0.0, False, ended, {
+        origin = self.reference_projector.project(tuple(self.data.positions[index, 0]))
+        endpoint = self.reference_projector.project(tuple(self.data.next_positions[index, 0]))
+        reward = self.reward_calculator.calculate(
+            calculate_progress_delta(endpoint.distance_along_track, origin.distance_along_track,
+                                     self.reference_projector.track_length),
+            endpoint.lateral_offset, TerminationResult(False, None),
+        )
+        return self._observation(), reward.total, False, ended, {
             "vehicle_position": self.data.next_positions[index, 0],
             "vehicle_forward": self.data.forwards[self.index, 0],
+            "projection": endpoint, "reward": reward,
         }
 
     def close(self, *, stop_session: bool = True) -> None:
         pass
+
+
+def synthetic_reference() -> TrackProjector:
+    """Independent rectangular reference, never fitted to actual future poses."""
+    positions = [(-100.0, 0.0, 0.0), (500.0, 0.0, 0.0),
+                 (500.0, 0.0, 300.0), (-100.0, 0.0, 300.0)]
+    return TrackProjector(TrackGeometry([
+        TrackPoint(p, 0.0, 5.0, 5.0, (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)) for p in positions
+    ]))
 
 
 @dataclass(frozen=True)
@@ -132,9 +163,13 @@ class ValidationResult:
     forward_error: FloatArray
     lateral_error: FloatArray
     loss: float
+    future_reward: FutureReward
+    reward: Reward
 
 
-def validate_sample(agent: PPOAgent, data: RolloutData, config: TrainingConfig, sample: int) -> ValidationResult:
+def validate_sample(
+    agent: PPOAgent, data: RolloutData, config: TrainingConfig, sample: int, *, training_step: int | None = None,
+) -> ValidationResult:
     if not 0 <= sample < len(data.observations):
         raise ValueError("Sample index is outside the rollout.")
     shape = agent.vec_env.observation_space.shape
@@ -146,7 +181,31 @@ def validate_sample(agent: PPOAgent, data: RolloutData, config: TrainingConfig, 
     actual, mask = targets[sample, 0], masks[sample, 0]
     loss = masked_predictor_loss(torch.as_tensor(prediction), torch.as_tensor(actual), torch.as_tensor(mask))
     errors = np.abs(prediction - actual)
-    return ValidationResult(prediction, actual, mask, errors[:, 0], errors[:, 1], loss.item())
+    environment = agent.environment.unwrapped
+    assert isinstance(environment, RacingEnvironment)
+    projector = environment.reference_projector
+    origin = projector.project(tuple(data.positions[sample, 0]))
+    settings = asdict(config.reward)
+    settings.pop("future_prediction")
+    step_calculator = RewardCalculator(**settings)
+    model_step = getattr(agent.model, "num_timesteps")
+    assert isinstance(model_step, int)
+    future = FuturePredictorRewardCalculator(config.reward.future_prediction, step_calculator).calculate(
+        prediction, position=data.positions[sample, 0], forward=data.forwards[sample, 0],
+        current_s=origin.distance_along_track, projector=projector,
+        step=model_step if training_step is None else training_step,
+    )
+    # Only the actual NEXT endpoint is used for the unchanged step reward.
+    # Later actual poses above are auxiliary-loss targets, never future reward input.
+    endpoint = projector.project(tuple(data.next_positions[sample, 0]))
+    base = step_calculator.calculate(
+        calculate_progress_delta(endpoint.distance_along_track, origin.distance_along_track, projector.track_length),
+        endpoint.lateral_offset, TerminationResult(False, None),
+    )
+    reward = step_calculator.with_prediction(
+        base, performance_prediction=future.performance_prediction, style_prediction=future.style_prediction,
+    )
+    return ValidationResult(prediction, actual, mask, errors[:, 0], errors[:, 1], loss.item(), future, reward)
 
 
 def print_result(result: ValidationResult, horizons: tuple[float, ...]) -> None:
@@ -158,6 +217,17 @@ def print_result(result: ValidationResult, horizons: tuple[float, ...]) -> None:
         print(f"{horizon:.2f}s | ({predicted[0]:+.3f}, {predicted[1]:+.3f}) | {measured}")
     print(f"Valid horizon points: {int(result.mask.sum())}/{len(result.mask)}")
     print(f"Total predictor loss (masked SmoothL1): {result.loss:.6f}")
+    future = result.future_reward
+    print("horizon | predicted forward | predicted left | projected s | lateral offset | progress contribution | style contribution")
+    for index, horizon in enumerate(horizons):
+        print(f"{horizon:.2f}s | {result.prediction[index, 0]:+.3f} | {result.prediction[index, 1]:+.3f} | "
+              f"{future.projected_s[index]:.3f} | {future.lateral_offsets[index]:+.3f} | "
+              f"{future.progress_contributions[index]:+.6f} | {future.style_contributions[index]:.6f}")
+    print(f"Future weight scale: {future.weight_scale:.3f}; unweighted predicted style: {future.style_score:.6f}")
+    for name in ("performance_step", "performance_prediction", "style_step", "style_prediction", "termination_penalty"):
+        print(f"{name}: {getattr(result.reward, name):+.6f}")
+    print(f"total_reward: {result.reward.total:+.6f}")
+    print("Step/termination above use selected test data; NPZ has no domain termination reasons.")
 
 
 def plot_result(result: ValidationResult, *, destination: Path | None, show: bool) -> None:
@@ -190,6 +260,8 @@ def main(argv: list[str] | None = None) -> None:
     model_source.add_argument("--checkpoint", type=Path, help="Run final/ or checkpoints/step_XXXXXX directory.")
     model_source.add_argument("--config", type=Path, default=Path("configs/training.toml"))
     parser.add_argument("--data", type=Path, help="Selected rollout NPZ containing raw observations and poses.")
+    parser.add_argument("--reference-line", type=Path, help="Matching fast_lane.ai; required with --data.")
+    parser.add_argument("--training-step", type=int, help="Inspect warmup/ramp at this global timestep; default: model timestep.")
     parser.add_argument("--sample", type=int, default=0)
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--save-plot", type=Path)
@@ -197,10 +269,15 @@ def main(argv: list[str] | None = None) -> None:
     config = TrainingConfig.load(checkpoint_config_path(args.checkpoint) if args.checkpoint else args.config)
     if not config.predictor.enabled:
         parser.error("Predictor must be enabled in the model's configuration.")
+    if args.data and args.reference_line is None:
+        parser.error("Selected rollout data requires its matching --reference-line fast_lane.ai.")
+    if args.training_step is not None and args.training_step < 0:
+        parser.error("--training-step must be non-negative.")
     data = load_rollout(args.data) if args.data else synthetic_rollout(config)
     dimensions = 10 + 4 * len(config.environment.lookahead_distances) + 2 * len(config.environment.reference_distances)
     data.validate(dimensions)
-    environment = ValidationEnvironment(data)
+    projector = TrackProjector(AssettoCorsaTrackReader(args.reference_line).read()) if args.reference_line else synthetic_reference()
+    environment = ValidationEnvironment(data, projector=projector)
     agent: PPOAgent | None = None
     try:
         if args.checkpoint:
@@ -211,7 +288,7 @@ def main(argv: list[str] | None = None) -> None:
             print("Fresh, UNTRAINED predictor; these errors validate plumbing, not learned accuracy.")
         agent.set_evaluation_mode()
         print("Selected rollout data." if args.data else "Synthetic test data; no live simulator.")
-        result = validate_sample(agent, data, config, args.sample)
+        result = validate_sample(agent, data, config, args.sample, training_step=args.training_step)
         print_result(result, config.predictor.horizons_seconds)
         if args.plot or args.save_plot:
             plot_result(result, destination=args.save_plot, show=args.plot)
