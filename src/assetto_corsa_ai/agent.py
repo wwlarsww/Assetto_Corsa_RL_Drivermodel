@@ -16,6 +16,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, cast
 
+import gymnasium as gym
 from gymnasium.spaces import Box
 import numpy as np
 from numpy.typing import NDArray
@@ -29,6 +30,8 @@ from torch import nn
 
 from assetto_corsa_ai.RacingEnvironment import RacingEnvironment
 from assetto_corsa_ai.predictor import PredictorConfig
+from assetto_corsa_ai.future_reward import FuturePredictionRewardConfig
+from assetto_corsa_ai.reward_wrapper import FutureRewardWrapper
 from assetto_corsa_ai.racing_policy import ActionAwareVecNormalize, RacingActorCriticPolicy
 from assetto_corsa_ai.racing_ppo import RacingPPO
 
@@ -176,10 +179,15 @@ class PPOAgent:
         config: PPOConfig | None = None,
         policy_kwargs: dict[str, Any] | None = None,
         predictor_config: PredictorConfig | None = None,
+        future_reward_config: FuturePredictionRewardConfig | None = None,
         control_interval: float | None = None,
     ) -> None:
         self._config = config if config is not None else PPOConfig()
         self._config.validate()
+        if future_reward_config is not None:
+            future_reward_config.validate()
+            if future_reward_config.enabled and (predictor_config is None or not predictor_config.enabled):
+                raise ValueError("Future prediction reward requires an enabled predictor.")
 
         self._environment = environment
         self._vec_env = self._build_vec_env(environment)
@@ -198,7 +206,8 @@ class PPOAgent:
                     prediction_points=predictor_config.prediction_points if auxiliary and predictor_config else 0,
                     output_dimensions=predictor_config.output_dimensions if predictor_config else 2,
                 )
-                extra.update(predictor_config=predictor_config, control_interval=control_interval)
+                extra.update(predictor_config=predictor_config, control_interval=control_interval,
+                             future_reward_config=future_reward_config)
             self._model = model_type(
                 policy=RacingActorCriticPolicy if custom_policy else "MlpPolicy",
                 env=self._vec_env,
@@ -225,6 +234,7 @@ class PPOAgent:
                 policy_kwargs=options,
                 **extra,
             )
+            self._acting_environment = self._install_future_reward(self._vec_env, self._model, environment)
         except BaseException as error:
             _close_after_failure(self._vec_env, error)
             self._closed = True
@@ -245,6 +255,11 @@ class PPOAgent:
     @property
     def config(self) -> PPOConfig:
         return self._config
+
+    @property
+    def environment(self) -> gym.Env[FloatArray, FloatArray]:
+        """Raw observations with the same optional reward wrapper as training."""
+        return self._acting_environment
 
     def learn(
         self,
@@ -452,6 +467,7 @@ class PPOAgent:
             model = model_type.load(  # pyright: ignore[reportUnknownMemberType]
                 model_path, env=vec_env, device=config.device,
             )
+            acting_environment = cls._install_future_reward(vec_env, model, environment)
         except BaseException as error:
             _close_after_failure(base_env, error)
             raise
@@ -461,9 +477,38 @@ class PPOAgent:
         agent._environment = environment
         agent._vec_env = vec_env
         agent._model = model
+        agent._acting_environment = acting_environment
         agent._closed = False
 
         return agent
+
+    @staticmethod
+    def _install_future_reward(
+        vec_env: VecNormalize, model: PPO, environment: RacingEnvironment,
+    ) -> gym.Env[FloatArray, FloatArray]:
+        settings = getattr(model, "future_reward_config", None)
+        if not isinstance(settings, FuturePredictionRewardConfig) or not settings.enabled:
+            return environment
+        policy = model.policy
+        if not isinstance(policy, RacingActorCriticPolicy) or not policy.prediction_points:
+            raise ValueError("Future reward requires the saved shared trajectory policy.")
+        base = vec_env.unwrapped
+        if not isinstance(base, DummyVecEnv) or base.num_envs != 1:
+            raise ValueError("Future reward currently supports one live racing environment.")
+        monitor = base.envs[0]
+        if not isinstance(monitor, Monitor):
+            raise ValueError("Future reward must be installed before Monitor.")
+        policy.configure_reward_capture(True)
+
+        def snapshot() -> tuple[FloatArray, int]:
+            prediction = policy.take_reward_prediction()
+            step = getattr(model, "num_timesteps")
+            assert isinstance(step, int)
+            return prediction[0].cpu().numpy().astype(np.float32), step
+
+        wrapped = FutureRewardWrapper(environment, settings, snapshot)
+        monitor.env = wrapped
+        return wrapped
 
     def set_evaluation_mode(self) -> None:
         """Freeze normalization statistics for deterministic evaluation."""

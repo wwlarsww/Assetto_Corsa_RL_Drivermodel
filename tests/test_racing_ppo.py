@@ -100,11 +100,10 @@ def test_original_callback_can_stop_collection_before_any_update() -> None:
 
 
 @pytest.mark.parametrize("future_enabled", [False, True])
-def test_future_reward_cannot_be_enabled_before_validation(future_enabled: bool) -> None:
+def test_future_reward_is_configurable_with_an_enabled_predictor(future_enabled: bool) -> None:
     config = small_config()
     config = replace(config, reward=replace(config.reward, future_prediction=replace(config.reward.future_prediction, enabled=future_enabled)))
+    config.validate()
     if future_enabled:
-        with pytest.raises(ValueError, match="Future prediction reward"):
-            config.validate()
-    else:
-        config.validate()
+        with pytest.raises(ValueError, match="enabled predictor"):
+            replace(config, predictor=replace(config.predictor, enabled=False)).validate()

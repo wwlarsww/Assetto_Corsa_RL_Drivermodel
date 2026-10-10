@@ -360,8 +360,8 @@ def create_training_environment(config: TrainingConfig) -> RacingEnvironment:
         pulse_duration=simulator.pulse_duration,
     )
     reward_parameters = asdict(config.reward)
-    # Future prediction reward settings are recorded, but never reach the
-    # current calculator while that reward remains explicitly disabled.
+    # The base calculator evaluates the actual step. The agent installs the
+    # optional prediction reward wrapper before monitoring/normalization.
     reward_parameters.pop("future_prediction")
     return RacingEnvironment(
         session_manager=session, simulator_controller=controller,
@@ -458,6 +458,7 @@ def create_agent(environment: RacingEnvironment, config: TrainingConfig) -> PPOA
     return PPOAgent(
         environment, config=config.agent_config(),
         predictor_config=config.predictor, control_interval=config.environment.control_interval,
+        future_reward_config=config.reward.future_prediction,
         policy_kwargs={
             "features_extractor_class": SharedFeatureExtractor,
             "features_extractor_kwargs": {
@@ -525,14 +526,15 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
                     config=replace(saved_config.agent_config(), device=args.device),
                 )
             agent.set_evaluation_mode()
+            acting_environment = agent.environment
             for episode in range(args.episodes):
-                observation, _ = environment.reset(seed=args.seed + episode)
+                observation, _ = acting_environment.reset(seed=args.seed + episode)
                 total_reward = 0.0
                 while True:
-                    observation, reward, terminated, truncated, info = environment.step(
+                    observation, reward, terminated, truncated, info = acting_environment.step(
                         agent.predict(observation, deterministic=True)
                     )
-                    total_reward += reward
+                    total_reward += float(reward)
                     if terminated or truncated:
                         print(f"Episode {episode + 1}: reward={total_reward:.3f}, termination={info.get('termination')}")
                         break

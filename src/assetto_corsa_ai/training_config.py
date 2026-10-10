@@ -10,6 +10,7 @@ import tomllib
 from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 from assetto_corsa_ai.agent import PPOConfig
+from assetto_corsa_ai.future_reward import FuturePredictionRewardConfig
 from assetto_corsa_ai.predictor import PredictorConfig, horizon_indices
 
 
@@ -48,13 +49,6 @@ class SimulatorConfig:
     car_index: int
     activation_timeout: float
     pulse_duration: float
-
-
-@dataclass(frozen=True)
-class FuturePredictionRewardConfig:
-    enabled: bool
-    performance_weight: float
-    style_weight: float
 
 
 @dataclass(frozen=True)
@@ -274,10 +268,9 @@ class TrainingConfig:
         if self.predictor.enabled and min(offsets) > self.ppo.n_steps:
             raise ValueError("The PPO rollout must cover at least the first prediction horizon.")
         future = self.reward.future_prediction
-        if future.performance_weight < 0 or future.style_weight < 0:
-            raise ValueError("Future prediction reward weights must be non-negative.")
-        if future.enabled:
-            raise ValueError("Future prediction reward is not validated yet; leave it disabled.")
+        future.validate()
+        if future.enabled and not self.predictor.enabled:
+            raise ValueError("Future prediction reward requires an enabled predictor.")
         if self.trajectories.enabled:
             raise ValueError("Trajectory export is not implemented; set trajectories.enabled = false.")
 

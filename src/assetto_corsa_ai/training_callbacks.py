@@ -8,6 +8,7 @@ from stable_baselines3.common.logger import KVWriter
 from stable_baselines3.common.vec_env import VecNormalize
 
 from assetto_corsa_ai.training_run import MetricValue, TrainingRun
+from assetto_corsa_ai.reward import Reward
 
 
 class RunMetricsWriter(KVWriter):
@@ -30,6 +31,15 @@ class RunMetricsWriter(KVWriter):
             "predictor_forward_mae": "train/predictor_forward_mae",
             "predictor_lateral_mae": "train/predictor_lateral_mae",
             "learning_rate": "train/learning_rate",
+            "performance_step": "reward/performance_step",
+            "performance_prediction": "reward/performance_prediction",
+            "style_step": "reward/style_step",
+            "style_prediction": "reward/style_prediction",
+            "termination_penalty": "reward/termination_penalty",
+            "total_reward": "reward/total",
+            "future_weight_scale": "reward/future_weight_scale",
+            "mean_predicted_progress": "prediction/mean_predicted_progress",
+            "mean_abs_lateral_offset": "prediction/mean_abs_lateral_offset",
         }
         if not any(name in key_values for name in names.values()):
             return
@@ -52,6 +62,8 @@ class TrainingRunCallback(BaseCallback):
         self.interval = interval
         self.episodes = 0
         self._last_checkpoint_step = 0
+        self._reward_samples: dict[str, list[float]] = {}
+        self._pending_reward_metrics: dict[str, float] = {}
 
     def _on_training_start(self) -> None:
         self._last_checkpoint_step = self.num_timesteps
@@ -60,10 +72,23 @@ class TrainingRunCallback(BaseCallback):
         # The previous PPO update has now finished. Flush its losses at that
         # update's step instead of labelling them with the next rollout's step.
         if "train/policy_gradient_loss" in self.logger.name_to_value:
+            self._record_reward_metrics()
             self.logger.dump(self.num_timesteps)
+        self._reward_samples = {}
 
     def _on_step(self) -> bool:
         for info in self.locals["infos"]:
+            reward = info.get("reward")
+            if isinstance(reward, Reward):
+                values = {f"reward/{name}": float(getattr(reward, name)) for name in (
+                    "performance_step", "performance_prediction", "style_step",
+                    "style_prediction", "termination_penalty", "total",
+                )}
+                values["reward/future_weight_scale"] = float(info.get("future_weight_scale", 0.0))
+                for name in ("mean_predicted_progress", "mean_abs_lateral_offset"):
+                    values[f"prediction/{name}"] = float(info.get(f"prediction_{name}", 0.0))
+                for name, value in values.items():
+                    self._reward_samples.setdefault(name, []).append(value)
             episode = info.get("episode")
             if episode is not None:
                 self.episodes += 1
@@ -80,6 +105,19 @@ class TrainingRunCallback(BaseCallback):
             self._last_checkpoint_step = self.num_timesteps
         return True
 
+    def _on_rollout_end(self) -> None:
+        # Hold raw component means until the matching PPO update finishes;
+        # SB3's pre-update dump must not create a separate/mislabeled row.
+        self._pending_reward_metrics = {
+            name: sum(values) / len(values) for name, values in self._reward_samples.items()
+        }
+
+    def _record_reward_metrics(self) -> None:
+        for name, value in self._pending_reward_metrics.items():
+            self.logger.record(name, value)
+        self._pending_reward_metrics = {}
+
     def _on_training_end(self) -> None:
         # SB3 logs before its PPO update. Flush the final update as well.
+        self._record_reward_metrics()
         self.logger.dump(self.num_timesteps)

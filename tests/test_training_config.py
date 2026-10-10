@@ -20,7 +20,8 @@ def test_complete_template_roundtrips_without_hidden_agent_settings() -> None:
     assert config.network.feature_layers == (512, 512)
     assert config.predictor.enabled
     assert agent.delta_actions
-    assert not config.reward.future_prediction.enabled
+    assert config.reward.future_prediction.enabled
+    assert config.reward.future_prediction.horizon_discount == 0.95
     assert not config.trajectories.enabled
 
 
@@ -40,7 +41,10 @@ def test_complete_template_roundtrips_without_hidden_agent_settings() -> None:
     ("optimizer_betas = [0.9, 0.999]", "optimizer_betas = [1.0, 0.999]"),
     ("output_dimensions = 2", "output_dimensions = 3"),
     ("prediction_points = 10", "prediction_points = 9"),
-    ("[reward.future_prediction]\nenabled = false", "[reward.future_prediction]\nenabled = true"),
+    ("horizon_discount = 0.95", "horizon_discount = 1.1"),
+    ("warmup_steps = 20000", "warmup_steps = -1"),
+    ("ramp_steps = 30000", "ramp_steps = -1"),
+    ("enabled = true\nlayers = [128, 128]", "enabled = false\nlayers = [128, 128]"),
     ("action_mode = \"delta\"", "action_mode = \"unsupported\""),
     ("enabled = false # Reserved", "enabled = true # Reserved"),
     ("car_index = 0", "car_index = 1"),

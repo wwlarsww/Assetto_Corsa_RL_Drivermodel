@@ -54,6 +54,8 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
         self.output_dimensions = output_dimensions
         self.predictor_layers = predictor_layers
         self.delta_actions = delta_actions
+        self.capture_reward_prediction = False
+        self._reward_prediction: torch.Tensor | None = None
         # SB3's constructor uses unparameterized Gymnasium Space annotations.
         super().__init__(observation_space, action_space, lr_schedule, **kwargs)  # pyright: ignore[reportUnknownMemberType]
 
@@ -100,6 +102,7 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
 
     def forward(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         features = self._shared_features(obs)
+        self._capture_prediction(features)
         latent_pi, latent_vf = self.mlp_extractor(features)
         distribution = self._distribution(latent_pi, obs)
         actions = distribution.get_actions(deterministic=deterministic)
@@ -107,7 +110,24 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
 
     def get_distribution(self, obs: PyTorchObs) -> Distribution:
         features = self._shared_features(obs)
+        self._capture_prediction(features)
         return self._distribution(self.mlp_extractor.forward_actor(features), obs)
+
+    def _capture_prediction(self, features: torch.Tensor) -> None:
+        if self.capture_reward_prediction:
+            with torch.no_grad():
+                self._reward_prediction = self._trajectory(features).detach()
+
+    def configure_reward_capture(self, enabled: bool) -> None:
+        self.capture_reward_prediction = enabled
+        self._reward_prediction = None
+
+    def take_reward_prediction(self) -> torch.Tensor:
+        """Consume one rollout snapshot; never reuse a previous transition."""
+        prediction, self._reward_prediction = self._reward_prediction, None
+        if prediction is None:
+            raise RuntimeError("The current action has no detached trajectory prediction.")
+        return prediction
 
     def evaluate_with_prediction(
         self, obs: torch.Tensor, actions: torch.Tensor,
@@ -127,7 +147,7 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
         return self.value_net(latent_vf), distribution.log_prob(actions), distribution.entropy()
 
     def prediction_for_reward(self, observation: torch.Tensor) -> torch.Tensor:
-        """Local metre coordinates, detached for validation and future reward use."""
+        """Local metre coordinates, detached for validation or external reward use."""
         with torch.no_grad():
             return self._trajectory(self._shared_features(observation)).detach()
 

@@ -24,6 +24,9 @@ METRIC_FIELDS = (
     "step", "episode", "episode_reward", "episode_length", "policy_loss",
     "value_loss", "entropy_loss", "predictor_loss", "learning_rate",
     "predictor_valid_samples", "predictor_forward_mae", "predictor_lateral_mae",
+    "performance_step", "performance_prediction", "style_step", "style_prediction",
+    "termination_penalty", "total_reward", "future_weight_scale",
+    "mean_predicted_progress", "mean_abs_lateral_offset",
 )
 MetricValue = int | float | None
 

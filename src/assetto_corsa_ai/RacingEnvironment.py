@@ -270,6 +270,17 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
             forward=point.forward,
         )
 
+    @property
+    def reference_projector(self) -> TrackProjector:
+        """Use the active step-reward reference line for external projections."""
+        if self._track_projector is None:
+            raise RuntimeError("Reference geometry is unavailable before reset().")
+        return self._track_projector
+
+    @property
+    def reward_calculator(self) -> RewardCalculator:
+        return self._reward_calculator
+
     def reset(
         self,
         *,

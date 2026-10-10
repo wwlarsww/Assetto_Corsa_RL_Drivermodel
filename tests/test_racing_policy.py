@@ -22,6 +22,7 @@ def small_config() -> TrainingConfig:
     return replace(
         config, network=replace(config.network, feature_layers=(7, 9), feature_dim=11, policy_layers=(6,), value_layers=(5,)),
         predictor=replace(config.predictor, layers=(3, 4)),
+        reward=replace(config.reward, future_prediction=replace(config.reward.future_prediction, enabled=False)),
         ppo=replace(config.ppo, n_steps=32, batch_size=16, n_epochs=1),
         training=replace(config.training, device="cpu", verbose=0),
     )

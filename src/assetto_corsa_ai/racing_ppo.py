@@ -22,6 +22,7 @@ import torch
 from torch.nn import functional as F
 
 from assetto_corsa_ai.predictor import PredictorConfig, build_trajectory_targets, horizon_indices, masked_predictor_loss
+from assetto_corsa_ai.future_reward import FuturePredictionRewardConfig
 from assetto_corsa_ai.racing_policy import RacingActorCriticPolicy
 
 
@@ -122,9 +123,13 @@ class RacingPPO(PPO):
     def __init__(
         self, policy: str | type[ActorCriticPolicy], env: GymEnv | str,
         *, predictor_config: PredictorConfig | None = None,
+        future_reward_config: FuturePredictionRewardConfig | None = None,
         control_interval: float | None = None, **kwargs: Any,
     ) -> None:
         self.predictor_config = predictor_config
+        # Persist reward settings with the policy, so load/resume reinstalls
+        # the runtime wrapper. The auxiliary PPO update itself is unchanged.
+        self.future_reward_config = future_reward_config
         self.horizon_steps: tuple[int, ...] = ()
         self._last_vehicle_poses: tuple[NDArray[np.float64], NDArray[np.float64]] | None = None
         if predictor_config is not None and predictor_config.enabled:
