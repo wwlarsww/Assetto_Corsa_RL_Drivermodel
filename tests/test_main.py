@@ -88,7 +88,7 @@ def test_training_checkpoint_resume_and_drive(tmp_path: Path, monkeypatch: pytes
         rows = list(csv.DictReader(stream))
     assert any(row["episode_reward"] == "22.5" for row in rows)
     assert any(row["policy_loss"] and row["value_loss"] and row["learning_rate"] for row in rows)
-    assert all(not row["predictor_loss"] for row in rows)
+    assert any(row["predictor_loss"] and int(row["predictor_valid_samples"]) > 0 for row in rows)
     snapshot = {path.relative_to(first): path.read_bytes() for path in first.rglob("*") if path.is_file()}
     config_file.write_text(content.replace('resume_from = ""', f'resume_from = "{checkpoint.as_posix()}"'))
     resumed = MemoryRacingEnvironment()

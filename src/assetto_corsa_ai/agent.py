@@ -28,6 +28,9 @@ import torch
 from torch import nn
 
 from assetto_corsa_ai.RacingEnvironment import RacingEnvironment
+from assetto_corsa_ai.predictor import PredictorConfig
+from assetto_corsa_ai.racing_policy import ActionAwareVecNormalize, RacingActorCriticPolicy
+from assetto_corsa_ai.racing_ppo import RacingPPO
 
 
 FloatArray = NDArray[np.float32]
@@ -100,6 +103,7 @@ class PPOConfig:
     verbose: int = 1
     device: str = "auto"
     tensorboard_log: str | None = None
+    delta_actions: bool = False
 
     def validate(self) -> None:
         """Validate configuration values that would otherwise fail later."""
@@ -171,6 +175,8 @@ class PPOAgent:
         *,
         config: PPOConfig | None = None,
         policy_kwargs: dict[str, Any] | None = None,
+        predictor_config: PredictorConfig | None = None,
+        control_interval: float | None = None,
     ) -> None:
         self._config = config if config is not None else PPOConfig()
         self._config.validate()
@@ -180,8 +186,21 @@ class PPOAgent:
         self._closed = False
 
         try:
-            self._model = PPO(
-                policy="MlpPolicy",
+            auxiliary = predictor_config is not None and predictor_config.enabled
+            custom_policy = auxiliary or self._config.delta_actions
+            model_type = RacingPPO if custom_policy else PPO
+            options = dict(policy_kwargs or {})
+            extra: dict[str, Any] = {}
+            if custom_policy:
+                options.update(
+                    delta_actions=self._config.delta_actions,
+                    predictor_layers=predictor_config.layers if auxiliary and predictor_config else (),
+                    prediction_points=predictor_config.prediction_points if auxiliary and predictor_config else 0,
+                    output_dimensions=predictor_config.output_dimensions if predictor_config else 2,
+                )
+                extra.update(predictor_config=predictor_config, control_interval=control_interval)
+            self._model = model_type(
+                policy=RacingActorCriticPolicy if custom_policy else "MlpPolicy",
                 env=self._vec_env,
                 learning_rate=self._config.learning_rate,
                 n_steps=self._config.n_steps,
@@ -203,7 +222,8 @@ class PPOAgent:
                 verbose=self._config.verbose,
                 device=self._config.device,
                 tensorboard_log=self._config.tensorboard_log,
-                policy_kwargs=policy_kwargs,
+                policy_kwargs=options,
+                **extra,
             )
         except BaseException as error:
             _close_after_failure(self._vec_env, error)
@@ -317,6 +337,23 @@ class PPOAgent:
 
         return action
 
+    def predict_trajectory(self, observation: FloatArray) -> FloatArray:
+        """Detached (horizon, forward/left) metre coordinates for validation/reward."""
+        self._ensure_open()
+        if not isinstance(self._model.policy, RacingActorCriticPolicy):
+            raise RuntimeError("Trajectory predictor is disabled.")
+        raw = np.asarray(observation, dtype=np.float32)
+        if raw.shape != self._environment.observation_space.shape or not np.isfinite(raw).all():
+            raise ValueError("Observation must have the declared shape and finite values.")
+        normalized = self._vec_env.normalize_obs(raw.copy())
+        assert isinstance(normalized, np.ndarray)
+        tensor = torch.as_tensor(normalized, device=self._model.device).unsqueeze(0)
+        prediction = self._model.policy.prediction_for_reward(tensor)
+        points = prediction[0].cpu().numpy().astype(np.float32)
+        if not np.isfinite(points).all():
+            raise ValueError("Predicted trajectory contains non-finite values.")
+        return points
+
     def save(
         self,
         directory: str | Path,
@@ -393,12 +430,13 @@ class PPOAgent:
         for path in (model_path, normalizer_path):
             if not path.is_file():
                 raise FileNotFoundError(f"Incomplete training snapshot: {path}")
-        return cls._load_pair(model_path, normalizer_path, environment, config, training)
+        return cls._load_pair(model_path, normalizer_path, environment, config, training, model_type=RacingPPO)
 
     @classmethod
     def _load_pair(
         cls, model_path: Path, normalizer_path: Path, environment: RacingEnvironment,
         config: PPOConfig, training: bool,
+        *, model_type: type[PPO] = RacingPPO,
     ) -> "PPOAgent":
 
         base_env = cls._make_base_vec_env(
@@ -411,7 +449,7 @@ class PPOAgent:
             vec_env.norm_reward = config.normalize_reward if training else False
 
             # SB3's load signature leaves **kwargs untyped.
-            model = PPO.load(  # pyright: ignore[reportUnknownMemberType]
+            model = model_type.load(  # pyright: ignore[reportUnknownMemberType]
                 model_path, env=vec_env, device=config.device,
             )
         except BaseException as error:
@@ -461,7 +499,8 @@ class PPOAgent:
         )
 
         try:
-            return VecNormalize(
+            normalizer_type = ActionAwareVecNormalize if self._config.delta_actions else VecNormalize
+            return normalizer_type(
                 base_env,
                 training=True,
                 norm_obs=self._config.normalize_observations,

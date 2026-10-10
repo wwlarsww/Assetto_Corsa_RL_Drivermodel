@@ -23,6 +23,7 @@ from uuid import uuid4
 METRIC_FIELDS = (
     "step", "episode", "episode_reward", "episode_length", "policy_loss",
     "value_loss", "entropy_loss", "predictor_loss", "learning_rate",
+    "predictor_valid_samples", "predictor_forward_mae", "predictor_lateral_mae",
 )
 MetricValue = int | float | None
 

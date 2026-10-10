@@ -10,6 +10,7 @@ import tomllib
 from typing import Any, TypeVar, cast, get_args, get_origin, get_type_hints
 
 from assetto_corsa_ai.agent import PPOConfig
+from assetto_corsa_ai.predictor import PredictorConfig, horizon_indices
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class EnvironmentConfig:
     reset_timeout: float
     reset_poll_interval: float
     start_sampler: str
+    action_mode: str
     front_axle_distance: float
     rear_axle_distance: float
     minimum_speed: float
@@ -49,6 +51,13 @@ class SimulatorConfig:
 
 
 @dataclass(frozen=True)
+class FuturePredictionRewardConfig:
+    enabled: bool
+    performance_weight: float
+    style_weight: float
+
+
+@dataclass(frozen=True)
 class RewardConfig:
     performance_weight: float
     style_weight: float
@@ -56,6 +65,7 @@ class RewardConfig:
     off_track_penalty: float
     stuck_penalty: float
     collision_penalty: float
+    future_prediction: FuturePredictionRewardConfig
 
 
 @dataclass(frozen=True)
@@ -78,15 +88,6 @@ class NetworkConfig:
     optimizer_betas: tuple[float, ...]
     optimizer_weight_decay: float
     optimizer_amsgrad: bool
-
-
-@dataclass(frozen=True)
-class PredictorConfig:
-    enabled: bool
-    layers: tuple[int, ...]
-    prediction_points: int
-    output_dimensions: int
-    loss_weight: float
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,8 @@ Section = TypeVar("Section")
 
 
 def _typed_value(value: object, expected: Any, name: str) -> object:
+    if isinstance(expected, type) and hasattr(expected, "__dataclass_fields__"):
+        return _section({name: value}, name, cast(type[Any], expected))
     if get_origin(expected) is tuple:
         if not isinstance(value, list):
             raise ValueError(f"{name} must be an array.")
@@ -197,6 +200,7 @@ class TrainingConfig:
             **asdict(self.ppo), **asdict(self.normalization),
             seed=self.training.seed, device=self.training.device,
             verbose=self.training.verbose, tensorboard_log=None,
+            delta_actions=self.environment.action_mode == "delta",
         )
 
     def validate(self) -> None:
@@ -246,6 +250,8 @@ class TrainingConfig:
             raise ValueError("Assist modes must be 0 (off), 1 (factory) or 2 (on).")
         if env.start_sampler != "uniform_track_point":
             raise ValueError("Only the uniform_track_point start sampler is implemented.")
+        if env.action_mode not in ("delta", "absolute"):
+            raise ValueError("action_mode must be delta or absolute.")
         for name in ("off_track_penalty", "stuck_penalty", "collision_penalty"):
             if getattr(self.reward, name) > 0:
                 raise ValueError(f"{name} must be non-positive.")
@@ -260,8 +266,18 @@ class TrainingConfig:
             raise ValueError("Supported network settings: activation tanh/relu, optimizer adam.")
         if len(net.optimizer_betas) != 2 or any(not 0 <= value < 1 for value in net.optimizer_betas):
             raise ValueError("optimizer_betas must contain two values in [0, 1).")
-        if self.predictor.enabled:
-            raise ValueError("The auxiliary predictor is not implemented; set predictor.enabled = false.")
+        if self.predictor.output_dimensions != 2:
+            raise ValueError("Local trajectory points require output_dimensions = 2 (forward, left).")
+        if len(self.predictor.horizons_seconds) != self.predictor.prediction_points:
+            raise ValueError("prediction_points must match the number of horizons_seconds.")
+        offsets = horizon_indices(self.predictor.horizons_seconds, env.control_interval)
+        if self.predictor.enabled and min(offsets) > self.ppo.n_steps:
+            raise ValueError("The PPO rollout must cover at least the first prediction horizon.")
+        future = self.reward.future_prediction
+        if future.performance_weight < 0 or future.style_weight < 0:
+            raise ValueError("Future prediction reward weights must be non-negative.")
+        if future.enabled:
+            raise ValueError("Future prediction reward is not validated yet; leave it disabled.")
         if self.trajectories.enabled:
             raise ValueError("Trajectory export is not implemented; set trajectories.enabled = false.")
 

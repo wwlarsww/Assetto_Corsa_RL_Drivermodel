@@ -26,6 +26,9 @@ class RunMetricsWriter(KVWriter):
             "value_loss": "train/value_loss",
             "entropy_loss": "train/entropy_loss",
             "predictor_loss": "train/predictor_loss",
+            "predictor_valid_samples": "train/predictor_valid_samples",
+            "predictor_forward_mae": "train/predictor_forward_mae",
+            "predictor_lateral_mae": "train/predictor_lateral_mae",
             "learning_rate": "train/learning_rate",
         }
         if not any(name in key_values for name in names.values()):
@@ -33,7 +36,7 @@ class RunMetricsWriter(KVWriter):
         row: dict[str, MetricValue] = {"step": step}
         for column, name in names.items():
             if name in key_values:
-                row[column] = float(key_values[name])
+                row[column] = int(key_values[name]) if column == "predictor_valid_samples" else float(key_values[name])
         self.run.append_metrics(row)
 
     def close(self) -> None:

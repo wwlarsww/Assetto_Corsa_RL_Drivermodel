@@ -327,6 +327,7 @@ def create_environment(
 
 def create_training_environment(config: TrainingConfig) -> RacingEnvironment:
     """Compose training exclusively from the validated run configuration."""
+    config.validate()
     settings, simulator = config.environment, config.simulator
     ac_directory = Path(simulator.assetto_corsa_directory)
 
@@ -358,12 +359,16 @@ def create_training_environment(config: TrainingConfig) -> RacingEnvironment:
         car_index=simulator.car_index, activation_timeout=simulator.activation_timeout,
         pulse_duration=simulator.pulse_duration,
     )
+    reward_parameters = asdict(config.reward)
+    # Future prediction reward settings are recorded, but never reach the
+    # current calculator while that reward remains explicitly disabled.
+    reward_parameters.pop("future_prediction")
     return RacingEnvironment(
         session_manager=session, simulator_controller=controller,
         telemetry_reader_factory=TelemetryReader, static_info_reader_factory=StaticInfoReader,
         track_geometry_loader=load_geometry, observation_builder_factory=build_observation,
         termination_checker_factory=build_termination,
-        reward_calculator=RewardCalculator(**asdict(config.reward)),
+        reward_calculator=RewardCalculator(**reward_parameters),
         observation_size=10 + 4 * len(settings.lookahead_distances) + 2 * len(settings.reference_distances),
         default_scenario=SimulatorScenario(
             car=settings.car, track=settings.track,
@@ -445,6 +450,33 @@ def confirm_driving() -> bool:
     return True
 
 
+def create_agent(environment: RacingEnvironment, config: TrainingConfig) -> PPOAgent:
+    """Use the same TOML-driven policy construction in training and validation."""
+    config.validate()
+    network = config.network
+    activation = nn.Tanh if network.activation == "tanh" else nn.ReLU
+    return PPOAgent(
+        environment, config=config.agent_config(),
+        predictor_config=config.predictor, control_interval=config.environment.control_interval,
+        policy_kwargs={
+            "features_extractor_class": SharedFeatureExtractor,
+            "features_extractor_kwargs": {
+                "layers": network.feature_layers, "features_dim": network.feature_dim,
+                "activation": activation,
+            },
+            "net_arch": {"pi": list(network.policy_layers), "vf": list(network.value_layers)},
+            "activation_fn": activation, "ortho_init": network.ortho_init,
+            "log_std_init": network.log_std_init,
+            "optimizer_class": Adam, "optimizer_kwargs": {
+                "eps": network.optimizer_epsilon, "betas": network.optimizer_betas,
+                "weight_decay": network.optimizer_weight_decay,
+                "amsgrad": network.optimizer_amsgrad,
+            },
+            "share_features_extractor": True,
+        },
+    )
+
+
 def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
     """Train/resume PPO or evaluate with frozen observation statistics."""
     agent: PPOAgent | None = None
@@ -469,24 +501,7 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
                     config=config.agent_config(), training=True,
                 )
             else:
-                network = config.network
-                activation = nn.Tanh if network.activation == "tanh" else nn.ReLU
-                agent = PPOAgent(environment, config=config.agent_config(), policy_kwargs={
-                    "features_extractor_class": SharedFeatureExtractor,
-                    "features_extractor_kwargs": {
-                        "layers": network.feature_layers, "features_dim": network.feature_dim,
-                        "activation": activation,
-                    },
-                    "net_arch": {"pi": list(network.policy_layers), "vf": list(network.value_layers)},
-                    "activation_fn": activation, "ortho_init": network.ortho_init,
-                    "log_std_init": network.log_std_init,
-                    "optimizer_class": Adam, "optimizer_kwargs": {
-                        "eps": network.optimizer_epsilon, "betas": network.optimizer_betas,
-                        "weight_decay": network.optimizer_weight_decay,
-                        "amsgrad": network.optimizer_amsgrad,
-                    },
-                    "share_features_extractor": True,
-                })
+                agent = create_agent(environment, config)
             logger = Logger(None, [RunMetricsWriter(run)])
             if config.training.verbose:
                 logger.output_formats.append(HumanOutputFormat(sys.stdout))
