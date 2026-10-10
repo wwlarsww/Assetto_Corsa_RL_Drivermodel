@@ -65,6 +65,12 @@ Delta controls retain their existing `[-1, 1]` scale in VecNormalize; physical
 features are normalized. The policy adds its delta to the observed controls
 before SB3 clips the final action. `action_mode = "absolute"` is also supported.
 
-Future prediction reward stays disabled and its existing reward terms stay
-zero. Selected trajectory export is reserved for later and disabled. No full
+The template enables [future prediction reward](reward.md) with 20,000 warmup
+steps and a 30,000-step linear ramp. Its initial 4096-step run therefore trains
+the auxiliary predictor without adding future reward. The schedule follows
+total model timesteps across resume; disabling the extension leaves step
+rewards unchanged. Raw reward component means, weight scale and prediction
+diagnostics join the PPO update rows in `metrics.csv`, before normalization.
+
+Selected trajectory export is reserved for later and disabled. No full
 rollouts, `architecture.txt` or separate predictor weights are saved.

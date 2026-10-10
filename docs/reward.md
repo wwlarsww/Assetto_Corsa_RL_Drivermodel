@@ -8,7 +8,7 @@ The current implementation consists of:
 - a **style imitation reward** for staying close to the reference line
 - a **termination penalty** when an episode ends because of an undesirable state
 
-Prediction-based reward terms are already reserved for a future auxiliary trajectory predictor.
+Optional look-ahead terms evaluate the detached trajectory from the auxiliary predictor.
 
 ---
 
@@ -28,10 +28,10 @@ flowchart TD
     R --> T
 
     P --> PS[Step Performance]
-    P --> PP[Prediction Performance - future]
+    P --> PP[Prediction Performance]
 
     S --> SS[Step Style]
-    S --> SP[Prediction Style - future]
+    S --> SP[Prediction Style]
 
     PS --> DS[Progress since previous step]
     PP --> PD[Predicted future progress]
@@ -48,13 +48,15 @@ flowchart TD
 
 ## Current Reward
 
-The current reward is
+The combined reward is
 
 \[
 r_t =
 r_{p,t}
 +
-\lambda_s r_{s,t}
+\hat r_{p,t}
++
+\lambda_s (r_{s,t} + \hat r_{s,t})
 +
 p_{term}
 \]
@@ -182,41 +184,35 @@ This makes reward tuning and training diagnostics easier because each component 
 
 ---
 
-## Future Predictor Extension
+## Future Predictor Reward
 
-A future auxiliary trajectory predictor will estimate several future vehicle positions.
-
-The reward structure is already prepared for two additional terms:
-
-- `performance_prediction`
-- `style_prediction`
-
-The intended formulation is:
-
-\[
-r_t =
-r_{p,t}
-+
-\hat r_{p,t}
-+
-\lambda_s
-\left(
-r_{s,t}
-+
-\hat r_{s,t}
-\right)
-+
-p_{term}
-\]
-
-The future predicted points can be projected onto the same reference spline and evaluated using the same progress and distance concepts as the current step.
-
-Until the predictor is implemented:
+`FuturePredictorRewardCalculator` transforms local `(forward, left)` points
+using the observation's vehicle pose and projects them onto the same reference
+line as the step reward. Every point contributes, using
+`alpha_i = horizon_discount ** (i - 1)`:
 
 ```text
-performance_prediction = 0.0
-style_prediction       = 0.0
+performance_prediction = scale * future.performance_weight * sum(alpha_i * delta_s_i)
+style_prediction       = scale * future.style_weight * sum(alpha_i * q_i) / sum(alpha_i)
 ```
+
+`delta_s_i` starts at the current progress and uses the existing closed-track
+wraparound rule. `q_i` uses the same Gaussian and `style_sigma` as step style.
+Its weighted mean lies between zero and one; the future style weight scales
+that mean, and the existing outer `style_weight` applies in the combined reward.
+
+`[reward.future_prediction]` controls enablement, both weights, discount,
+`warmup_steps` and `ramp_steps`. The template uses weights `0.05`, discount
+`0.95`, 20,000 warmup steps and a 30,000-step linear ramp. Disabled or warmup
+terms are exactly zero; auxiliary predictor training continues throughout.
+
+During collection, `FutureRewardWrapper` consumes one detached prediction
+from the action's shared feature tensor, before Monitor and VecNormalize.
+The resulting reward enters PPO once and is never recomputed during updates.
+Actual later positions are auxiliary-loss targets only. Raw component means,
+weight scale and prediction diagnostics are logged with each PPO update;
+mean predicted progress measures cumulative advance from the current pose.
+See [predictor validation](predictor.md) for per-point projections and rewards.
 
 ---
 
