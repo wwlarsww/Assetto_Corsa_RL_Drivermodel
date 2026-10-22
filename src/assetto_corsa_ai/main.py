@@ -439,6 +439,7 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
     """Train/resume PPO or evaluate with frozen observation statistics."""
     agent: PPOAgent | None = None
     logger: Logger | None = None
+    callback: TrainingRunCallback | None = None
     try:
         if args.mode == "reset":
             observation, info = environment.reset(seed=args.seed)
@@ -470,7 +471,8 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
             if config.training.verbose:
                 logger.output_formats.append(HumanOutputFormat(sys.stdout))
             agent.model.set_logger(logger)
-            callback = TrainingRunCallback(run, config.training.checkpoint_interval_updates)
+            callback = TrainingRunCallback(run, config.training.checkpoint_interval_updates,
+                                           publish_latest=config.diagnostics.enabled)
             agent.learn(
                 config.training.total_timesteps, callback=callback,
                 reset_num_timesteps=not bool(config.training.resume_from),
@@ -508,6 +510,8 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
             else:
                 environment.close()
         finally:
+            if callback is not None:
+                callback.close()
             if logger is not None:
                 logger.close()
 

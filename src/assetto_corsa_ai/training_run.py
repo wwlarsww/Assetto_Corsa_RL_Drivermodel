@@ -12,6 +12,7 @@ import json
 from math import isfinite
 from pathlib import Path
 import platform
+import os
 import re
 import shutil
 import subprocess
@@ -113,6 +114,38 @@ class TrainingRun:
 
     def save_final_model(self, model: ModelSaver, normalizer: NormalizerSaver) -> Path:
         return self._save_pair(self.directory / "final", model, normalizer)
+
+    def save_latest(self, step: int, policy_updates: int, model: ModelSaver, normalizer: NormalizerSaver) -> Path:
+        """Publish an immutable pair, then atomically replace its small pointer.
+
+        This rotating diagnostics cache keeps the two newest versions; regular
+        checkpoints and final artifacts retain their append-only semantics.
+        """
+        if any(type(value) is not int or value < 0 for value in (step, policy_updates)):
+            raise ValueError("Snapshot step and policy updates must be non-negative integers.")
+        latest = self.directory / "latest"
+        latest.mkdir(exist_ok=True)
+        target = latest / f"snapshot_{uuid4().hex}"
+        self._save_pair(target, model, normalizer)
+        pointer = latest / f".current_{uuid4().hex}.tmp"
+        try:
+            with pointer.open("x", encoding="utf-8") as stream:
+                json.dump({"directory": target.name, "step": step, "policy_updates": policy_updates,
+                           "created_at": datetime.now().astimezone().isoformat()}, stream)
+            os.replace(pointer, latest / "current.json")
+        finally:
+            pointer.unlink(missing_ok=True)
+        older = sorted((p for p in latest.glob("snapshot_*") if p != target),
+                       key=lambda p: p.stat().st_mtime_ns, reverse=True)
+        for directory in older[1:]:
+            # Cleanup is confined to versions exclusively owned by this cache.
+            if (re.fullmatch(r"snapshot_[0-9a-f]{32}", directory.name)
+                    and directory.resolve().is_relative_to(latest.resolve()) and not directory.is_symlink()):
+                try:
+                    shutil.rmtree(directory)
+                except OSError:
+                    pass  # A reader may still have a Windows file handle open.
+        return target
 
     def _save_pair(self, target: Path, model: ModelSaver, normalizer: NormalizerSaver) -> Path:
         target.mkdir(exist_ok=False)

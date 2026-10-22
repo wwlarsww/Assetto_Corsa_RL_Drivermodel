@@ -59,7 +59,7 @@ runs/<YYYYMMDD_HHMMSS_track_car_random-id>/
 
 The exact config and automatically collected Git/software provenance are
 written once. A dirty Git status means the recorded commit alone cannot
-reconstruct the implementation. Completed snapshots are never overwritten.
+reconstruct the implementation. Completed checkpoints and final models are never overwritten.
 All policy, value, predictor and shared-extractor weights belong to
 `model.zip`; `vecnormalize.pkl` must accompany it.
 
@@ -69,6 +69,10 @@ optimizes that rollout; `n_epochs` does not determine the checkpoint cadence.
 Zero disables periodic checkpoints; successful training still writes `final/`.
 Directory names retain the total step count. The completed-phase counter is
 saved in `model.zip`, continues across resume and appears in `metrics.csv`.
+
+`[diagnostics].enabled` additionally publishes a paired `latest/` cache after
+each completed phase for the [independent monitor](diagnostics.md). This rotating
+cache keeps two versions and does not change the regular checkpoint cadence.
 
 [Training callbacks](../src/assetto_corsa_ai/training_callbacks.py) append raw
 episode rewards and separate PPO update rows to `metrics.csv`. Update rows

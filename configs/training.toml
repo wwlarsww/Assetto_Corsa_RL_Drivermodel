@@ -135,3 +135,6 @@ resume_from = "" # Previous run's checkpoints/step_XXXXXX or final directory
 
 [trajectories]
 enabled = false # Reserved for selected debug/evaluation trajectories
+
+[diagnostics]
+enabled = true # Publish a paired latest snapshot after each completed PPO update

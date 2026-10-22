@@ -38,6 +38,7 @@ provenance, metrics and paired model/normalization checkpoints.
 | Episodes and observations | [Environment](docs/racing_environment.md), [features](docs/observation.md) | [Environment](src/assetto_corsa_ai/RacingEnvironment.py), [builder](src/assetto_corsa_ai/observation_builder.py) |
 | Reward and termination | [Reward](docs/reward.md), [termination](docs/termination.md) | [Reward calculator](src/assetto_corsa_ai/reward.py), [termination checker](src/assetto_corsa_ai/termination.py) |
 | Learning and run records | [Training](docs/agent_training.md), [predictor](docs/predictor.md) | [Agent](src/assetto_corsa_ai/agent.py), [run management](src/assetto_corsa_ai/training_run.py) |
+| Passive live monitoring and lap replay | [Diagnostics](docs/diagnostics.md) | [Monitor](tools/diagnostics_monitor.py), [sources](tools/diagnostics/sources.py) |
 
 ## Development
 

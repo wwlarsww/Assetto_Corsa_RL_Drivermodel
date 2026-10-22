@@ -80,8 +80,11 @@ def test_training_checkpoint_resume_and_drive(tmp_path: Path, monkeypatch: pytes
     assert environment.close_calls == 1
     first = next((tmp_path / "runs").iterdir())
     assert {path.name for path in first.iterdir()} == {
-        "config.toml", "metadata.json", "metrics.csv", "checkpoints", "final",
+        "config.toml", "metadata.json", "metrics.csv", "checkpoints", "final", "latest",
     }
+    latest = json.loads((first / "latest/current.json").read_text())
+    assert latest["step"] == 4 and latest["policy_updates"] == 1
+    assert (first / "latest" / latest["directory"] / "vecnormalize.pkl").is_file()
     checkpoint = first / "checkpoints/step_000004"
     assert (checkpoint / "model.zip").is_file()
     assert (checkpoint / "vecnormalize.pkl").is_file()

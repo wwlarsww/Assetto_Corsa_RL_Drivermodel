@@ -10,6 +10,7 @@ from stable_baselines3.common.vec_env import VecNormalize
 from assetto_corsa_ai.training_run import MetricValue, TrainingRun
 from assetto_corsa_ai.reward import Reward
 from assetto_corsa_ai.racing_ppo import RacingPPO
+from assetto_corsa_ai.training_snapshots import LatestSnapshotWriter
 
 
 class RunMetricsWriter(KVWriter):
@@ -62,7 +63,7 @@ class RunMetricsWriter(KVWriter):
 class TrainingRunCallback(BaseCallback):
     """Save paired checkpoints after completed PPO updates, never during collection."""
 
-    def __init__(self, run: TrainingRun, interval_updates: int) -> None:
+    def __init__(self, run: TrainingRun, interval_updates: int, *, publish_latest: bool = False) -> None:
         if type(interval_updates) is not int or interval_updates < 0:
             raise ValueError("interval_updates must be a non-negative integer.")
         super().__init__()
@@ -72,11 +73,22 @@ class TrainingRunCallback(BaseCallback):
         self._last_recorded_update = 0
         self._reward_samples: dict[str, list[float]] = {}
         self._pending_reward_metrics: dict[str, float] = {}
+        self.publish_latest = publish_latest
+        self._latest_writer: LatestSnapshotWriter | None = None
 
     def _on_training_start(self) -> None:
         if not isinstance(self.model, RacingPPO):
             raise ValueError("Training run checkpoints require RacingPPO's completed-update counter.")
         self._last_recorded_update = self.model.completed_policy_updates
+        if self.publish_latest:
+            self._latest_writer = LatestSnapshotWriter(self.run)
+            self._publish_latest()
+
+    def _publish_latest(self) -> None:
+        assert isinstance(self.model, RacingPPO)
+        normalizer = self.model.get_vec_normalize_env()
+        if self._latest_writer is not None and isinstance(normalizer, VecNormalize):
+            self._latest_writer.submit(self.model, normalizer, self.model.completed_policy_updates)
 
     def _on_rollout_start(self) -> None:
         # SB3 calls this after the previous update, before collecting again.
@@ -130,7 +142,18 @@ class TrainingRunCallback(BaseCallback):
         self._pending_reward_metrics = {}
 
     def _on_training_end(self) -> None:
-        self._finish_policy_update()
+        try:
+            self._finish_policy_update()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Also called on interruption, when SB3 skips on_training_end()."""
+        if self._latest_writer is not None:
+            self._latest_writer.close()
+            if self._latest_writer.error:
+                print(f"Latest diagnostics snapshot unavailable: {self._latest_writer.error}")
+            self._latest_writer = None
 
     def _finish_policy_update(self) -> None:
         assert isinstance(self.model, RacingPPO)
@@ -141,6 +164,7 @@ class TrainingRunCallback(BaseCallback):
         # never increments the model counter and cannot create a checkpoint.
         self._record_reward_metrics()
         self.logger.dump(self.model.num_timesteps)
+        self._publish_latest()
         if self.interval_updates and updates % self.interval_updates == 0:
             normalizer = self.model.get_vec_normalize_env()
             if not isinstance(normalizer, VecNormalize):

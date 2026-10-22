@@ -17,6 +17,17 @@ from assetto_corsa_ai.predictor import PredictorConfig, horizon_indices
 
 
 @dataclass(frozen=True)
+class DiagnosticsConfig:
+    """Optional publication of model/normalization pairs for external tools."""
+
+    enabled: bool = False
+
+    def validate(self) -> None:
+        if type(self.enabled) is not bool:
+            raise ValueError("diagnostics.enabled must be a boolean.")
+
+
+@dataclass(frozen=True)
 class EnvironmentConfig:
     car: str
     track: str
@@ -177,6 +188,7 @@ class TrainingConfig:
     predictor: PredictorConfig
     training: TrainingSettings
     trajectories: TrajectoryConfig
+    diagnostics: DiagnosticsConfig
     toml_text: str
 
     @classmethod
@@ -204,6 +216,7 @@ class TrainingConfig:
         )
 
     def validate(self) -> None:
+        self.diagnostics.validate()
         self.start.validate()
         self.agent_config().validate()
         env, sim, net, train = self.environment, self.simulator, self.network, self.training
@@ -295,6 +308,11 @@ class TrainingConfig:
 def _upgrade_legacy_config(data: dict[str, Any]) -> None:
     """Read archived configs without editing their immutable TOML files."""
     # Archived runs predate rolling starts and retain their stationary reset.
+    if "diagnostics" not in data:
+        data["diagnostics"] = asdict(DiagnosticsConfig())
+    elif isinstance(data["diagnostics"], dict) and set(cast(dict[str, Any], data["diagnostics"])) == {"enabled", "host", "port", "publish_rate_hz"}:
+        # Read the earlier UDP settings without carrying a socket into training.
+        data["diagnostics"] = {"enabled": data["diagnostics"]["enabled"]}
     if "start" not in data:
         data["start"] = asdict(StartConfig())
     network, ppo, training = data.get("network"), data.get("ppo"), data.get("training")
