@@ -4,8 +4,6 @@ The documentation has two complementary layers:
 
 - **Project guides** explain architecture, workflows, units and design decisions.
   They are maintained as Markdown files under `docs/`.
-- **Class diagrams** visualize statically inferred class relationships and direct
-  class-symbol references. They are generated from the same source tree.
 - **API reference pages** are generated from Python modules, signatures, type
   annotations and docstrings. They are rebuilt whenever the documentation builds.
 
@@ -45,8 +43,6 @@ Linux without Windows shared memory, Qt, Torch or a running simulator.
 | Document a method's behavior | Its Python docstring and type annotations |
 | Add a Python module to the reference | Nothing extra: modules in `src/` and `tools/` are discovered automatically |
 | Change reference generation or repository-link handling | `scripts/gen_reference.py` |
-| Change class analysis or diagram rendering | `scripts/class_diagrams.py` |
-| Change generated diagram pages and their index | `scripts/gen_diagrams.py` |
 | Change dependencies | The `docs` extra in `pyproject.toml` |
 | Change validation or deployment | `.github/workflows/docs.yml` |
 
@@ -60,28 +56,6 @@ Link guides to relevant repository files using relative links, for example
 pages in the built site. Other linked files, such as the TOML template, receive
 generated source views. The original Markdown links continue to work on GitHub.
 The strict build rejects missing local links and invalid anchors.
-
-## Automatic class diagrams
-
-[Class diagrams](diagrams/index.md) are regenerated on each build using
-Pyreverse from the documentation-only Pylint dependency. Additional direct
-class references cover constructor annotations and class usage that structural
-inference alone may miss. No Graphviz executable or application runtime is required.
-
-Each public class has a direct-neighborhood view with incoming and outgoing
-relationships. Each module has a combined view of its public classes. Both
-include relationship tables and API links; new classes appear automatically.
-Private helpers and external library classes are excluded. See the diagram
-guide for the meaning and limits of inferred relationships.
-
-Validate the diagram analyzer independently:
-
-```powershell
-python -m unittest discover -s scripts/tests -v
-```
-
-These checks also run in the GitHub Pages build. Source folders are watched
-during `mkdocs serve`, so changes to code regenerate the diagrams and API pages.
 
 ## GitHub Pages
 

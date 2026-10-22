@@ -7,8 +7,6 @@ calculations and learning. [The composition root](../src/assetto_corsa_ai/main.p
 builds the environment and agent from [the run configuration](../configs/training.toml).
 The [project overview](index.md#system-overview) shows the simulator/agent loop.
 For a concrete walkthrough, read [a training step](training_step.md).
-Explore [automatically generated class diagrams](diagrams/index.md) to inspect
-direct dependencies, dependents and links to the API reference.
 
 ## Repository map
 

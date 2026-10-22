@@ -5,7 +5,6 @@ filesystem; tracked docs and application modules are never rewritten or imported
 """
 
 from pathlib import Path, PurePosixPath
-import ast
 import posixpath
 import re
 from urllib.parse import unquote, urlsplit
@@ -64,11 +63,6 @@ for source_root, group in ((ROOT / "src", "Core"), (ROOT / "tools", "Tools")):
                 concept = "diagnostics.md"
             concept_link = posixpath.relpath(concept, destination.parent.as_posix())
             stream.write(f"For context, see the [project guide]({concept_link}).\n\n")
-            public_classes = [node for node in ast.parse(source.read_text(encoding="utf-8")).body
-                              if isinstance(node, ast.ClassDef) and not node.name.startswith("_")]
-            if public_classes:
-                diagram = posixpath.relpath(f"diagrams/modules/{module}.md", destination.parent.as_posix())
-                stream.write(f"[Class dependency diagram]({diagram}).\n\n")
             stream.write(f"::: {module}\n")
 
 with mkdocs_gen_files.open("reference/SUMMARY.md", "w") as stream:
