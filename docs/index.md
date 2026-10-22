@@ -1,26 +1,32 @@
 # Assetto Corsa RL
 
-This project builds a driver that learns to control a car in Assetto Corsa
-through reinforcement learning. The agent observes the vehicle and the road,
-chooses steering and throttle/brake inputs, and receives rewards for its driving.
-PPO improves those decisions using the experience collected in the simulator.
+A driver that learns from the car and the road. This project uses reinforcement
+learning to develop continuous steering and throttle/brake control in Assetto
+Corsa, combining vehicle dynamics, track awareness and learned trajectory
+prediction in a reproducible training platform.
 
-The project provides a modular training platform with separate responsibilities
-for simulator integration, driving-state calculations and neural-network learning.
+## Learning with PPO
+
+The agent uses **Proximal Policy Optimization (PPO)**. It supports continuous
+actions, and its clipped learning objective discourages overly large policy
+changes during training. This makes it a practical baseline for learning vehicle
+control. The project builds on the
+[Stable-Baselines3 implementation](https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html)
+and extends its shared neural network with an auxiliary trajectory predictor.
 
 ## System overview
 
+The project follows the classic reinforcement learning loop: the agent acts,
+the simulator advances, and the environment returns an observation and reward.
+Collected experience is then used to improve the driving policy.
+
 ```mermaid
 flowchart LR
-    AC[Assetto Corsa and CSP] -->|Telemetry| E[Gymnasium environment]
-    G[Track geometry] --> E
-    E -->|Observation| A[PPO agent]
-    A -->|Steering and throttle/brake| E
-    E -->|Controls| AC
-    E -->|Step reward and episode status| R[Reward wrapper]
-    A --> P[Trajectory predictor]
-    P -->|Optional future reward| R
-    R --> A
+    A["PPO agent<br/>Learns the driving policy"]
+    E["Environment<br/>Assetto Corsa + Gymnasium"]
+    A -->|"Action: steering and throttle/brake"| E
+    E -->|"Next observation: vehicle and road features"| A
+    E -->|"Reward: driving performance"| A
 ```
 
 The current training template uses a **BMW Z4 GT3 at Monza** with a **50 ms**
@@ -28,29 +34,46 @@ control interval. The policy changes existing controls incrementally. An
 auxiliary predictor estimates ten future vehicle positions up to one second
 ahead. These are [configuration choices](configuration.md), not fixed platform limits.
 
-## Where to start
+## What the agent observes
 
-| I want to… | Read |
+The policy receives compact numerical features describing the car and the
+road ahead:
+
+| Feature group | Information |
 | --- | --- |
-| Understand the system | [Architecture](architecture.md) and [a training step](training_step.md) |
-| Run the project locally | [Getting started](getting_started.md) |
-| Set up an experiment | [Configuration](configuration.md) |
-| Train, resume or evaluate a model | [Training and evaluation](agent_training.md) |
-| Inspect driving data | [Diagnostics and replay](diagnostics.md) |
-| Look up a class or method | [Generated API reference](reference/index.md) |
-| Improve these docs | [Documentation guide](documentation.md) |
+| Vehicle motion | Speed, longitudinal/lateral acceleration and yaw rate |
+| Tyre dynamics | Front/rear slip ratios and slip angles |
+| Track awareness | Upcoming road boundaries and reference-line waypoints in vehicle-relative coordinates |
+| Applied controls | Current steering and combined throttle/brake input |
 
-## Implemented capabilities
+[Observation details](observation.md) explain the features and their units.
 
-| Area | Available behavior |
+## What the rewards encourage
+
+- **Forward progress:** reward for advancing along the track's reference line.
+- **Line following:** a higher style reward closer to that reference line.
+- **Avoiding episode failures:** penalties for off-track driving, getting stuck
+  or prolonged backward driving; collision penalties require a connected detector.
+
+Weights control the balance between progress and line following.
+See the [reward design](reward.md) for the full breakdown.
+
+## Learning to anticipate motion
+
+Alongside the policy and value estimate, the **predictor learns future vehicle
+positions from actual driving experience**. It shares the policy's feature
+extractor, adding a supervised learning task to PPO. Optionally, predicted
+progress and reference-line proximity also contribute to the reward.
+[Explore the predictor](predictor.md).
+
+## Explore the project
+
+| Capability | Continue here |
 | --- | --- |
-| Simulator | Shared-memory telemetry, CSP controls and session management |
-| Environment | Gymnasium interface, sampled track starts, resets and optional rolling starts |
-| Driving state | Vehicle and tyre dynamics, track boundaries and reference waypoints |
-| Learning | PPO with a shared feature extractor for policy, value and predictor heads |
-| Reward | Progress, reference-line proximity, termination penalties and optional prediction rewards |
-| Experiments | Archived configuration, provenance, metrics and paired model/normalization checkpoints |
-| Analysis | Independent live monitor, complete-lap recording and replay |
+| Simulator integration and the driving loop | [Architecture](architecture.md), [a training step](training_step.md) |
+| Reproducible training, checkpoints and evaluation | [Getting started](getting_started.md), [configuration](configuration.md), [training guide](agent_training.md) |
+| Live monitoring, lap recording and replay | [Diagnostics](diagnostics.md) |
+| Python components and extension points | [API reference](reference/index.md), [documentation guide](documentation.md) |
 
 ## Current limitations
 
