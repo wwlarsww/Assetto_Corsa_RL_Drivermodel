@@ -14,6 +14,19 @@ control. The project builds on the
 [Stable-Baselines3 implementation](https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html)
 and extends its shared neural network with an auxiliary trajectory predictor.
 
+### PPO policy structure
+
+[![PPO policy structure: observation inputs feed a shared feature extractor with policy, value and predictor heads. Current controls are added to the policy's delta mean.](assets/ppo-policy-structure.svg)](assets/ppo-policy-structure.svg)
+
+The policy, value function and predictor use the **same extracted features**.
+Current controls bypass the network and are added to the policy's delta mean;
+sampling and action limits then produce the applied controls.
+The predictor's 20 outputs represent ten future positions in local
+`(forward, left)` coordinates.
+
+*Click the diagram to enlarge it. Layer sizes and prediction horizons follow the
+[training configuration](configuration.md).*
+
 ## System overview
 
 The project follows the classic reinforcement learning loop: the agent acts,
