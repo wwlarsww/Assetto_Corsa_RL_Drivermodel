@@ -57,6 +57,24 @@ pages in the built site. Other linked files, such as the TOML template, receive
 generated source views. The original Markdown links continue to work on GitHub.
 The strict build rejects missing local links and invalid anchors.
 
+## Mathematical notation
+
+Inline formulas use `$...$`; display equations use `$$` delimiters on
+separate lines, with blank lines before and after the block:
+
+```text
+The reward at step $t$ is:
+
+$$
+r_t = w_p r_{\text{progress},t} + w_l r_{\text{line},t}.
+$$
+```
+
+The Arithmatex Markdown extension preserves LaTeX expressions for MathJax,
+which renders them in the browser. Fractions, Greek symbols and
+`\begin{cases} ... \end{cases}` are supported. The browser loads MathJax
+from a CDN, so rendering requires network access.
+
 ## GitHub Pages
 
 The repository uses a custom GitHub Actions workflow rather than committing
