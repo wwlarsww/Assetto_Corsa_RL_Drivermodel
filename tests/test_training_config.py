@@ -25,7 +25,8 @@ def test_complete_template_roundtrips_without_hidden_agent_settings() -> None:
     assert config.reward.future_prediction.enabled
     assert config.reward.future_prediction.horizon_discount == 0.95
     assert not config.trajectories.enabled
-    assert agent.initial_action_std == 0.20
+    assert agent.initial_action_std == config.ppo.initial_action_std
+    assert agent.initial_longitudinal_mean == config.ppo.initial_longitudinal_mean
     assert agent.max_steering_delta == 0.05
     assert agent.max_longitudinal_delta == 0.10
     assert agent.longitudinal_deadband == 0.05
@@ -119,6 +120,20 @@ def test_resume_allows_budget_changes_but_not_different_training_semantics() -> 
 def test_periodic_checkpoints_can_be_disabled() -> None:
     content = replace_setting(TEMPLATE.read_text(encoding="utf-8"), "checkpoint_interval_updates", "checkpoint_interval_updates = 0")
     assert TrainingConfig.from_toml(content).training.checkpoint_interval_updates == 0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "1.1", "-1.1", "true"])
+def test_invalid_initial_longitudinal_mean_is_rejected(value: str) -> None:
+    content = replace_setting(TEMPLATE.read_text(), "initial_longitudinal_mean", f"initial_longitudinal_mean = {value}")
+    with pytest.raises(ValueError, match="initial_longitudinal_mean"):
+        TrainingConfig.from_toml(content)
+
+
+def test_archived_configs_keep_unbiased_initial_exploration() -> None:
+    content = replace_setting(TEMPLATE.read_text(), "initial_longitudinal_mean", None)
+    config = TrainingConfig.from_toml(content)
+    assert config.ppo.initial_longitudinal_mean == 0.0
+    assert config.toml_text == content
 
 
 def test_legacy_run_config_keeps_original_action_semantics_and_exact_text() -> None:

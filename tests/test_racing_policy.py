@@ -24,9 +24,49 @@ def small_config() -> TrainingConfig:
         config, network=replace(config.network, feature_layers=(7, 9), feature_dim=11, policy_layers=(6,), value_layers=(5,)),
         predictor=replace(config.predictor, layers=(3, 4)),
         reward=replace(config.reward, future_prediction=replace(config.reward.future_prediction, enabled=False)),
-        ppo=replace(config.ppo, n_steps=32, batch_size=16, n_epochs=1),
+        ppo=replace(config.ppo, n_steps=32, batch_size=16, n_epochs=1,
+                    initial_action_std=0.2, initial_longitudinal_mean=0.0),
         training=replace(config.training, device="cpu", verbose=0),
     )
+
+
+def test_positive_initial_mean_prefers_acceleration_but_keeps_braking_exploration(tmp_path: Path) -> None:
+    config = small_config()
+    config = replace(config, ppo=replace(config.ppo, initial_action_std=0.5, initial_longitudinal_mean=0.3))
+    agent = create_agent(ValidationEnvironment(synthetic_rollout(config)), config)
+    try:
+        policy = agent.model.policy
+        assert isinstance(policy, RacingActorCriticPolicy) and isinstance(policy.action_net, nn.Linear)
+        assert float(policy.action_net.bias[1].detach()) == pytest.approx(0.3)
+        assert float(policy.action_net.bias[0].detach()) == pytest.approx(0.0)
+        shape = agent.vec_env.observation_space.shape
+        assert shape is not None
+        observations = torch.zeros((8192, shape[0]), device=policy.device)
+        torch.manual_seed(42)  # pyright: ignore[reportUnknownMemberType]
+        with torch.no_grad():
+            actions = policy.get_distribution(observations).sample()
+        throttle_fraction = float((actions[:, 1] > config.action.longitudinal_deadband).float().mean())
+        brake_fraction = float((actions[:, 1] < -config.action.longitudinal_deadband).float().mean())
+        assert 0.65 < throttle_fraction < 0.80
+        assert 0.15 < brake_fraction < 0.30
+        # The preference is a trainable parameter, not a persistent control override.
+        obs = observations[:4]
+        neutral = torch.zeros((4, 2), device=policy.device)
+        policy.optimizer.zero_grad()
+        _, log_prob, _ = policy.evaluate_actions(obs, neutral)
+        (-log_prob.mean()).backward()  # pyright: ignore[reportUnknownMemberType]
+        policy.optimizer.step()
+        trained_bias = policy.action_net.bias.detach().clone()
+        assert float(trained_bias[1]) != pytest.approx(0.3)
+        agent.save(tmp_path / "model")
+        loaded = PPOAgent.load(tmp_path / "model", ValidationEnvironment(synthetic_rollout(config)), device="cpu")
+        try:
+            assert isinstance(loaded.model.policy.action_net, nn.Linear)
+            torch.testing.assert_close(loaded.model.policy.action_net.bias, trained_bias, atol=0, rtol=0)
+        finally:
+            loaded.close()
+    finally:
+        agent.close()
 
 
 def test_all_three_heads_receive_the_same_feature_tensor_and_predictor_gradient() -> None:

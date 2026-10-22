@@ -30,12 +30,12 @@ max_longitudinal_delta = 0.10 # Maximum throttle/brake change per control step
 longitudinal_deadband = 0.05 # Small longitudinal commands settle to neutral
 
 [start]
-enabled = false # Enable after validating the AI-file speed unit and live pre-roll
-reference_speed_unit = "unvalidated" # Set to "kmh" or "mps" after validation
-reference_speed_factor_min = 0.30
-reference_speed_factor_max = 0.60
-min_speed_kmh = 20.0
-max_speed_kmh = 120.0
+enabled = false # Start stationary; initial longitudinal exploration encourages acceleration
+reference_speed_unit = "mps" # Set to "kmh" or "mps" after validation
+reference_speed_factor_min = 0.50 # Minimum speed factor for the reference speed (0 disables minimum speed factor)
+reference_speed_factor_max = 0.80 # Maximum speed factor for the reference speed (0 disables maximum speed factor)
+min_speed_kmh = 20.0 # Minimum speed for the reference speed in km/h (0 disables minimum speed)
+max_speed_kmh = 120.0 # Maximum speed for the reference speed in km/h (0 disables maximum speed)
 max_attempts = 3
 timeout = 20.0
 acceleration_estimate_mps2 = 3.0
@@ -74,11 +74,12 @@ warmup_steps = 0 # Only auxiliary training during warmup
 ramp_steps = 0 # Ramp up the auxiliary loss weight over this many steps
 
 [termination]
-stuck_time = 3.0 # Time in seconds to consider the car stuck (0 disables stuck termination)
+stuck_time = 2.0 # Time in seconds to consider the car stuck (0 disables stuck termination)
 minimum_progress = 1.0 # Minimum progress in meters per step to avoid termination (0 disables minimum progress termination)
 
 [ppo]
-initial_action_std = 0.20 # Initial Gaussian standard deviation; learned during training
+initial_action_std = 0.50 # Initial Gaussian standard deviation; learned during training
+initial_longitudinal_mean = 0.30 # Initial actor bias; learned normally, no forced throttle
 learning_rate = 0.0003 # Learning rate for the optimizer (0 disables learning rate)
 gamma = 0.99 # Discount factor for the reward calculation (0 disables discounting)
 gae_lambda = 0.95 # Lambda parameter for Generalized Advantage Estimation (0 disables GAE)

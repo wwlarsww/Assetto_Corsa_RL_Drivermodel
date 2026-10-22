@@ -104,6 +104,7 @@ class TrajectoryConfig:
 class PPOSettings:
     learning_rate: float
     initial_action_std: float
+    initial_longitudinal_mean: float
     gamma: float
     gae_lambda: float
     clip_range: float
@@ -297,6 +298,8 @@ def _upgrade_legacy_config(data: dict[str, Any]) -> None:
     if "start" not in data:
         data["start"] = asdict(StartConfig())
     network, ppo, training = data.get("network"), data.get("ppo"), data.get("training")
+    if isinstance(ppo, dict):
+        cast(dict[str, Any], ppo).setdefault("initial_longitudinal_mean", 0.0)
     if isinstance(network, dict) and "log_std_init" in network and isinstance(ppo, dict):
         network, ppo = cast(dict[str, Any], network), cast(dict[str, Any], ppo)
         if "initial_action_std" in ppo or "action" in data:

@@ -110,6 +110,7 @@ class PPOConfig:
     tensorboard_log: str | None = None
     delta_actions: bool = False
     initial_action_std: float = 1.0
+    initial_longitudinal_mean: float = 0.0
     max_steering_delta: float = 0.0
     max_longitudinal_delta: float = 0.0
     longitudinal_deadband: float = 0.0
@@ -121,6 +122,8 @@ class PPOConfig:
         """Validate configuration values that would otherwise fail later."""
 
         self.action_config().validate()
+        if not isfinite(self.initial_longitudinal_mean) or not -1.0 <= self.initial_longitudinal_mean <= 1.0:
+            raise ValueError("initial_longitudinal_mean must be finite and in [-1, 1].")
         if not isfinite(self.initial_action_std) or self.initial_action_std <= 0.0:
             raise ValueError("initial_action_std must be finite and positive.")
         if not isfinite(self.learning_rate) or self.learning_rate <= 0.0:
@@ -207,13 +210,14 @@ class PPOAgent:
 
         try:
             auxiliary = predictor_config is not None and predictor_config.enabled
-            custom_policy = auxiliary or self._config.delta_actions
+            custom_policy = auxiliary or self._config.delta_actions or self._config.initial_longitudinal_mean != 0.0
             options = dict(policy_kwargs or {})
             options["log_std_init"] = log(self._config.initial_action_std)
             extra: dict[str, Any] = {}
             if custom_policy:
                 options.update(
                     delta_actions=self._config.delta_actions,
+                    initial_longitudinal_mean=self._config.initial_longitudinal_mean,
                     predictor_layers=predictor_config.layers if auxiliary and predictor_config else (),
                     prediction_points=predictor_config.prediction_points if auxiliary and predictor_config else 0,
                     output_dimensions=predictor_config.output_dimensions if predictor_config else 2,

@@ -25,6 +25,11 @@ step budget; [future reward warmup](reward.md#future-predictor-reward) is config
 
 The policy adds deltas to current controls. `ppo.initial_action_std` sets the
 initial Gaussian exploration scale; it remains learnable during training.
+`ppo.initial_longitudinal_mean` initializes the trainable longitudinal actor bias.
+For stationary starts, a positive value encourages acceleration while Gaussian
+sampling retains braking exploration. It changes only new-policy initialization;
+loaded checkpoints retain their trained weights. The current template disables
+pre-roll and starts at 0 km/h.
 `[action]` limits executed steering/longitudinal changes per step and defines
 the longitudinal deadband. At 50 ms, limits of 0.05/0.10 correspond to at most
 1.0/2.0 control units per second. Small longitudinal commands settle to neutral

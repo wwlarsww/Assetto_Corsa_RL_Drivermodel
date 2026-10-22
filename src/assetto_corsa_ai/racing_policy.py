@@ -42,7 +42,7 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
         self, observation_space: Box[np.float32], action_space: Box[np.float32],
         lr_schedule: Schedule, *, predictor_layers: tuple[int, ...] = (),
         prediction_points: int = 0, output_dimensions: int = 2,
-        delta_actions: bool = False, **kwargs: Any,
+        delta_actions: bool = False, initial_longitudinal_mean: float = 0.0, **kwargs: Any,
     ) -> None:
         if kwargs.get("share_features_extractor", True) is not True:
             raise ValueError("Racing policy requires one shared feature extractor.")
@@ -54,6 +54,9 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
         self.output_dimensions = output_dimensions
         self.predictor_layers = predictor_layers
         self.delta_actions = delta_actions
+        if not np.isfinite(initial_longitudinal_mean) or not -1.0 <= initial_longitudinal_mean <= 1.0:
+            raise ValueError("initial_longitudinal_mean must be finite and in [-1, 1].")
+        self.initial_longitudinal_mean = initial_longitudinal_mean
         self.capture_reward_prediction = False
         self._reward_prediction: torch.Tensor | None = None
         # SB3's constructor uses unparameterized Gymnasium Space annotations.
@@ -61,6 +64,12 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
 
     def _build(self, lr_schedule: Schedule) -> None:
         super()._build(lr_schedule)
+        if not isinstance(self.action_net, nn.Linear):
+            raise ValueError("Racing policy requires a linear Gaussian action head.")
+        # A learnable initial preference, applied once. PPO still samples and
+        # evaluates the same distribution; loading restores the trained bias.
+        with torch.no_grad():
+            self.action_net.bias[1] = self.initial_longitudinal_mean
         modules: list[nn.Module] = []
         size = self.features_dim
         if self.prediction_points:
@@ -156,4 +165,5 @@ class RacingActorCriticPolicy(ActorCriticPolicy):
             **super()._get_constructor_parameters(),
             "predictor_layers": self.predictor_layers, "prediction_points": self.prediction_points,
             "output_dimensions": self.output_dimensions, "delta_actions": self.delta_actions,
+            "initial_longitudinal_mean": self.initial_longitudinal_mean,
         }

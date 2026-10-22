@@ -453,6 +453,12 @@ def run_agent(environment: RacingEnvironment, args: argparse.Namespace) -> None:
             run.save_config(config.toml_text)
             run.save_metadata(Path(__file__).resolve().parents[2])
             print(f"Training run: {run.directory}")
+            if config.start.enabled:
+                print(f"Rolling starts enabled: spline speed unit={config.start.reference_speed_unit}, "
+                      f"factor={config.start.reference_speed_factor_min:.0%}–{config.start.reference_speed_factor_max:.0%}, "
+                      f"speed limits={config.start.min_speed_kmh:g}–{config.start.max_speed_kmh:g} km/h")
+            else:
+                print("Rolling starts disabled: episodes start at 0 km/h ([start].enabled = false).")
             if config.training.resume_from:
                 agent = PPOAgent.load_snapshot(
                     Path(config.training.resume_from), environment,
