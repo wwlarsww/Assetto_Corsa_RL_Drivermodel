@@ -27,6 +27,13 @@ class TrackProjection:
     left_clearance: float
     right_clearance: float
 
+    def spline_distance(self, track: TrackGeometry, spline_length: float) -> float:
+        """Convert geometric projection to the spline metadata used by perception."""
+        points = track.points
+        start = points[self.segment_index].length
+        end = points[self.segment_index + 1].length if self.segment_index + 1 < len(points) else spline_length
+        return start + self.segment_fraction * (end - start)
+
 
 class TrackProjector:
     """Find the nearest point on a 3D polyline using cached segment arrays.
@@ -139,3 +146,13 @@ class TrackProjector:
             left_clearance=float(widths[0]) - lateral_offset,
             right_clearance=float(widths[1]) + lateral_offset,
         )
+
+    def is_off_track(self, tyre_contact_points: tuple[Vector3, ...]) -> bool:
+        """A vehicle is outside if any of its four tyre contacts crosses an edge."""
+        if len(tyre_contact_points) != 4:
+            raise ValueError("Expected tyre contact points for exactly four wheels.")
+        for position in tyre_contact_points:
+            projection = self.project(position)
+            if projection.left_clearance < 0 or projection.right_clearance < 0:
+                return True
+        return False

@@ -47,6 +47,7 @@ from assetto_corsa_ai.termination import (
 )
 from assetto_corsa_ai.track_geometry import TrackGeometry
 from assetto_corsa_ai.track_projection import TrackProjection, TrackProjector
+from assetto_corsa_ai.vehicle_geometry import vehicle_forward
 from assetto_corsa_ai.episode_start import EpisodeStart, StartConfig
 from assetto_corsa_ai.reset_preroll import PreRollError, ResetPreRollController
 
@@ -791,11 +792,7 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
         # Perception interpolates TrackPoint.length, which uses AC's spline
         # coordinate. Convert through the projected segment, keeping reward
         # progress in the projector's geometric coordinate.
-        points = self._track_geometry.points
-        index = projection.segment_index
-        start_s = points[index].length
-        end_s = points[index + 1].length if index + 1 < len(points) else self._static_info.track_spline_length
-        current_s = start_s + projection.segment_fraction * (end_s - start_s)
+        current_s = projection.spline_distance(self._track_geometry, self._static_info.track_spline_length)
 
         observation = self._observation_builder.build(
             telemetry=telemetry,
@@ -882,19 +879,7 @@ class RacingEnvironment(gym.Env[FloatArray, FloatArray]):
     ) -> Vector3:
         """Derive vehicle forward from tyre contact positions."""
 
-        fl, fr, rl, rr = (
-            telemetry.tyre_contact_points
-        )
-
-        vector: Vector3 = (
-            (fl[0] + fr[0] - rl[0] - rr[0]) / 2.0,
-            (fl[1] + fr[1] - rl[1] - rr[1]) / 2.0,
-            (fl[2] + fr[2] - rl[2] - rr[2]) / 2.0,
-        )
-
-        return RacingEnvironment._normalize_vector(
-            vector
-        )
+        return vehicle_forward(telemetry.tyre_contact_points)
 
     @staticmethod
     def _normalize_vector(

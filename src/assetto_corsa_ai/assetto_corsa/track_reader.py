@@ -3,7 +3,19 @@
 
 import struct
 from pathlib import Path
+from assetto_corsa_ai.static_info import SimulatorStaticInfo
 from assetto_corsa_ai.track_geometry import TrackGeometry, TrackPoint
+
+
+def track_ai_path(static_info: SimulatorStaticInfo, assetto_corsa_directory: Path) -> Path:
+    """Find the loaded layout's AI spline without falling back to a different layout."""
+    directory = assetto_corsa_directory / "content" / "tracks" / static_info.track_name
+    if static_info.track_configuration:
+        directory /= static_info.track_configuration
+    path = directory / "ai" / "fast_lane.ai"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing AI spline for loaded track/layout: {path}")
+    return path
 
 
 class AssettoCorsaTrackReader:

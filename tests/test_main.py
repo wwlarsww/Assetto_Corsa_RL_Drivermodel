@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from assetto_corsa_ai import main as application
+from assetto_corsa_ai import observation_builder as observation_module
 from assetto_corsa_ai.static_info import SimulatorStaticInfo
 from assetto_corsa_ai.training_config import TrainingConfig
 from test_agent import MemoryRacingEnvironment
@@ -139,8 +140,7 @@ def test_training_configuration_is_not_overridden_by_environment_variables(
     monkeypatch.setattr(application, "AssettoCorsaSessionManager", Mock())
     monkeypatch.setattr(application, "AssettoCorsaSimulatorController", Mock())
     dynamics = Mock()
-    monkeypatch.setattr(application, "TyreDynamicsCalculator", dynamics)
-    monkeypatch.setattr(application, "ObservationBuilder", Mock())
+    monkeypatch.setattr(observation_module, "TyreDynamicsCalculator", dynamics)
     estimator = Mock(side_effect=AssertionError("Explicit offsets need no live estimate"))
     monkeypatch.setattr(application, "estimate_axle_distances", estimator)
     application.create_training_environment(config)

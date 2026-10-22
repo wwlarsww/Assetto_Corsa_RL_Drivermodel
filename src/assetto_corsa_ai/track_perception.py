@@ -130,6 +130,13 @@ class TrackPerceptionCalculator:
         )
 
     @staticmethod
+    def vehicle_frame(
+        tyre_contact_points: tuple[tuple[float, float, float], ...],
+    ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+        """Expose the same horizontal frame to read-only diagnostic consumers."""
+        return TrackPerceptionCalculator._vehicle_frame(tyre_contact_points)
+
+    @staticmethod
     def _vehicle_frame(
         tyre_contact_points: tuple[tuple[float, float, float], ...],
     ) -> tuple[

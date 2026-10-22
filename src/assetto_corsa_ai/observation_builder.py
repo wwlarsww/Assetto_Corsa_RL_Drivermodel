@@ -1,5 +1,6 @@
 """Build simulator-independent observations for the RL agent."""
 
+from math import isfinite
 
 from assetto_corsa_ai.observation import Observation
 from assetto_corsa_ai.static_info import SimulatorStaticInfo
@@ -7,6 +8,7 @@ from assetto_corsa_ai.telemetry import TelemetryFrame
 from assetto_corsa_ai.track_geometry import TrackGeometry
 from assetto_corsa_ai.track_perception import TrackPerceptionCalculator
 from assetto_corsa_ai.tyre_dynamics import TyreDynamicsCalculator
+from assetto_corsa_ai.vehicle_geometry import estimate_axle_distances
 
 class ObservationBuilder:
     """Build an RL observation from vehicle and track state.
@@ -25,6 +27,26 @@ class ObservationBuilder:
     ) -> None:
         self._tyre_dynamics_calculator = tyre_dynamics_calculator
         self._track_perception_calculator = track_perception_calculator
+
+    @classmethod
+    def create(
+        cls, *, front_axle_distance: float = 0.0, rear_axle_distance: float = 0.0,
+        telemetry: TelemetryFrame | None = None, minimum_speed: float = 1.0,
+        lookahead_distances: tuple[float, ...] = TrackPerceptionCalculator.DEFAULT_LOOKAHEAD_DISTANCES,
+        reference_distances: tuple[float, ...] = TrackPerceptionCalculator.DEFAULT_REFERENCE_DISTANCES,
+    ) -> "ObservationBuilder":
+        """Compose the configured calculators; zero axle offsets request estimation."""
+        if any(not isfinite(value) or value < 0 for value in (front_axle_distance, rear_axle_distance)):
+            raise ValueError("Axle distances must be finite and non-negative.")
+        if not front_axle_distance or not rear_axle_distance:
+            if telemetry is None:
+                raise ValueError("Automatic axle estimation requires telemetry.")
+            front, rear = estimate_axle_distances(telemetry)
+            front_axle_distance, rear_axle_distance = front_axle_distance or front, rear_axle_distance or rear
+        return cls(
+            TyreDynamicsCalculator(front_axle_distance, rear_axle_distance, minimum_speed=minimum_speed),
+            TrackPerceptionCalculator(lookahead_distances, reference_distances),
+        )
 
     def build(
         self,

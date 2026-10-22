@@ -123,16 +123,7 @@ class EpisodeTerminationChecker:
         """Return True if at least one tyre is outside the track.
         This is determined by projecting the tyre contact points onto the track and checking the left and right clearances."""
 
-        if len(telemetry.tyre_contact_points) != 4:
-            raise ValueError("Expected tyre contact points for exactly four wheels.")
-
-        for tyre_position in telemetry.tyre_contact_points:
-            projection = self._track_projector.project(tyre_position)
-
-            if projection.left_clearance < 0.0 or projection.right_clearance < 0.0:
-                return True
-
-        return False
+        return self._track_projector.is_off_track(telemetry.tyre_contact_points)
 
     def _is_stuck_or_wrong_way(
         self,

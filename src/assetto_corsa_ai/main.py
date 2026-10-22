@@ -7,7 +7,7 @@ import argparse
 import sys
 from collections.abc import Callable
 from dataclasses import asdict, replace
-from math import hypot, isfinite
+from math import isfinite
 from pathlib import Path
 
 from stable_baselines3.common.logger import HumanOutputFormat, Logger
@@ -29,7 +29,7 @@ from assetto_corsa_ai.assetto_corsa.telemetry_reader import (
     TelemetryReader,
 )
 from assetto_corsa_ai.assetto_corsa.track_reader import (
-    AssettoCorsaTrackReader,
+    AssettoCorsaTrackReader, track_ai_path as resolve_track_ai_path,
 )
 from assetto_corsa_ai.observation_builder import (
     ObservationBuilder,
@@ -39,7 +39,7 @@ from assetto_corsa_ai.RacingEnvironment import (
 )
 from assetto_corsa_ai.agent import PPOAgent, SharedFeatureExtractor
 from assetto_corsa_ai.track_perception import TrackPerceptionCalculator
-from assetto_corsa_ai.tyre_dynamics import TyreDynamicsCalculator
+from assetto_corsa_ai.vehicle_geometry import estimate_axle_distances as derive_axle_distances
 from assetto_corsa_ai.training_config import TrainingConfig, checkpoint_config_path
 from assetto_corsa_ai.training_callbacks import RunMetricsWriter, TrainingRunCallback
 from assetto_corsa_ai.training_run import create_run_directory
@@ -112,34 +112,7 @@ def track_ai_path(
 ) -> Path:
     """Resolve the fast_lane.ai belonging to the loaded AC track."""
 
-    track_directory = (
-        assetto_corsa_directory / "content" / "tracks" / static_info.track_name
-    )
-
-    # Some AC tracks have multiple layouts.
-    track_configuration = getattr(
-        static_info,
-        "track_configuration",
-        None,
-    )
-
-    if track_configuration:
-        layout_path = track_directory / track_configuration / "ai" / "fast_lane.ai"
-
-        if not layout_path.is_file():
-            raise FileNotFoundError(f"Missing AI spline for loaded layout: {layout_path}")
-        return layout_path
-
-    default_path = track_directory / "ai" / "fast_lane.ai"
-
-    if not default_path.is_file():
-        raise FileNotFoundError(
-            "Could not find fast_lane.ai for loaded track: "
-            f"{static_info.track_name!r}. "
-            f"Expected: {default_path}"
-        )
-
-    return default_path
+    return resolve_track_ai_path(static_info, assetto_corsa_directory)
 
 
 def load_track_geometry(
@@ -176,9 +149,8 @@ def create_observation_builder(
     del static_info
     del track_geometry
 
-    return ObservationBuilder(
-        TyreDynamicsCalculator(front_axle_distance, rear_axle_distance),
-        TrackPerceptionCalculator(),
+    return ObservationBuilder.create(
+        front_axle_distance=front_axle_distance, rear_axle_distance=rear_axle_distance,
     )
 
 
@@ -223,21 +195,7 @@ def estimate_axle_distances() -> tuple[float, float]:
         frame = reader.read()
     finally:
         reader.close()
-    fl, fr, rl, rr = frame.tyre_contact_points
-    front = ((fl[0] + fr[0]) / 2, (fl[2] + fr[2]) / 2)
-    rear = ((rl[0] + rr[0]) / 2, (rl[2] + rr[2]) / 2)
-    dx, dz = front[0] - rear[0], front[1] - rear[1]
-    wheelbase = hypot(dx, dz)
-    if not isfinite(wheelbase) or wheelbase <= 0:
-        raise ValueError("Cannot estimate axle distances from invalid tyre positions.")
-    x, _, z = frame.car_coordinates
-    distances = (
-        ((front[0] - x) * dx + (front[1] - z) * dz) / wheelbase,
-        ((x - rear[0]) * dx + (z - rear[1]) * dz) / wheelbase,
-    )
-    if any(not isfinite(value) or value <= 0 for value in distances):
-        raise ValueError("Car origin must lie between the axles; configure explicit axle distances.")
-    return distances
+    return derive_axle_distances(frame)
 
 
 def create_environment(
@@ -340,9 +298,9 @@ def create_training_environment(config: TrainingConfig) -> RacingEnvironment:
         if not front or not rear:
             estimated_front, estimated_rear = estimate_axle_distances()
             front, rear = front or estimated_front, rear or estimated_rear
-        return ObservationBuilder(
-            TyreDynamicsCalculator(front, rear, minimum_speed=settings.minimum_speed),
-            TrackPerceptionCalculator(settings.lookahead_distances, settings.reference_distances),
+        return ObservationBuilder.create(
+            front_axle_distance=front, rear_axle_distance=rear, minimum_speed=settings.minimum_speed,
+            lookahead_distances=settings.lookahead_distances, reference_distances=settings.reference_distances,
         )
 
     def build_termination(projector: TrackProjector) -> EpisodeTerminationChecker:
