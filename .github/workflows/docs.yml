@@ -35,6 +35,8 @@ jobs:
           dependencies = project['project']['optional-dependencies']['docs']
           subprocess.run([sys.executable, '-m', 'pip', 'install', *dependencies], check=True)
           PY
+      - name: Check class diagram analysis
+        run: python -m unittest discover -s scripts/tests -v
       - name: Build and validate documentation
         run: python -m mkdocs build --strict
       - name: Upload GitHub Pages artifact

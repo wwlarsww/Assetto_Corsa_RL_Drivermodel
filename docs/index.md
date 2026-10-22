@@ -33,6 +33,7 @@ ahead. These are [configuration choices](configuration.md), not fixed platform l
 | I want to… | Read |
 | --- | --- |
 | Understand the system | [Architecture](architecture.md) and [a training step](training_step.md) |
+| Explore class dependencies | [Generated class diagrams](diagrams/index.md) |
 | Run the project locally | [Getting started](getting_started.md) |
 | Set up an experiment | [Configuration](configuration.md) |
 | Train, resume or evaluate a model | [Training and evaluation](agent_training.md) |

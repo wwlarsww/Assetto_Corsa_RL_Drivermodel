@@ -8,6 +8,9 @@ library APIs are excluded to keep the reference focused on this project.
 Use the [project overview](../index.md) and [training walkthrough](../training_step.md)
 to understand the design before looking up individual methods here.
 
+Use the [generated class diagrams](../diagrams/index.md) to explore dependencies
+and dependent classes. Module reference pages link directly to their diagrams.
+
 ## Core entry points
 
 | Responsibility | Reference | Concept |

@@ -6,6 +6,7 @@ repo_name: wwlarsww/Assetto_Corsa_RL_Drivermodel
 edit_uri: ''
 use_directory_urls: false
 strict: true
+watch: [src, tools, scripts]
 
 theme:
   name: material
@@ -22,6 +23,7 @@ nav:
   - Project overview:
       - Introduction: index.md
       - Architecture: architecture.md
+      - Class diagrams: diagrams/index.md
       - A training step: training_step.md
   - User guide:
       - Getting started: getting_started.md
@@ -46,6 +48,7 @@ plugins:
   - gen-files:
       scripts:
         - scripts/gen_reference.py
+        - scripts/gen_diagrams.py
   - literate-nav:
       nav_file: SUMMARY.md
   - mkdocstrings:
@@ -66,6 +69,11 @@ plugins:
             merge_init_into_class: true
             show_source: true
 
+extra_javascript:
+  - assets/diagram-controls.js
+extra_css:
+  - assets/diagram-controls.css
+
 markdown_extensions:
   - admonition
   - attr_list
@@ -77,6 +85,9 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.superfences:
       custom_fences:
+        - name: classdiagram
+          class: class-diagram-source
+          format: !!python/name:pymdownx.superfences.fence_code_format
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
