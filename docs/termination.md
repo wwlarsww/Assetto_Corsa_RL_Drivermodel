@@ -35,7 +35,7 @@ and minimum progress. Reward penalties belong to `[reward]`.
 
 The [environment](../src/assetto_corsa_ai/RacingEnvironment.py) accepts an
 external `strong_collision_check`; the current [default factories](../src/assetto_corsa_ai/main.py)
-do not wire a damage detector. [Damage validation](../tools/validate_damage.py)
+do not wire a damage detector. [Damage validation](../tools/validation/validate_damage.py)
 prints raw channels and changes for calibration, without applying a threshold.
 
 Domain failures set Gymnasium `terminated`. Time and step limits instead set

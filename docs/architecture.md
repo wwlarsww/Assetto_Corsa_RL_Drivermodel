@@ -31,7 +31,7 @@ measures 3D polyline progress and signed lateral offset on the AI reference line
 Its geometric progress can differ from AC's spline metadata. Observation
 waypoints and predicted trajectories use vehicle-relative `(forward, left)` metres.
 
-[Track alignment validation](../tools/validate_track_alignment.py) follows the
+[Track alignment validation](../tools/validation/validate_track_alignment.py) follows the
 vehicle in a zoomed X/Z view with its front pointing up. Display rotation and
 translation leave telemetry and projection calculations unchanged. Sampling,
 frame conversion and projection details are documented in the linked code.

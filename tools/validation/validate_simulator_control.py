@@ -2,7 +2,7 @@
 
 import argparse
 from collections.abc import Callable
-from math import acos, cos, degrees, dist, hypot, isfinite, radians
+from math import acos, cos, degrees, dist, isfinite, radians
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -18,6 +18,7 @@ from assetto_corsa_ai.assetto_corsa.session_manager import (
 from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.telemetry import TelemetryFrame, Vector3
+from assetto_corsa_ai.vehicle_geometry import vehicle_forward as derive_vehicle_forward
 
 SAMPLE_INTERVAL_SECONDS = 0.05
 POSITION_TOLERANCE_METRES = 1.0
@@ -31,12 +32,7 @@ PIT_SETTLE_DISTANCE_METRES = 0.05
 def vehicle_forward(telemetry: TelemetryFrame) -> Vector3:
     """Derive forward from front and rear tyre contacts, including at rest."""
 
-    fl, fr, rl, rr = telemetry.tyre_contact_points
-    vector = tuple((fl[i] + fr[i] - rl[i] - rr[i]) / 2.0 for i in range(3))
-    length = hypot(*vector)
-    if not isfinite(length) or length <= 1e-6:
-        raise ValueError("No valid vehicle heading; enter a driving session first.")
-    return vector[0] / length, vector[1] / length, vector[2] / length
+    return derive_vehicle_forward(telemetry.tyre_contact_points)
 
 
 def reset_ready(telemetry: TelemetryFrame, position: Vector3, forward: Vector3) -> bool:

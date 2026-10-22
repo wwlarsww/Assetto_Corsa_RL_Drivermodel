@@ -14,7 +14,8 @@ from assetto_corsa_ai.main import create_agent
 from assetto_corsa_ai.predictor import masked_predictor_loss
 from assetto_corsa_ai.racing_policy import ActionAwareVecNormalize, RacingActorCriticPolicy
 from assetto_corsa_ai.training_config import TrainingConfig
-from tools.validate_predictor import ValidationEnvironment, synthetic_rollout
+from assetto_corsa_ai.agent import PPOAgent
+from tools.validation.validate_predictor import ValidationEnvironment, synthetic_rollout
 
 
 def small_config() -> TrainingConfig:

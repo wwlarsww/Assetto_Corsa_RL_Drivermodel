@@ -9,7 +9,7 @@ from assetto_corsa_ai.assetto_corsa.simulator_controller import (
     SimulatorControllerError,
 )
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
-from tools import validate_vehicle_dynamics as validation
+from tools.validation import validate_vehicle_dynamics as validation
 
 
 @pytest.mark.parametrize("outcome", ["success", "connect_error", "telemetry_error", "interrupted", "close_error"])

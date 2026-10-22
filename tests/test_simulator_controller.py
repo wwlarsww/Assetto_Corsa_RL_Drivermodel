@@ -15,7 +15,7 @@ from assetto_corsa_ai.assetto_corsa.simulator_controller import (
 )
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.telemetry import Vector3
-from tools import validate_simulator_control as validation
+from tools.validation import validate_simulator_control as validation
 
 
 @pytest.fixture

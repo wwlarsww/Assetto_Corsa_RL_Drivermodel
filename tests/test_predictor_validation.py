@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from assetto_corsa_ai.main import create_agent
-from tools import validate_predictor as validation
+from tools.validation import validate_predictor as validation
 from test_racing_policy import small_config
 
 

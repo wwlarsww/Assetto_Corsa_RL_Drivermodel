@@ -23,7 +23,7 @@ from assetto_corsa_ai.training_callbacks import RunMetricsWriter, TrainingRunCal
 from assetto_corsa_ai.training_config import TrainingConfig
 from assetto_corsa_ai.training_run import create_run_directory
 from test_racing_policy import small_config
-from tools.validate_predictor import ValidationEnvironment, synthetic_rollout
+from tools.validation.validate_predictor import ValidationEnvironment, synthetic_rollout
 
 
 class Probe(BaseCallback):

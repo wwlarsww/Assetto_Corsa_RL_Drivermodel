@@ -56,11 +56,11 @@ Assetto Corsa process. Live simulator integration requires Windows and CSP.
 
 | Check | Tool |
 | --- | --- |
-| Following plot of spline, road edges, vehicle and projection | [validate_track_alignment.py](tools/validate_track_alignment.py) |
-| Runtime controls and session launch | [validate_simulator_control.py](tools/validate_simulator_control.py) |
-| Gymnasium/SB3 compatibility and live reset/step | [validate_racing_environment.py](tools/validate_racing_environment.py) |
-| Predictor accuracy and future reward contributions on test/selected data | [validate_predictor.py](tools/validate_predictor.py) |
-| Raw damage for collision calibration | [validate_damage.py](tools/validate_damage.py) |
+| Following plot of spline, road edges, vehicle and projection | [validate_track_alignment.py](tools/validation/validate_track_alignment.py) |
+| Runtime controls and session launch | [validate_simulator_control.py](tools/validation/validate_simulator_control.py) |
+| Gymnasium/SB3 compatibility and live reset/step | [validate_racing_environment.py](tools/validation/validate_racing_environment.py) |
+| Predictor accuracy and future reward contributions on test/selected data | [validate_predictor.py](tools/validation/validate_predictor.py) |
+| Raw damage for collision calibration | [validate_damage.py](tools/validation/validate_damage.py) |
 
 Before training, follow the [live environment validation](docs/racing_environment.md#validation).
 Then copy and adjust [the training configuration](configs/training.toml):

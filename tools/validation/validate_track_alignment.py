@@ -4,7 +4,7 @@
 # Keep strict checks, but exclude unknown member types in this plotting script.
 # pyright: reportUnknownMemberType=false
 
-from math import degrees, hypot, isfinite
+from math import degrees
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -15,13 +15,13 @@ from matplotlib.transforms import Affine2D
 
 from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
-from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader
+from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader, track_ai_path
 from assetto_corsa_ai.observation import Observation
 from assetto_corsa_ai.observation_builder import ObservationBuilder
 from assetto_corsa_ai.telemetry import TelemetryFrame
 from assetto_corsa_ai.track_perception import TrackPerceptionCalculator
 from assetto_corsa_ai.track_projection import TrackProjection, TrackProjector
-from assetto_corsa_ai.tyre_dynamics import TyreDynamicsCalculator
+from assetto_corsa_ai.vehicle_geometry import estimate_axle_distances
 
 # Minimum visible lateral range on each side of the vehicle.
 MIN_LATERAL_VIEW_METRES = 20.0
@@ -33,27 +33,8 @@ MIN_FORWARD_VIEW_METRES = 110.0
 def _vehicle_plot_transform(telemetry: TelemetryFrame) -> Affine2D:
     """Map world X/Z to the same vehicle frame as the observation points."""
 
-    fl, fr, rl, rr = telemetry.tyre_contact_points
-
-    forward_x = (fl[0] + fr[0] - rl[0] - rr[0]) / 2.0
-    forward_z = (fl[2] + fr[2] - rl[2] - rr[2]) / 2.0
-    right_x = (fr[0] + rr[0] - fl[0] - rl[0]) / 2.0
-    right_z = (fr[2] + rr[2] - fl[2] - rl[2]) / 2.0
-
-    forward_length = hypot(forward_x, forward_z)
-    right_length = hypot(right_x, right_z)
-    if (
-        not isfinite(forward_length)
-        or not isfinite(right_length)
-        or forward_length <= 1e-6
-        or right_length <= 1e-6
-    ):
-        raise ValueError("Could not determine the vehicle frame from tyre contacts.")
-
-    forward_x, forward_z = forward_x / forward_length, forward_z / forward_length
-    right_x, right_z = right_x / right_length, right_z / right_length
-    origin_x = (fl[0] + fr[0] + rl[0] + rr[0]) / 4.0
-    origin_z = (fl[2] + fr[2] + rl[2] + rr[2]) / 4.0
+    (origin_x, origin_z), (forward_x, forward_z), (left_x, left_z) = TrackPerceptionCalculator.vehicle_frame(telemetry.tyre_contact_points)
+    right_x, right_z = -left_x, -left_z
 
     return Affine2D.from_values(
         right_x,
@@ -62,81 +43,6 @@ def _vehicle_plot_transform(telemetry: TelemetryFrame) -> Affine2D:
         forward_z,
         -(origin_x * right_x + origin_z * right_z),
         -(origin_x * forward_x + origin_z * forward_z),
-    )
-
-
-def _derive_axle_distances(
-    telemetry: TelemetryFrame,
-) -> tuple[float, float]:
-    """Estimate distances from the vehicle reference point to both axles.
-
-    The tyre contact points define the front and rear axle centres.
-    Their position relative to ``car_coordinates`` is projected onto
-    the vehicle's longitudinal axis.
-
-    If the reported vehicle reference point is not located between the
-    axles, half the wheelbase is used for both distances as a fallback.
-    """
-
-    if len(telemetry.tyre_contact_points) != 4:
-        raise ValueError("Expected tyre contact points for exactly four wheels.")
-
-    front_left, front_right, rear_left, rear_right = telemetry.tyre_contact_points
-
-    front_center_x = (front_left[0] + front_right[0]) / 2.0
-    front_center_z = (front_left[2] + front_right[2]) / 2.0
-
-    rear_center_x = (rear_left[0] + rear_right[0]) / 2.0
-    rear_center_z = (rear_left[2] + rear_right[2]) / 2.0
-
-    heading_x = front_center_x - rear_center_x
-    heading_z = front_center_z - rear_center_z
-
-    wheelbase = hypot(
-        heading_x,
-        heading_z,
-    )
-
-    if not isfinite(wheelbase) or wheelbase <= 1e-6:
-        raise ValueError(
-            "Could not determine a valid vehicle wheelbase " "from tyre contact points."
-        )
-
-    forward_x = heading_x / wheelbase
-    forward_z = heading_z / wheelbase
-
-    vehicle_x = telemetry.car_coordinates[0]
-    vehicle_z = telemetry.car_coordinates[2]
-
-    front_axle_distance = (front_center_x - vehicle_x) * forward_x + (
-        front_center_z - vehicle_z
-    ) * forward_z
-
-    rear_axle_distance = (vehicle_x - rear_center_x) * forward_x + (
-        vehicle_z - rear_center_z
-    ) * forward_z
-
-    # car_coordinates should normally lie between both axles.
-    # If this is not the case, use the geometric vehicle centre
-    # as a conservative fallback for this validation tool.
-    if (
-        front_axle_distance <= 0.0
-        or rear_axle_distance <= 0.0
-        or not isfinite(front_axle_distance)
-        or not isfinite(rear_axle_distance)
-    ):
-        print(
-            "Warning: vehicle reference point could not be located "
-            "between the axles."
-        )
-        print("Using half the wheelbase for front and rear axle distance.")
-
-        front_axle_distance = wheelbase / 2.0
-        rear_axle_distance = wheelbase / 2.0
-
-    return (
-        front_axle_distance,
-        rear_axle_distance,
     )
 
 
@@ -269,11 +175,6 @@ def _update_status(
 def main() -> None:
     """Visualize the complete RL observation in vehicle coordinates."""
 
-    track_file = Path(
-        r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
-        r"\content\tracks\monza\ai\fast_lane.ai"
-    )
-
     # --------------------------------------------------------------
     # Read static vehicle and track data
     # --------------------------------------------------------------
@@ -283,7 +184,7 @@ def main() -> None:
 
     print(f"Track: {static_info.track_name}")
 
-    track_reader = AssettoCorsaTrackReader(track_file)
+    track_reader = AssettoCorsaTrackReader(track_ai_path(static_info, Path(r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa")))
 
     track_geometry = track_reader.read()
 
@@ -305,7 +206,7 @@ def main() -> None:
     try:
         initial_telemetry = telemetry_reader.read()
 
-        front_axle_distance, rear_axle_distance = _derive_axle_distances(
+        front_axle_distance, rear_axle_distance = estimate_axle_distances(
             initial_telemetry
         )
 
@@ -317,16 +218,8 @@ def main() -> None:
         # Observation pipeline
         # ----------------------------------------------------------
 
-        tyre_dynamics_calculator = TyreDynamicsCalculator(
-            front_axle_distance=front_axle_distance,
-            rear_axle_distance=rear_axle_distance,
-        )
-
-        track_perception_calculator = TrackPerceptionCalculator()
-
-        observation_builder = ObservationBuilder(
-            tyre_dynamics_calculator=tyre_dynamics_calculator,
-            track_perception_calculator=track_perception_calculator,
+        observation_builder = ObservationBuilder.create(
+            front_axle_distance=front_axle_distance, rear_axle_distance=rear_axle_distance,
         )
 
         # ----------------------------------------------------------
@@ -483,7 +376,7 @@ def main() -> None:
                 telemetry=telemetry,
                 static_info=static_info,
                 track_geometry=track_geometry,
-                current_s=projection.distance_along_track,
+                current_s=projection.spline_distance(track_geometry, static_info.track_spline_length),
             )
 
             # ------------------------------------------------------

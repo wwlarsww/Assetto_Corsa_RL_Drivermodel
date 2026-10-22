@@ -54,16 +54,16 @@ fixed throughout PPO updates.
 
 ## Validation
 
-[validate_predictor.py](../tools/validate_predictor.py) compares predictions
+[validate_predictor.py](../tools/validation/validate_predictor.py) compares predictions
 with test/selected trajectories and prints errors, reference projections,
 per-horizon reward contributions and the total reward:
 
 ```powershell
 # Fresh, untrained model on synthetic data; inspect the full reward weight.
-python tools/validate_predictor.py --training-step 50000 --plot
+python tools/validate.py predictor --training-step 50000 --plot
 
 # Saved model with its own config and normalization.
-python tools/validate_predictor.py --checkpoint runs/<run_name>/final --plot
+python tools/validate.py predictor --checkpoint runs/<run_name>/final --plot
 ```
 
 Selected NPZ data requires its matching `--reference-line fast_lane.ai`.

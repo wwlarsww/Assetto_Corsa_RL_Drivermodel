@@ -15,7 +15,7 @@ from assetto_corsa_ai.RacingEnvironment import EpisodeStart, RacingEnvironment
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.telemetry import TelemetryFrame
 from assetto_corsa_ai.track_geometry import TrackGeometry, TrackPoint
-from tools import validate_racing_environment as validation
+from tools.validation import validate_racing_environment as validation
 
 
 @pytest.fixture

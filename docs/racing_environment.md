@@ -60,7 +60,7 @@ Failed attempts are bounded; explicitly supplied starts are never resampled.
 are disabled until the raw spline speed unit has been validated; set
 `reference_speed_unit` to `"kmh"` or `"mps"` before enabling them. Archived
 configs without `[start]` retain stationary resets. Validate a configured reset
-without PPO using `python tools/validate_racing_environment.py --config configs/training.toml --steps 0`.
+without PPO using `python tools/validate.py environment --config configs/training.toml --steps 0`.
 
 In the run config, `max_episode_time = 0` and `max_episode_steps = 0`
 disable their respective limits.
@@ -72,11 +72,11 @@ in [the environment source](../src/assetto_corsa_ai/RacingEnvironment.py).
 
 ## Validation
 
-Close AC and run [the live validator](../tools/validate_racing_environment.py)
+Close AC and run [the live validator](../tools/validation/validate_racing_environment.py)
 from the project virtual environment:
 
 ```powershell
-python tools/validate_racing_environment.py --check-env --steps 10 --action 0 0.15
+python tools/validate.py environment --check-env --steps 10 --action 0 0.15
 ```
 
 The default factory launches BMW Z4 GT3 at Monza. Enter Drive/Start, leave the

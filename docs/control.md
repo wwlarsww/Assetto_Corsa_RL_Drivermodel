@@ -42,11 +42,11 @@ not yet verified. API and shared-memory details are in
 
 ## Live Validation
 
-With an active driving session, run [the validation tool](../tools/validate_simulator_control.py)
+With an active driving session, run [the validation tool](../tools/validation/validate_simulator_control.py)
 from the repository root in the project virtual environment:
 
 ```powershell
-python tools/validate_simulator_control.py
+python tools/validate.py controls
 ```
 
 It supports control checks, pose capture/reset, pit teleport and inspection of
@@ -56,7 +56,7 @@ see [session validation](session_manager.md#live-validation).
 The corrected pit teleport was confirmed with BMW Z4 GT3, Monza and CSP 0.2.11.
 In this setup the native pit pose faces backwards; the test turns the stationary
 vehicle by 180 degrees and verifies its heading. The correction remains in
-[the validation tool](../tools/validate_simulator_control.py).
+[the validation tool](../tools/validation/validate_simulator_control.py).
 
-[Vehicle dynamics validation](../tools/validate_vehicle_dynamics.py) provides
+[Vehicle dynamics validation](../tools/validation/validate_vehicle_dynamics.py) provides
 an automated manoeuvre sequence with acceleration, yaw and wheel-slip readouts.

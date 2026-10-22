@@ -28,12 +28,12 @@ Training supplies these settings through
 
 ## Live Validation
 
-Close AC first, then run [the simulator validator](../tools/validate_simulator_control.py)
+Close AC first, then run [the simulator validator](../tools/validation/validate_simulator_control.py)
 from the project virtual environment:
 
 ```powershell
-python tools/validate_simulator_control.py --launch-only --car bmw_z4_gt3 --track monza
-python tools/validate_simulator_control.py --launch --car bmw_z4_gt3 --track monza
+python tools/validate.py controls --launch-only --car bmw_z4_gt3 --track monza
+python tools/validate.py controls --launch --car bmw_z4_gt3 --track monza
 ```
 
 With `--launch-only`, select Drive/Start and inspect the game; Enter in the

@@ -18,7 +18,7 @@ from matplotlib.transforms import Affine2D
 
 from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
-from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader
+from assetto_corsa_ai.assetto_corsa.track_reader import AssettoCorsaTrackReader, track_ai_path
 from assetto_corsa_ai.reward import (
     Reward,
     RewardCalculator,
@@ -395,11 +395,6 @@ def _update_status(
 def main() -> None:
     """Run live reward and termination validation."""
 
-    track_file = Path(
-        r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa"
-        r"\content\tracks\monza\ai\fast_lane.ai"
-    )
-
     # ------------------------------------------------------------------
     # Assetto Corsa data
     # ------------------------------------------------------------------
@@ -409,7 +404,7 @@ def main() -> None:
 
     static_info = static_reader.read()
 
-    track_reader = AssettoCorsaTrackReader(track_file)
+    track_reader = AssettoCorsaTrackReader(track_ai_path(static_info, Path(r"C:\Program Files (x86)\Steam\steamapps\common\assettocorsa")))
 
     track_geometry = track_reader.read()
 

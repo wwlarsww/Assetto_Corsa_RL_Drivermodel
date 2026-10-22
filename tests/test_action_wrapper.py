@@ -19,7 +19,7 @@ from assetto_corsa_ai.racing_ppo import RacingPPO
 from assetto_corsa_ai.training_callbacks import RunMetricsWriter, TrainingRunCallback
 from assetto_corsa_ai.training_run import create_run_directory
 from test_racing_policy import small_config
-from tools.validate_predictor import ValidationEnvironment, synthetic_rollout
+from tools.validation.validate_predictor import ValidationEnvironment, synthetic_rollout
 
 
 def test_filter_tracks_applied_controls_and_resets_episode_history() -> None:

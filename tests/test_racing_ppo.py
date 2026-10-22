@@ -16,7 +16,7 @@ from assetto_corsa_ai.racing_ppo import RacingPPO, RacingRolloutBuffer
 from assetto_corsa_ai.training_callbacks import RunMetricsWriter, TrainingRunCallback
 from assetto_corsa_ai.training_run import create_run_directory
 from test_racing_policy import small_config
-from tools.validate_predictor import ValidationEnvironment, synthetic_rollout
+from tools.validation.validate_predictor import ValidationEnvironment, synthetic_rollout
 
 
 def test_short_predictor_training_logs_and_restores_all_heads(tmp_path: Path) -> None:

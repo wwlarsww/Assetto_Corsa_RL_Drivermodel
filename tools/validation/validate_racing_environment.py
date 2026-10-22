@@ -9,16 +9,16 @@ Default factory:
 The factory must be a zero-argument callable returning a RacingEnvironment.
 
 Examples:
-    python tools/validate_racing_environment.py
+    python tools/validate.py environment
 
-    python tools/validate_racing_environment.py \
+    python tools/validate.py environment \
         --factory assetto_corsa_ai.main:create_environment \
         --steps 10 \
         --action 0.0 0.15
 
     # Runs Stable-Baselines3's checker. Warning: check_env() performs resets
     # and sampled actions, so use this only while Assetto Corsa is ready.
-    python tools/validate_racing_environment.py --check-env
+    python tools/validate.py environment --check-env
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import argparse
 from collections.abc import Callable
 import importlib
 from pathlib import Path
-from math import hypot, isfinite
+from math import isfinite
 from typing import Any, cast
 
 import numpy as np
@@ -36,6 +36,7 @@ from stable_baselines3.common.env_checker import check_env
 from assetto_corsa_ai.RacingEnvironment import EpisodeStart, RacingEnvironment, StartSampler
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.track_geometry import TrackGeometry
+from assetto_corsa_ai.vehicle_geometry import vehicle_forward
 
 DEFAULT_FACTORY = "assetto_corsa_ai.main:create_environment"
 DEFAULT_SEED = 42
@@ -443,13 +444,7 @@ def captured_start_sampler() -> StartSampler:
                 reader.close()
             if not isfinite(frame.speed_kmh) or abs(frame.speed_kmh) > 1.0:
                 raise ValueError("Stop the car before capturing the validation start pose.")
-            fl, fr, rl, rr = frame.tyre_contact_points
-            vector = tuple((fl[i] + fr[i] - rl[i] - rr[i]) / 2.0 for i in range(3))
-            length = hypot(*vector)
-            if not isfinite(length) or length <= 1e-6:
-                raise ValueError("Cannot capture a heading from tyre contact points.")
-            captured = EpisodeStart(frame.car_coordinates,
-                                    (vector[0] / length, vector[1] / length, vector[2] / length))
+            captured = EpisodeStart(frame.car_coordinates, vehicle_forward(frame.tyre_contact_points))
             print(f"Validation start pose: {captured}", flush=True)
         return captured
 

@@ -13,7 +13,7 @@ from assetto_corsa_ai.assetto_corsa.simulator_controller import (
 )
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
 from assetto_corsa_ai.telemetry import TelemetryFrame, Vector3
-from tools import validate_simulator_control as validation
+from tools.validation import validate_simulator_control as validation
 
 
 def frame(position: Vector3, forward: Vector3 = (0.0, 0.0, 1.0)) -> TelemetryFrame:

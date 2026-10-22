@@ -12,7 +12,7 @@ from assetto_corsa_ai.assetto_corsa.session_manager import (
 from assetto_corsa_ai.assetto_corsa.simulator_controller import AssettoCorsaSimulatorController
 from assetto_corsa_ai.assetto_corsa.static_info_reader import StaticInfoReader
 from assetto_corsa_ai.assetto_corsa.telemetry_reader import TelemetryReader
-from tools import validate_simulator_control as validation
+from tools.validation import validate_simulator_control as validation
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "already_running", "access_denied", "connection_failure"])
