@@ -50,13 +50,20 @@ road ahead:
 
 ## What the rewards encourage
 
-- **Forward progress:** reward for advancing along the track's reference line.
-- **Line following:** a higher style reward closer to that reference line.
-- **Avoiding episode failures:** penalties for off-track driving, getting stuck
-  or prolonged backward driving; collision penalties require a connected detector.
+The reward follows a simple idea:
 
-Weights control the balance between progress and line following.
-See the [reward design](reward.md) for the full breakdown.
+$$
+\text{reward} = \text{progress} + \text{line following} - \text{failure penalties}.
+$$
+
+- **Make progress:** move forward along the track.
+- **Follow the line:** stay close to the reference line.
+- **Avoid failures:** leaving the track or making too little forward progress
+  ends the episode with a penalty.
+
+Configurable weights balance these goals. The
+[reward guide](reward.md#step-reward-in-equations) explains the formulas,
+thresholds and optional prediction rewards.
 
 ## Learning to anticipate motion
 

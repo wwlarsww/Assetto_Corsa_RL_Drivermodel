@@ -55,6 +55,43 @@ The returned `Reward` exposes all components separately in the environment's
 calculator supplies its penalty. Weights, style tolerance and penalties come
 from `[reward]` in [config.toml](../configs/training.toml).
 
+## Step reward in equations
+
+Without the optional prediction terms, the step reward is:
+
+$$
+r_t^{\text{step}} =
+w_p\,\Delta s_t
++ w_l\,\exp\left(-\frac{d_t^2}{2\sigma^2}\right)
++ p_t.
+$$
+
+Here, $\Delta s_t$ is signed forward progress in metres, with start/finish
+wraparound handled by the progress calculation. The lateral distance from the
+reference line is $d_t$. The tolerance $\sigma$ controls how quickly the
+line-following reward falls with distance.
+
+The weights $w_p$ and $w_l$ correspond to `performance_weight` and
+`style_weight`. Increasing them emphasizes progress or line following,
+respectively. Failure penalties are already negative:
+
+$$
+p_t =
+\begin{cases}
+p_{\text{offtrack}}, & \text{off-track termination},\\
+p_{\text{collision}}, & \text{strong collision reported by a connected detector},\\
+p_{\text{stuck}}, & \text{stuck or wrong-way termination},\\
+0, & \text{otherwise}.
+\end{cases}
+$$
+
+These are the separate `off_track_penalty`, `collision_penalty` and
+`stuck_penalty` settings. More negative values make the corresponding failures
+more costly. The default factories do not connect a collision detector.
+
+When enabled, prediction rewards add anticipated progress and line-following
+terms to this actual step reward, as described below.
+
 ## Future Predictor Reward
 
 [FuturePredictorRewardCalculator](../src/assetto_corsa_ai/future_reward.py)
