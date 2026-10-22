@@ -57,12 +57,13 @@ class ObservationBuilder:
     ) -> Observation:
         """Create an observation from the current simulator state.
 
-        Track coordinates are expected to already be expressed relative to
-        the vehicle, for example as ``(forward, lateral)`` coordinates.
+        Telemetry and track geometry use AC world coordinates. The perception
+        calculator transforms sampled road points into local (forward, left)
+        metres; the tyre calculator derives axle slip from telemetry.
 
-        Slip ratios and slip angles are accepted as derived values because
-        their calculation depends on additional vehicle-dynamics logic and
-        should not be hidden inside the observation builder.
+        current_s is distance in the AI spline's metadata coordinate, not the
+        projector's geometric progress. The returned Observation retains
+        physical units; agent-side normalization is applied separately.
         """
         tyre_dynamics = self._tyre_dynamics_calculator.calculate(
             telemetry=telemetry,

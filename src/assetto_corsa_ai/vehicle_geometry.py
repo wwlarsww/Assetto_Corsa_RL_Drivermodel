@@ -6,7 +6,7 @@ from assetto_corsa_ai.telemetry import TelemetryFrame, Vector3
 
 
 def vehicle_forward(tyre_contact_points: tuple[Vector3, ...]) -> Vector3:
-    """Unit front-to-rear direction in AC world coordinates, including at rest."""
+    """Unit rear-to-front direction in AC world coordinates, including at rest."""
     if len(tyre_contact_points) != 4:
         raise ValueError("Expected tyre contact points for exactly four wheels.")
     fl, fr, rl, rr = tyre_contact_points

@@ -38,6 +38,13 @@ class ActionAwareVecNormalize(VecNormalize):
 
 
 class RacingActorCriticPolicy(ActorCriticPolicy):
+    """Shared-feature policy, value head and optional trajectory predictor.
+
+    Delta mode combines sampled increments with current applied controls.
+    The optional longitudinal mean initializes a trainable actor bias once;
+    it does not force throttle during training or overwrite loaded weights.
+    """
+
     def __init__(
         self, observation_space: Box[np.float32], action_space: Box[np.float32],
         lr_schedule: Schedule, *, predictor_layers: tuple[int, ...] = (),

@@ -7,7 +7,16 @@ Point2D = tuple[float, float]
 
 @dataclass(frozen=True)
 class Observation:
-    """Represent one observation of the vehicle state and track perception."""
+    """Vehicle state, road perception and applied controls for one timestep.
+
+    Speed is in m/s, accelerations in g, yaw rate in rad/s and slip angles in
+    radians. Boundary and reference points use local (forward, left) metres.
+    Steering and longitudinal control use [-1, 1]; positive longitudinal
+    control means throttle and negative means brake.
+
+    to_array() fixes the feature ordering and returns unnormalized float32
+    values, with the two applied controls last.
+    """
 
     # Vehicle dynamics
     speed: float

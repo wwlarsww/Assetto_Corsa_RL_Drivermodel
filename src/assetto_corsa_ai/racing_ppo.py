@@ -120,6 +120,15 @@ class _PoseCallback(BaseCallback):
 
 
 class RacingPPO(PPO):
+    """PPO with masked supervision for an auxiliary trajectory predictor.
+
+    Real future poses from each rollout supervise vehicle-relative prediction
+    points. One optimizer updates the predictor and PPO heads through their
+    shared features. Collected rewards remain fixed throughout optimization.
+    completed_policy_updates counts finished rollout/optimization phases,
+    rather than the optimization epochs counted by SB3's internal counter.
+    """
+
     num_timesteps: int
 
     def __init__(

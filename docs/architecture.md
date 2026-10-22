@@ -5,7 +5,24 @@
 The project separates Assetto Corsa integration, simulator-independent domain
 calculations and learning. [The composition root](../src/assetto_corsa_ai/main.py)
 builds the environment and agent from [the run configuration](../configs/training.toml).
-The [README data flow](../README.md#system-overview) shows the simulator/agent loop.
+The [project overview](index.md#system-overview) shows the simulator/agent loop.
+For a concrete walkthrough, read [a training step](training_step.md).
+
+## Repository map
+
+| Location | Contents |
+| --- | --- |
+| `src/assetto_corsa_ai/` | Simulator-independent data, geometry, environment, learning and run management |
+| `src/assetto_corsa_ai/assetto_corsa/` | Simulator-specific readers, controls and session lifecycle |
+| `configs/` | TOML experiment settings |
+| `tools/validation/` | Focused offline and live validators, selected through `tools/validate.py` |
+| `tools/diagnostics/` | Independent live monitoring, recording and replay |
+| `tests/` | Synthetic component tests and mocked integration tests |
+| `docs/` | Maintained project and concept guides |
+| `scripts/gen_reference.py` | Build-time API page generation and documentation link resolution |
+| `runs/`, `recordings/` | Local experiment artifacts, excluded from Git |
+
+## Component boundaries
 
 | Responsibility | Concept | Code |
 | --- | --- | --- |

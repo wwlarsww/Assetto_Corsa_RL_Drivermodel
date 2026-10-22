@@ -70,12 +70,12 @@ enabled = true
 performance_weight = 0.05
 style_weight = 0.05
 horizon_discount = 0.95
-warmup_steps = 0 # Only auxiliary training during warmup
-ramp_steps = 0 # Ramp up the auxiliary loss weight over this many steps
+warmup_steps = 0 # Keep prediction reward weights at zero; PPO and predictor still train
+ramp_steps = 0 # Ramp prediction reward weights to their configured values
 
 [termination]
 stuck_time = 2.0 # Time in seconds to consider the car stuck (0 disables stuck termination)
-minimum_progress = 1.0 # Minimum progress in meters per step to avoid termination (0 disables minimum progress termination)
+minimum_progress = 1.0 # Required net forward progress in meters over the stuck_time window
 
 [ppo]
 initial_action_std = 0.50 # Initial Gaussian standard deviation; learned during training

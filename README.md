@@ -1,76 +1,58 @@
-# Assetto Corsa RL
+# Assetto Corsa RL Drivermodel
 
-## Project Goal
+A modular reinforcement learning platform for autonomous driving in Assetto
+Corsa. A Gymnasium environment connects simulator telemetry and CSP controls
+to PPO, with a shared feature extractor for policy, value and an auxiliary
+trajectory predictor.
 
-Build a modular reinforcement learning platform for autonomous driving in
-Assetto Corsa. The project grows incrementally, with clear responsibilities,
-testable components and reproducible training runs.
+**[Read the documentation](https://wwlarsww.github.io/Assetto_Corsa_RL_Drivermodel/)**
+for the project overview, architecture, user guide and generated Python API
+reference. The current source tree replaces the earlier implementation;
+the earlier Git history remains available.
 
-## System Overview
+## Start here
 
-```text
-Assetto Corsa
-    ↓ Telemetry
-Python
-    ↓ Vehicle State
-RL Environment
-    ↓ Observation
-Agent
-    ↓ Vehicle Actions
-RL Environment
-    ↓ Steuerbefehl
-Assetto Corsa
-```
-
-## Current Scope
-
-The system reads telemetry, reconstructs track geometry and exposes a Gymnasium
-environment with CSP controls and session management. PPO uses a shared feature
-extractor for policy, value and an auxiliary trajectory predictor. Optional
-future rewards evaluate detached predictions; each run records configuration,
-provenance, metrics and paired model/normalization checkpoints.
-
-| Topic | Documentation | Implementation |
-| --- | --- | --- |
-| System responsibilities | [Architecture](docs/architecture.md) | [Composition root](src/assetto_corsa_ai/main.py) |
-| Simulator input | [Read layer](docs/input.md) | [AC adapters](src/assetto_corsa_ai/assetto_corsa/) |
-| Controls and sessions | [Control](docs/control.md), [sessions](docs/session_manager.md) | [Controller](src/assetto_corsa_ai/assetto_corsa/simulator_controller.py), [session manager](src/assetto_corsa_ai/assetto_corsa/session_manager.py) |
-| Episodes and observations | [Environment](docs/racing_environment.md), [features](docs/observation.md) | [Environment](src/assetto_corsa_ai/RacingEnvironment.py), [builder](src/assetto_corsa_ai/observation_builder.py) |
-| Reward and termination | [Reward](docs/reward.md), [termination](docs/termination.md) | [Reward calculator](src/assetto_corsa_ai/reward.py), [termination checker](src/assetto_corsa_ai/termination.py) |
-| Learning and run records | [Training](docs/agent_training.md), [predictor](docs/predictor.md) | [Agent](src/assetto_corsa_ai/agent.py), [run management](src/assetto_corsa_ai/training_run.py) |
-| Passive live monitoring and lap replay | [Diagnostics](docs/diagnostics.md) | [Monitor](tools/diagnostics_monitor.py), [sources](tools/diagnostics/sources.py) |
+| Goal | Guide |
+| --- | --- |
+| Understand the platform | [Project overview](docs/index.md), [architecture](docs/architecture.md) |
+| Follow the learning loop | [A training step](docs/training_step.md) |
+| Install and validate | [Getting started](docs/getting_started.md) |
+| Configure an experiment | [Configuration](docs/configuration.md) |
+| Train, resume or evaluate | [Training and evaluation](docs/agent_training.md) |
+| Inspect driving data | [Diagnostics and replay](docs/diagnostics.md) |
+| Build or publish the docs | [Documentation guide](docs/documentation.md) |
 
 ## Development
 
-From the repository root, using the project virtual environment:
+Python 3.12 or later is required. From an activated project environment:
 
 ```powershell
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,docs]"
 python -m pytest -q
+python -m mkdocs serve
 ```
 
-Automated tests use synthetic data and mocked simulator adapters, including
-short PPO updates and checkpoint restoration. They do not require a running
-Assetto Corsa process. Live simulator integration requires Windows and CSP.
+Open <http://127.0.0.1:8000> for the documentation. To generate a static copy
+and validate its links:
 
-## Validation and Training
+```powershell
+python -m mkdocs build --strict
+```
 
-| Check | Tool |
-| --- | --- |
-| Following plot of spline, road edges, vehicle and projection | [validate_track_alignment.py](tools/validation/validate_track_alignment.py) |
-| Runtime controls and session launch | [validate_simulator_control.py](tools/validation/validate_simulator_control.py) |
-| Gymnasium/SB3 compatibility and live reset/step | [validate_racing_environment.py](tools/validation/validate_racing_environment.py) |
-| Predictor accuracy and future reward contributions on test/selected data | [validate_predictor.py](tools/validation/validate_predictor.py) |
-| Raw damage for collision calibration | [validate_damage.py](tools/validation/validate_damage.py) |
+Tests use synthetic data and simulator mocks. Live driving requires Windows,
+Assetto Corsa and CSP. Synthetic tests establish integration correctness;
+driving performance and predictor accuracy need evaluation on real driving data.
 
-Before training, follow the [live environment validation](docs/racing_environment.md#validation).
-Then copy and adjust [the training configuration](configs/training.toml):
+## Training
+
+Complete [live validation](docs/racing_environment.md#validation), then copy
+and adjust [configs/training.toml](configs/training.toml). Set the step budget
+and future reward schedule explicitly before launching:
 
 ```powershell
 python -m assetto_corsa_ai.main train --config configs/training.toml
 ```
 
-Set the step budget and future reward warmup explicitly for each run. Synthetic
-tests establish integration correctness; predictor accuracy still needs real
-driving data. [Training documentation](docs/agent_training.md) explains runs,
-resume and evaluation.
+Runs preserve configuration, software provenance, metrics and paired model /
+normalization checkpoints. See the [training guide](docs/agent_training.md)
+for artifact layout and restoration.
