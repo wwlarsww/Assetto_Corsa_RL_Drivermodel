@@ -1,8 +1,11 @@
 """Read telemetry data from Assetto Corsa shared memory."""
 
 import ctypes
-import mmap 
 from assetto_corsa_ai.telemetry import TelemetryFrame
+from assetto_corsa_ai.assetto_corsa.shared_memory import open_readonly_mapping
+
+_PHYSICS_MAPPING_NAME = "Local\\acpmf_physics"
+_GRAPHICS_MAPPING_NAME = "Local\\acpmf_graphics"
 
 class _PhysicsPage(ctypes.Structure):
     """Describe the relevant part of Assetto Corsa's physics memory layout."""
@@ -148,19 +151,15 @@ class TelemetryReader:
         # Assetto Corsa exposes physics data through a named Windows
         # shared memory region. Access is read only because this class
         # is responsible only for receiving telemetry.
-        self._physics_memory = mmap.mmap(
-            fileno=-1,  # anonymous, not backed by a file
-            length=ctypes.sizeof(_PhysicsPage),
-            tagname="Local\\acpmf_physics",  # named shared memory region
-            access=mmap.ACCESS_READ,
-        )
-
-        self._graphics_memory = mmap.mmap(
-            fileno=-1,
-            length=ctypes.sizeof(_GraphicsPage),
-            tagname="Local\\acpmf_graphics",
-            access=mmap.ACCESS_READ,
-        )
+        self.last_packet_id: int | None = None
+        self.completed_laps: int | None = None
+        self.session_status: int | None = None
+        self._physics_memory = open_readonly_mapping(_PHYSICS_MAPPING_NAME, ctypes.sizeof(_PhysicsPage))
+        try:
+            self._graphics_memory = open_readonly_mapping(_GRAPHICS_MAPPING_NAME, ctypes.sizeof(_GraphicsPage))
+        except OSError:
+            self._physics_memory.close()
+            raise
 
     def read(self) -> TelemetryFrame:
         """Return the current vehicle telemetry."""
@@ -177,12 +176,15 @@ class TelemetryReader:
         physics = _PhysicsPage.from_buffer_copy(
             physics_raw_data
         )
+        self.last_packet_id = int(physics.packetId)
         self._graphics_memory.seek(0)
 
         graphics_raw_data = self._graphics_memory.read(
             ctypes.sizeof(_GraphicsPage)
         )
         graphics = _GraphicsPage.from_buffer_copy(graphics_raw_data)
+        self.completed_laps = int(graphics.completedLaps)
+        self.session_status = int(graphics.status)
 
         # Convert Assetto Corsa specific field names into our internal
         # simulator independent telemetry representation.

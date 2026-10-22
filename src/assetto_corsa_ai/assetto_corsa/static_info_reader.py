@@ -1,11 +1,10 @@
 """Read static information from Assetto Corsa shared memory."""
 
 import ctypes
-from ctypes import wintypes
 import mmap
-import os
 
 from assetto_corsa_ai.static_info import SimulatorStaticInfo
+from assetto_corsa_ai.assetto_corsa.shared_memory import open_readonly_mapping
 
 _STATIC_MAPPING_NAME = "Local\\acpmf_static"
 
@@ -74,31 +73,7 @@ class StaticInfoReader:
     def _open_memory() -> mmap.mmap:
         """Open existing memory without creating a competing AC mapping."""
 
-        if os.name != "nt":
-            raise OSError("Assetto Corsa shared memory is only available on Windows.")
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        open_mapping = kernel32.OpenFileMappingW
-        open_mapping.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-        open_mapping.restype = wintypes.HANDLE
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = [wintypes.HANDLE]
-        close_handle.restype = wintypes.BOOL
-
-        handle = open_mapping(0x0004, False, _STATIC_MAPPING_NAME)  # FILE_MAP_READ
-        if not handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        try:
-            # Keep the existing mapping alive until mmap has its own handle.
-            # Calling mmap without this guard can create read-only memory before
-            # AC starts, causing its SharedMemoryWriter to fail during loading.
-            return mmap.mmap(
-                fileno=-1,
-                length=ctypes.sizeof(_StaticPage),
-                tagname=_STATIC_MAPPING_NAME,
-                access=mmap.ACCESS_READ,
-            )
-        finally:
-            close_handle(handle)
+        return open_readonly_mapping(_STATIC_MAPPING_NAME, ctypes.sizeof(_StaticPage))
 
     def read(self) -> SimulatorStaticInfo:
         """Read static information; raise FileNotFoundError until AC is available."""
