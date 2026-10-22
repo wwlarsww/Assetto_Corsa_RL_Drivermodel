@@ -50,20 +50,24 @@ road ahead:
 
 ## What the rewards encourage
 
-The reward follows a simple idea:
+- **Performance (Step):** progress along the reference line, $r_{p,t}$.
+- **Performance (Look-Ahead):** predicted progress, $\hat{r}_{p,t}$.
+- **Style / Imitation (Step):** proximity to the reference line, $r_{s,t}$.
+- **Style / Imitation (Look-Ahead):** predicted proximity to the line, $\hat{r}_{s,t}$.
+
+These components add up to the overall reward:
 
 $$
-\text{reward} = \text{progress} + \text{line following} - \text{failure penalties}.
+r_t = r_{p,t} + \hat{r}_{p,t}
+    + \lambda_s \left(r_{s,t} + \hat{r}_{s,t}\right)
+    - p_{\text{term}}.
 $$
 
-- **Make progress:** move forward along the track.
-- **Follow the line:** stay close to the reference line.
-- **Avoid failures:** leaving the track or making too little forward progress
-  ends the episode with a penalty.
+- $p_{\text{term}}$: termination penalty magnitude; zero when no failure occurs.
+- $\lambda_s$: configurable weight of the style component (`style_weight`).
 
-Configurable weights balance these goals. The
-[reward guide](reward.md#step-reward-in-equations) explains the formulas,
-thresholds and optional prediction rewards.
+Look-ahead terms come from the predictor and are optional.
+See the [reward guide](reward.md) for details.
 
 ## Learning to anticipate motion
 
